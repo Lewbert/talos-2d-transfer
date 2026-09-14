@@ -150,6 +150,19 @@ def rig():
     return manager, settings, state, slot, service
 
 
+def test_measurement_region_comes_from_settings(rig):
+    """The AF measurement region is a single persisted preference
+    (autofocus.default_roi_norm) — the UI writes it, autofocus reads it,
+    and None means the WHOLE frame. The panel used to pass its own copy,
+    which is how it could claim "Full frame" while autofocus measured the
+    centre crop."""
+    _manager, settings, _state, _slot, service = rig
+    settings.section("autofocus")["default_roi_norm"] = [0.2, 0.3, 0.4, 0.5]
+    assert service._default_roi() == (0.2, 0.3, 0.4, 0.5)
+    settings.section("autofocus")["default_roi_norm"] = None
+    assert service._default_roi() is None
+
+
 def _result(success=True, baseline=1000.0, message="ok"):
     return AutofocusResult(best_position=42, best_score=baseline,
                            success=success, message=message, phase="done",

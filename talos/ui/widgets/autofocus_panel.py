@@ -7,8 +7,6 @@ from __future__ import annotations
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
-    QComboBox,
-    QFormLayout,
     QGroupBox,
     QHBoxLayout,
     QLabel,
@@ -23,37 +21,33 @@ from talos.ui.widgets.sharpness_curve import SharpnessCurveWidget
 
 
 class AutofocusPanel(QGroupBox):
-    def __init__(self, manager, settings, state, service, live_view,
+    def __init__(self, manager, settings, state, service, roi=None,
                  parent: QWidget | None = None):
         super().__init__("Autofocus", parent)
+        from talos.ui.af_region import AfRegionController
+
         self._manager = manager
         self._settings = settings
         self._state = state
         self._service = service
-        self._live_view = live_view
-        saved_roi = settings.section("autofocus").get("default_roi_norm")
-        self._roi_norm: tuple | None = tuple(saved_roi) if saved_roi else None
+        self._roi = roi or AfRegionController(settings)
 
         root = QVBoxLayout(self)
         root.setSpacing(6)
 
-        # --- objective / range readout -------------------------------------
+        # --- objective / region readout ------------------------------------
         self._objective_label = QLabel()
         self._objective_label.setObjectName("dim")
         root.addWidget(self._objective_label)
         state.sig_objective_changed.connect(lambda _i: self._refresh_objective())
-
-        # --- measure area ---------------------------------------------------
-        area_row = QHBoxLayout()
-        area_row.addWidget(QLabel("Measure:"))
-        self._area = QComboBox()
-        self._area.addItems(["Full frame", "ROI", "Select ROI…"])
-        self._area.currentIndexChanged.connect(self._on_area_changed)
-        area_row.addWidget(self._area, stretch=1)
-        root.addLayout(area_row)
-        live_view.sig_roi_selected.connect(self._on_roi_selected)
-        if self._roi_norm is not None:
-            self._area.setCurrentIndex(1)   # restores the saved measure area
+        # The region itself is edited in the AF settings block (right panel
+        # and this window); the panel just states what will be measured.
+        self._roi_label = QLabel()
+        self._roi_label.setObjectName("dim")
+        self._roi_label.setWordWrap(True)
+        root.addWidget(self._roi_label)
+        self._roi.sig_changed.connect(lambda _r: self._refresh_roi())
+        self._refresh_roi()
 
         # --- buttons ---------------------------------------------------------
         btn_row = QHBoxLayout()
@@ -103,49 +97,16 @@ class AutofocusPanel(QGroupBox):
 
     # ------------------------------------------------------------------
 
-    def _current_roi(self) -> tuple | None:
-        return self._roi_norm if self._area.currentIndex() >= 1 else None
-
-    def _on_area_changed(self, index: int) -> None:
-        if index == 2:  # "Select ROI…" arms the rubber band
-            self._live_view.set_roi_selection_mode(True)
-            self._result_label.setText("drag a rectangle on the live view")
-        elif index == 0:
-            self._live_view.set_roi(None)
-        else:
-            self._live_view.set_roi(self._roi_norm)
-
-    def _on_roi_selected(self, roi_norm: tuple | None) -> None:
-        self._roi_norm = roi_norm
-        # Persist the selection: the measure area silently reset to "Full
-        # frame" on every launch (the settings key existed and nothing
-        # read it).
-        self._settings.section("autofocus")["default_roi_norm"] = (
-            list(roi_norm) if roi_norm else None)
-        self._settings.save()
-        if roi_norm is None:
-            self._area.setCurrentIndex(0)
-            self._result_label.setText("selection too small — using full frame")
-        else:
-            self._area.setCurrentIndex(1)
-
-    def set_live_view(self, live_view) -> None:
-        """Retarget the ROI rubber band at a workspace's live view.
-
-        The panel kept the Navigation view forever, so with the Sample
-        Finding tab active the band was armed on the HIDDEN view and
-        dragging on the visible one did nothing."""
-        if live_view is self._live_view:
-            return
-        try:
-            self._live_view.sig_roi_selected.disconnect(self._on_roi_selected)
-        except (RuntimeError, TypeError):
-            pass
-        self._live_view.set_roi_selection_mode(False)
-        self._live_view = live_view
-        live_view.sig_roi_selected.connect(self._on_roi_selected)
-        if self._area.currentIndex() >= 1:
-            live_view.set_roi(self._roi_norm)
+    def _refresh_roi(self) -> None:
+        """State the region the next run will measure (edited in the AF
+        settings block, right panel or this window)."""
+        roi = self._roi.roi()
+        where = self._roi.describe()
+        self._roi_label.setText(f"Measure: {where}")
+        self._roi_label.setToolTip(
+            "Change it under Autofocus → AF ROI"
+            if roi is not None else
+            "The whole frame is scored (Autofocus → AF ROI to crop it)")
 
     def _on_focus_once(self) -> None:
         self._curve.clear()
@@ -153,7 +114,9 @@ class AutofocusPanel(QGroupBox):
         # Enable Abort immediately: the run can be cancelled even during
         # the 350 ms arm window (_on_finished disables it on every path).
         self._abort.setEnabled(True)
-        self._service.start_af_s(roi_norm=self._current_roi())
+        # No roi_norm argument: the service reads the same persisted
+        # region this panel displays (one source of truth).
+        self._service.start_af_s()
 
     # ------------------------------------------------------------------
 

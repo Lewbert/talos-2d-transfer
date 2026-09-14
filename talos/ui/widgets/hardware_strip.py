@@ -271,6 +271,15 @@ class HardwareStrip(QWidget):
         return self._triggers
 
     def update_telem(self, device_key: str, payload: dict) -> None:
+        # The enable gate can change from outside this checkbox (the
+        # gamepad's Start button toggles the D-pad-selected stage).
+        if "enabled" in payload:
+            section = {"zolix": self._xyr, "sigmakoki": self._xyz}.get(device_key)
+            if section is not None:
+                box = section._enable
+                box.blockSignals(True)
+                box.setChecked(bool(payload["enabled"]))
+                box.blockSignals(False)
         if device_key == "zolix":
             self._xyr.set_telem(parse_zolix(payload))
         elif device_key == "sigmakoki":

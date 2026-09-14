@@ -63,6 +63,9 @@ class ActionResolver:
     def __init__(self, settings, state=None):
         self._settings = settings
         self._state = state  # AppState (the selected objective; optional)
+        # Set by resolve() from the gamepad combo gestures (see resolve).
+        self._suppress_focus = False
+        self._suppress_jog = False
         z = settings.device("zolix")
         sk = settings.device("sigmakoki")
         fc = settings.device("focus")
@@ -108,7 +111,9 @@ class ActionResolver:
 
     def resolve(self, key_state: dict[str, float], prev_key_state: dict[str, float],
                 gamepad, now: float | None = None, on_command=None,
-                ui_state: dict[str, tuple] | None = None) -> list:
+                ui_state: dict[str, tuple] | None = None,
+                suppress_focus: bool = False,
+                suppress_jog: bool = False) -> list:
         """Resolve one input tick into command tuples.
 
         ``key_state``: keysym → press timestamp for keys CURRENTLY down.
@@ -118,7 +123,15 @@ class ActionResolver:
         ``ui_state``: "stage:axis" → (press_time, direction) for on-screen
         hold buttons (reference UI-button branch).
         ``on_command``: callable(command_tuple) — defaults to collecting.
+
+        ``suppress_focus`` / ``suppress_jog``: the gamepad COMBO gestures
+        (LT+RT autofocus, LB+RB stop) own those inputs while they are held —
+        starts are not emitted, and the normal release path stops whatever
+        was already moving (an AF run must not be aborted by the residual
+        trigger imbalance of the very gesture that started it).
         """
+        self._suppress_focus = bool(suppress_focus)
+        self._suppress_jog = bool(suppress_jog)
         now = now if now is not None else time.monotonic()
         commands: list = []
         emit = on_command or commands.append
@@ -289,6 +302,19 @@ class ActionResolver:
     # ------------------------------------------------------------------
 
     def _handle_sticks(self, gamepad, claimed, emit) -> None:
+        if self._suppress_jog:
+            # The LB+RB gesture owns the sticks: stop what a stick is
+            # driving and emit no new jogs (the stick branch's own stop
+            # lives in the deflection check below, which this return would
+            # skip — releasing the claims here is what actually halts the
+            # axis). Holding both bumpers is an unambiguous stop gesture,
+            # not a fast modifier.
+            for ck in list(self._continuous_stick):
+                stage_id, axis = ck.split(":", 1)
+                emit((stage_id, axis, "continuous_stop", 0, 0.0,
+                      "gamepad_stick"))
+                del self._continuous_stick[ck]
+            return
         # Left stick → SigmaKoki (analog per-axis, 10% deadzone).
         fast = gamepad.button_left_shoulder
         mult = self._objective_multiplier("stage")
@@ -377,6 +403,8 @@ class ActionResolver:
             self._continuous_stick[ck] = True
 
     def _handle_dpad(self, gamepad, now, claimed, emit) -> None:
+        if self._suppress_jog:
+            return   # the LB+RB stop gesture owns the pad too
         stage_id = self._dpad_stage
         fast = (gamepad.button_left_shoulder if stage_id == "sigmakoki"
                 else gamepad.button_right_shoulder)
@@ -448,6 +476,17 @@ class ActionResolver:
                     self._continuous_speed[claim_key] = speed
 
     def _handle_triggers(self, gamepad, claimed, emit) -> None:
+        if self._suppress_focus:
+            # The LT+RT gesture owns the triggers: stop whatever the
+            # triggers were driving and emit no starts. Both halves matter —
+            # a jog still running when the AF starts would abort the run it
+            # just asked for (any focus command aborts a running AF), and
+            # the gesture's own residual imbalance (LT 0.8 / RT 1.0 = a
+            # small net jog) must not become one either.
+            if self._focus_active:
+                emit(("focus", "z", "continuous_stop", 0, 0.0, "gamepad_trigger"))
+                self._focus_active = False
+            return
         mult = self._objective_multiplier("focus")
         focus_min = self._focus_min * mult
         focus_max = self._focus_max * mult

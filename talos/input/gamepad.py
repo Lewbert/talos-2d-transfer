@@ -98,7 +98,13 @@ def normalize_axis(value: int, deadzone: float, gamma: float) -> float:
 
 
 def map_button_event(event) -> tuple[str, dict] | None:
-    """Pure mapping for discrete buttons (kept for tests/porting)."""
+    """Pure mapping for discrete buttons (kept for tests/porting).
+
+    NOTE: this is the REFERENCE mapping, not what the app runs. The live
+    path is InputSystem._on_state, which reads the XInput button edges:
+    Start = STOP ALL, **Back = cycle which stage the D-pad drives** (it does
+    NOT stop motion). Only the face-button presets match here.
+    """
     code = event.code
     state = event.state
     if code in ("BTN_START", "BTN_SELECT") and state:

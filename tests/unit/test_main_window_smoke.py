@@ -28,6 +28,7 @@ class StubManager(QObject):
         self.camera = StubCamera()
         self.camera_props = {}
         self.focus_position = 0
+        self._enabled: dict[str, bool] = {}
         self.stopped = 0
         self.camera_submits: list = []
         self.submits: list = []
@@ -49,8 +50,14 @@ class StubManager(QObject):
         self._job += 1
         return self._job
 
+    def is_enabled(self, key):
+        return self._enabled.get(key, True)
+
     def set_enabled(self, key, on):
-        pass
+        # Mirrors InstrumentManager: the gate is broadcast so every enable
+        # control (strip checkbox, Stage Control panel) follows.
+        self._enabled[key] = on
+        self.sig_device_state.emit(key, {"enabled": on})
 
 
 class StubAutofocusService(QObject):
@@ -315,6 +322,24 @@ def test_telemetry_updates_strip(window):
     })
     assert window._leds["zolix"].state() == "on"
     assert window._strip._xyr._pos.text().startswith("1.2")
+
+
+def test_enable_gate_reaches_every_checkbox(window):
+    """The gamepad's Start toggles a stage's enable gate via the manager,
+    which broadcasts it: the strip's checkbox and the Stage Control panel's
+    must both follow, without re-emitting the toggle back."""
+    strip_box = window._strip._xyr._enable
+    panel_box = window._stage_window._panels["zolix"]._enable
+    emitted = []
+    strip_box.toggled.connect(emitted.append)
+
+    window._manager.set_enabled("zolix", False)
+    assert strip_box.isChecked() is False
+    assert panel_box.isChecked() is False
+    assert emitted == [], "a programmatic sync must not re-emit toggled"
+    window._manager.set_enabled("zolix", True)
+    assert strip_box.isChecked() is True
+    assert window._manager.is_enabled("zolix") is True
 
 
 def test_snapshot_flow_submits_4k_and_clears_busy(window, tmp_path):

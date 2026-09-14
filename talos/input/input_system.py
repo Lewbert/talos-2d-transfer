@@ -23,6 +23,11 @@ logger = logging.getLogger(__name__)
 
 POLL_HZ = 60
 RELEASE_CHURN_S = 0.05  # release+press gap below this = auto-repeat churn
+# Gamepad combo gestures: hold BOTH controls this long before the action
+# fires (a brush past a bumper must not stop a running job), and both
+# inputs must pass this level for a trigger pair to count as a gesture.
+COMBO_HOLD_S = 0.20
+COMBO_TRIGGER_LEVEL = 0.5
 # Dead-man switch for on-screen holds: a hold whose release signal is lost
 # must not jog the axis forever. Longer than any plausible manual hold.
 MAX_UI_HOLD_S = 60.0
@@ -31,6 +36,7 @@ MAX_UI_HOLD_S = 60.0
 class InputSystem(QObject):
     sig_log = Signal(str)
     sig_dpad_stage = Signal(str)
+    sig_af_requested = Signal()   # gamepad LT+RT: run autofocus once
 
     def __init__(self, manager, settings, state=None, parent: QObject | None = None):
         super().__init__(parent)
@@ -50,6 +56,10 @@ class InputSystem(QObject):
         self._last_continuous: dict[str, tuple] = {}
         self._ui_state: dict[str, tuple] = {}
         self._last_ui_step: dict[str, float] = {}
+        # Combo-gesture state: when each gesture started, and which ones
+        # have already fired for the current press.
+        self._combo_since: dict[str, float] = {}
+        self._combo_fired: set[str] = set()
         self._resolver = ActionResolver(settings, state=state)
         self.gamepad = GamepadController(settings)
         self.gamepad.sig_state.connect(self._on_state)
@@ -149,15 +159,68 @@ class InputSystem(QObject):
     # ------------------------------------------------------------------
 
     def _on_state(self, state) -> None:
-        # Start = STOP ALL; Back toggles the D-pad stage (reference logic).
-        if state.edges.get("start"):
-            self._esc_latch = True
-            self._manager.stop_all()
+        # Reference mapping: Back cycles the D-pad stage, Start toggles the
+        # enable gate of the stage Back selected. Disabling stops that stage
+        # and drops its commands (manager.set_enabled), so Start still halts
+        # the axis you are driving — but the GLOBAL emergency stop is Esc.
         if state.edges.get("back"):
             new_stage = self._resolver.toggle_dpad_stage()
             self.sig_dpad_stage.emit(new_stage)
-            self.sig_log.emit(f"gamepad D-pad stage: {new_stage}")
+            self.sig_log.emit(
+                f"gamepad D-pad stage: {new_stage} "
+                f"({'enabled' if self._manager.is_enabled(new_stage) else 'DISABLED'})")
+        if state.edges.get("start"):
+            stage_id = self._resolver.dpad_stage
+            enabled = not self._manager.is_enabled(stage_id)
+            self._manager.set_enabled(stage_id, enabled)
+            self.sig_log.emit(
+                f"gamepad Start: {stage_id} "
+                f"{'enabled' if enabled else 'DISABLED — commands dropped'}")
+        self._check_combos(state)
         self._gamepad_state = state
+
+    # --- combo gestures (both triggers = AF, both bumpers = stop) ---------
+
+    def _check_combos(self, state) -> None:
+        """Two-finger gestures, held briefly so a brush cannot fire them.
+
+        LT+RT: autofocus once (the triggers' focus jog is suppressed while
+        both are held — see ActionResolver.resolve). LB+RB: STOP ALL, with
+        the Esc latch, so nothing restarts until everything is released.
+        """
+        now = time.monotonic()
+        both_triggers = (float(state.left_trigger) >= COMBO_TRIGGER_LEVEL
+                         and float(state.right_trigger) >= COMBO_TRIGGER_LEVEL)
+        both_bumpers = bool(state.button_left_shoulder
+                            and state.button_right_shoulder)
+        self._arm_combo("af", both_triggers, now, self._fire_af_combo)
+        self._arm_combo("stop", both_bumpers, now, self._fire_stop_combo)
+
+    def _arm_combo(self, name: str, active: bool, now: float, fire) -> None:
+        if not active:
+            self._combo_since.pop(name, None)
+            self._combo_fired.discard(name)
+            return
+        if name in self._combo_fired:
+            return                      # one action per press
+        since = self._combo_since.setdefault(name, now)
+        if now - since >= COMBO_HOLD_S:
+            self._combo_fired.add(name)
+            fire()
+
+    def _fire_af_combo(self) -> None:
+        mode = getattr(self._state, "mode", "MANUAL") if self._state else "MANUAL"
+        if mode != "MANUAL":
+            self.sig_log.emit(
+                f"gamepad LT+RT: {mode.lower()} owns the axes — "
+                "autofocus not started")
+            return
+        self.sig_log.emit("gamepad LT+RT: autofocus once")
+        self.sig_af_requested.emit()
+
+    def _fire_stop_combo(self) -> None:
+        self.sig_log.emit("gamepad LB+RB: STOP ALL")
+        self.on_escape()
 
     def _tick(self) -> None:
         gamepad = self._gamepad_state
@@ -175,9 +238,16 @@ class InputSystem(QObject):
                 self._esc_latch = False
             self._prev_key_state = dict(self._key_state)
             return
+        # The combo gestures own their inputs while held (see _check_combos):
+        # no focus jog under LT+RT, no stick/D-pad jog under LB+RB.
+        both_triggers = (gamepad.left_trigger >= COMBO_TRIGGER_LEVEL
+                         and gamepad.right_trigger >= COMBO_TRIGGER_LEVEL)
+        both_bumpers = bool(gamepad.button_left_shoulder
+                            and gamepad.button_right_shoulder)
         self._resolver.resolve(
             self._key_state, self._prev_key_state, gamepad,
-            on_command=self._dispatch, ui_state=self._ui_state)
+            on_command=self._dispatch, ui_state=self._ui_state,
+            suppress_focus=both_triggers, suppress_jog=both_bumpers)
         self._prev_key_state = dict(self._key_state)
 
     def _expire_stale_holds(self) -> None:

@@ -30,6 +30,7 @@ from talos.cv.scale_bar import burn_spec
 from talos.models import StagePosition
 from talos.objective_offsets import compute_offset_move
 from talos.ui.auto_gain import AutoGainController
+from talos.ui.af_region import AfRegionController
 from talos.ui.calibration_context import CalibrationContext
 from talos.ui.camera_profiles import (
     nav_profile,
@@ -85,12 +86,17 @@ class MainWindow(QMainWindow):
         self._autogain = AutoGainController(manager, settings, state)
         self._applied_profile = None
         self._calibration = CalibrationContext(state)
+        # ONE shared AF measurement region: the right-panel AF settings,
+        # the AF detail window and the live-view overlay all reflect it,
+        # and autofocus itself reads the same persisted value.
+        self._af_roi = AfRegionController(settings)
 
         # --- workspaces -------------------------------------------------
         self._tabs = QTabWidget()
         self._navigation = NavigationWorkspace(
             manager, settings, input_system, state=state,
-            autofocus_service=autofocus_service, autogain=self._autogain)
+            autofocus_service=autofocus_service, autogain=self._autogain,
+            af_roi=self._af_roi)
         self._sample_finding = SampleFindingWorkspace(
             manager, settings, state, autofocus_service=autofocus_service,
             autogain=self._autogain, calibration_context=self._calibration,
@@ -148,6 +154,8 @@ class MainWindow(QMainWindow):
             input_system.gamepad.sig_state.connect(self._on_gamepad_state)
             input_system.sig_dpad_stage.connect(
                 self._gamepad_indicator.set_dpad_stage)
+            # LT+RT = autofocus once (the same path as the AF-S quick action).
+            input_system.sig_af_requested.connect(self._on_quick_af)
         manager.camera.sig_connected.connect(self._on_camera_connected)
         state.sig_mode_changed.connect(
             lambda mode: self._mode_badge.setText(mode.upper()))
@@ -218,7 +226,18 @@ class MainWindow(QMainWindow):
         self._windows_menu = menu_bar.addMenu("&Windows")
         self._focus_window = FocusWindow(
             self._manager, self._settings, self._state, self._autofocus,
-            self._navigation.live_view, input_system=self._input, parent=self)
+            input_system=self._input, af_roi=self._af_roi, parent=self)
+        # The AF detail window carries the same settings block as the right
+        # panel: either instance edits, both announce, both refresh.
+        self._focus_window.sig_settings_changed.connect(
+            self._navigation.af_group.widget.refresh_from_settings)
+        self._navigation.af_group.widget.sig_settings_changed.connect(
+            self._focus_window.refresh_settings)
+        for widget in (self._navigation.af_group.widget,
+                       self._focus_window.settings_widget):
+            widget.sig_roi_arm_requested.connect(self._on_af_roi_armed)
+        self._af_roi.sig_changed.connect(self._on_af_roi_changed)
+        self._route_af_roi_to(self._navigation.live_view)
         self._focus_action = self._windows_menu.addAction("AF Detail")
         self._focus_action.setCheckable(True)
         self._focus_action.toggled.connect(self._focus_window.setVisible)
@@ -322,6 +341,47 @@ class MainWindow(QMainWindow):
         if second is not None:
             views.append(second)
         return views
+
+    # ------------------------------------------------------------------
+    # AF measurement region (drawn on the ACTIVE workspace's live view)
+    # ------------------------------------------------------------------
+
+    def _active_live_view(self):
+        return (self._navigation.live_view if self._tabs.currentIndex() == 0
+                else self._sample_finding.live_view)
+
+    def _on_af_roi_armed(self) -> None:
+        """'Select ROI' (either AF settings instance): arm the rubber band
+        on the view the operator is actually looking at."""
+        for view in self._live_views():
+            view.set_roi_selection_mode(False)   # never leave one armed
+        self._active_live_view().set_roi_selection_mode(True)
+        self._on_log_message("info", "Drag a rectangle on the live view "
+                                     "to set the AF ROI")
+
+    def _on_af_roi_changed(self, roi) -> None:
+        self._active_live_view().set_roi(roi)
+
+    def _on_af_roi_selected(self, roi_norm) -> None:
+        self._af_roi.set_roi(roi_norm)
+
+    def _route_af_roi_to(self, view) -> None:
+        """Point the ROI overlay + rubber band at a workspace's view.
+
+        The previous view is tracked explicitly: disconnecting blind raises
+        a PySide warning for every view that was never connected.
+        """
+        previous = getattr(self, "_roi_view", None)
+        if previous is not None and previous is not view:
+            previous.set_roi_selection_mode(False)
+            try:
+                previous.sig_roi_selected.disconnect(self._on_af_roi_selected)
+            except (RuntimeError, TypeError):
+                pass
+        if previous is not view:
+            view.sig_roi_selected.connect(self._on_af_roi_selected)
+        self._roi_view = view
+        view.set_roi(self._af_roi.roi())
 
     def _build_status_bar(self) -> None:
         bar = self.statusBar()
@@ -428,10 +488,8 @@ class MainWindow(QMainWindow):
         profile = nav_profile(self._settings) if index == 0 \
             else scan_profile(self._settings)
         self._apply_camera_profile(profile)
-        # The AF panel's ROI selection must arm the VISIBLE live view.
-        view = (self._navigation.live_view if index == 0
-                else self._sample_finding.live_view)
-        self._focus_window.set_live_view(view)
+        # The AF ROI overlay + rubber band follow the visible workspace.
+        self._route_af_roi_to(self._active_live_view())
 
     def _apply_camera_profile(self, profile) -> None:
         # Diff against the last profile WE applied — manager.camera_props

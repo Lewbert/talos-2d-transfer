@@ -215,6 +215,12 @@ QPushButton#danger {{
 }}
 QPushButton#danger:hover {{ background: #ff6b63; }}
 QPushButton#danger:pressed {{ background: #c93b33; }}
+/* A disabled danger button must not look armed: the AF Abort and STOP ALL
+   buttons are red at all times otherwise, including while inactive. */
+QPushButton#danger:disabled {{
+    background: #3a2b2b;
+    color: #7a6a6a;
+}}
 QLineEdit, QComboBox, QSpinBox, QDoubleSpinBox {{
     background: {BG};
     border: 1px solid #3c3c3c;

@@ -120,15 +120,27 @@ class InstrumentManager(QObject):
         """Last canonical camera properties (exposure_us etc.)."""
         return dict(self._camera_props)
 
+    def is_enabled(self, device_key: str) -> bool:
+        """The software enable gate (defaults to enabled)."""
+        return bool(self._enabled.get(device_key, True))
+
     def set_enabled(self, device_key: str, enabled: bool) -> None:
         """Software enable gate (reference behavior): disabling stops the
-        device and drops further commands until re-enabled."""
+        device and drops further commands until re-enabled.
+
+        The state is broadcast on sig_device_state so every enable control
+        (the strip's checkbox, the Stage Control panels) follows when the
+        gamepad toggles it — and vice versa.
+        """
         self._enabled[device_key] = enabled
         if not enabled:
             proxy = self._proxies.get(device_key)
             if proxy is not None:
                 proxy.enqueue_stop()
             self._log("warning", f"{device_key}: DISABLED (commands dropped)")
+        else:
+            self._log("info", f"{device_key}: enabled")
+        self.sig_device_state.emit(device_key, {"enabled": enabled})
 
     def submit(self, device_key: str, method_name: str, *args, priority: int = 0) -> int:
         """Queue a driver command; returns a job id."""

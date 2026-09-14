@@ -256,6 +256,12 @@ class ReferenceStagePanel(QGroupBox):
 
     def update_telem(self, payload: dict) -> None:
         """Refresh display from manager telemetry."""
+        # The enable gate can change from outside this checkbox (the
+        # gamepad's Start button toggles the D-pad-selected stage).
+        if "enabled" in payload:
+            self._enable.blockSignals(True)
+            self._enable.setChecked(bool(payload["enabled"]))
+            self._enable.blockSignals(False)
         pos = payload.get("position") or {}
         status = payload.get("status") or {}
         for axis in self._axes:

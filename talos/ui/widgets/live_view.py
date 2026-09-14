@@ -25,8 +25,12 @@ from talos.ui.widgets.overlay import (
     draw_scale_bar_q,
 )
 
-_ROI_COLOR = QColor(0, 200, 255, 160)
-_ROI_PEN = QPen(QColor(0, 200, 255, 220), 2, Qt.PenStyle.DashLine)
+# The AF region is drawn in the CROSSHAIR's style (thin dashed cyan) and
+# completely unfilled, so it never hides the image it is measuring; the
+# "AF ROI" tag next to it says what the outline means.
+_CROSSHAIR_PEN = QPen(QColor(0, 200, 255, 120), 1, Qt.PenStyle.DashLine)
+_ROI_PEN = _CROSSHAIR_PEN
+_ROI_LABEL = "AF ROI"
 
 _AF_FADE_MS = 3000
 
@@ -233,15 +237,12 @@ class LiveViewWidget(QWidget):
     def _draw_overlays(self, painter: QPainter, rect: QRectF) -> None:
         """Called from the overlay surface's paintEvent (topmost layer)."""
         if self._crosshair or self._crosshair_display:
-            painter.setPen(QPen(QColor(0, 200, 255, 120), 1,
-                                Qt.PenStyle.DashLine))
+            painter.setPen(_CROSSHAIR_PEN)
             cx, cy = self.width() / 2, self.height() / 2
             painter.drawLine(int(cx), 0, int(cx), self.height())
             painter.drawLine(0, int(cy), self.width(), int(cy))
         if self._roi_norm is not None:
-            painter.setPen(_ROI_PEN)
-            painter.setBrush(_ROI_COLOR)
-            painter.drawRect(self._roi_rect())
+            self._draw_roi(painter, self._roi_rect())
         if self._drag_rect is not None:
             painter.setPen(_ROI_PEN)
             painter.setBrush(Qt.BrushStyle.NoBrush)
@@ -269,6 +270,29 @@ class LiveViewWidget(QWidget):
                                   af_phase_color(self._af_phase),
                                   self._last_shape,
                                   (self.width(), self.height()))
+
+    def _draw_roi(self, painter: QPainter, rect: QRectF) -> None:
+        """Unfilled dashed outline + a small "AF ROI" tag (the tag is drawn
+        with a dark shadow so it stays legible on bright images — no filled
+        box, which would colour the region it is labelling)."""
+        if rect.isEmpty():
+            return
+        painter.save()
+        painter.setPen(_ROI_PEN)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.drawRect(rect)
+        font = painter.font()
+        font.setPixelSize(11)
+        painter.setFont(font)
+        text_rect = QRectF(rect.left() + 4, max(0.0, rect.top() - 15),
+                           max(80.0, rect.width() - 8), 14)
+        for offset, colour in ((1, QColor(0, 0, 0, 160)),
+                               (0, QColor(0, 200, 255, 220))):
+            painter.setPen(QPen(colour))
+            painter.drawText(text_rect.translated(offset, offset),
+                             Qt.AlignmentFlag.AlignLeft
+                             | Qt.AlignmentFlag.AlignVCenter, _ROI_LABEL)
+        painter.restore()
 
     def _roi_rect(self) -> QRectF:
         """Normalized ROI → widget coordinates (inverse letterbox).

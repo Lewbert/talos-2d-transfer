@@ -104,6 +104,15 @@ twice (sigmakoki's `STATUS?` carries both).
 `focus.autofocus` job to the focus worker, and reports progress/results on
 signals. Inside the worker, `FocusProxy` constructs the controller and runs it.
 
+**Measurement region.** Which part of the frame gets scored is ONE persisted
+preference (`autofocus.default_roi_norm`, null = the whole frame), surfaced by
+`ui/af_region.AfRegionController`. Three consumers share it: the right-panel AF
+settings, the AF detail window (both embed the same `AfSettingsWidget`, and a
+change in one refreshes the other) and the live-view overlay, which draws the
+region it is about to measure. `AutofocusService._default_roi()` reads the same
+key, so no caller passes a region — the panel used to pass its own copy, which
+is how it could show "Full frame" while the run measured a crop.
+
 The current strategy is **AF-S v3** (`cv/af_v3.py` + `cv/af_adaptive.py`
 helpers): a 3-point probe classifies near/far, a continuous measure-while-moving
 pass with a derivative guard ladder finds the peak, then a fine hill pass and an

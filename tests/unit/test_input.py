@@ -271,6 +271,195 @@ def test_released_buttons_do_not_fire():
     assert map_button_event(event("BTN_SOUTH", 0)) is None
 
 
+# ---------------------------------------------------------------------------
+# Gamepad Start / Back (reference mapping: Back cycles the D-pad stage,
+# Start toggles THAT stage's enable gate — Esc is the global stop)
+# ---------------------------------------------------------------------------
+
+def _gamepad_system(tmp_path):
+    from talos.config import Settings
+    from talos.input.gamepad import GamepadState
+    from talos.input.input_system import InputSystem
+
+    class FakeState:
+        mode = "MANUAL"
+
+    class FakeManager:
+        def __init__(self):
+            self.enabled = {}
+            self.broadcasts = []
+            self.stops = 0
+
+        def is_enabled(self, key):
+            return self.enabled.get(key, True)
+
+        def set_enabled(self, key, on):
+            self.enabled[key] = on
+            self.broadcasts.append((key, on))
+
+        def stop_all(self):
+            self.stops += 1
+
+        def submit(self, *a, **k):
+            return 1
+
+    manager = FakeManager()
+    system = InputSystem(manager, Settings.load(tmp_path / "s.json"),
+                         state=FakeState())
+    return system, manager, GamepadState
+
+
+def test_gamepad_start_toggles_the_selected_stage_enable(tmp_path):
+    system, manager, GamepadState = _gamepad_system(tmp_path)
+    # the D-pad starts on the transfer stage
+    assert system._resolver.dpad_stage == "sigmakoki"
+    state = GamepadState(connected=True)
+    state.edges = {"start": True}
+    system._on_state(state)
+    assert manager.enabled == {"sigmakoki": False}
+    assert manager.stops == 0, "Start must not be a global stop"
+
+    state = GamepadState(connected=True)
+    state.edges = {"start": True}
+    system._on_state(state)
+    assert manager.enabled == {"sigmakoki": True}
+
+
+def test_gamepad_start_follows_the_back_button(tmp_path):
+    system, manager, GamepadState = _gamepad_system(tmp_path)
+    back = GamepadState(connected=True)
+    back.edges = {"back": True}
+    system._on_state(back)
+    assert system._resolver.dpad_stage == "zolix"
+    start = GamepadState(connected=True)
+    start.edges = {"start": True}
+    system._on_state(start)
+    assert manager.enabled == {"zolix": False}
+
+
+def test_gamepad_start_does_not_change_the_latch(tmp_path):
+    """Esc owns the global stop + latch; the pad's Start is a per-stage
+    gate and must not arm (or clear) the latch."""
+    system, _manager, GamepadState = _gamepad_system(tmp_path)
+    state = GamepadState(connected=True)
+    state.edges = {"start": True}
+    system._on_state(state)
+    assert system._esc_latch is False
+
+
+def test_back_reports_the_stage_and_its_enable_state(tmp_path):
+    """The status-bar indicator says which stage the D-pad drives, and the
+    log line says whether that stage is currently enabled."""
+    system, manager, GamepadState = _gamepad_system(tmp_path)
+    manager.enabled["zolix"] = False
+    stages, logs = [], []
+    system.sig_dpad_stage.connect(stages.append)
+    system.sig_log.connect(logs.append)
+    back = GamepadState(connected=True)
+    back.edges = {"back": True}
+    system._on_state(back)
+    assert stages == ["zolix"]
+    assert "DISABLED" in logs[-1]
+
+
+# ---------------------------------------------------------------------------
+# Combo gestures: LT+RT = autofocus once, LB+RB = STOP ALL
+# ---------------------------------------------------------------------------
+
+def _combo_system(tmp_path, monkeypatch, mode="MANUAL"):
+    import talos.input.input_system as mod
+
+    system, manager, GamepadState = _gamepad_system(tmp_path)
+    system._state.mode = mode
+    clock = {"t": 500.0}
+    monkeypatch.setattr(mod.time, "monotonic", lambda: clock["t"])
+    return system, manager, GamepadState, clock, mod
+
+
+def test_lt_rt_runs_autofocus_once_after_the_hold(tmp_path, monkeypatch):
+    system, _manager, GamepadState, clock, mod = _combo_system(tmp_path,
+                                                               monkeypatch)
+    fired = []
+    system.sig_af_requested.connect(lambda: fired.append(1))
+    gesture = GamepadState(connected=True, left_trigger=0.8, right_trigger=0.9)
+    gesture.edges = {}
+    system._on_state(gesture)
+    assert fired == [], "a brush must not fire the gesture"
+    clock["t"] += mod.COMBO_HOLD_S + 0.01
+    system._on_state(gesture)
+    assert fired == [1]
+    clock["t"] += 1.0
+    system._on_state(gesture)
+    assert fired == [1], "one autofocus per press"
+    # release, then press again → fires again
+    released = GamepadState(connected=True)
+    released.edges = {}
+    system._on_state(released)
+    clock["t"] += 0.05
+    system._on_state(gesture)
+    clock["t"] += mod.COMBO_HOLD_S + 0.01
+    system._on_state(gesture)
+    assert fired == [1, 1]
+
+
+def test_lt_rt_is_refused_outside_manual(tmp_path, monkeypatch):
+    system, _manager, GamepadState, clock, mod = _combo_system(
+        tmp_path, monkeypatch, mode="SCAN")
+    fired, logs = [], []
+    system.sig_af_requested.connect(lambda: fired.append(1))
+    system.sig_log.connect(logs.append)
+    gesture = GamepadState(connected=True, left_trigger=0.9, right_trigger=0.9)
+    gesture.edges = {}
+    system._on_state(gesture)
+    clock["t"] += mod.COMBO_HOLD_S + 0.01
+    system._on_state(gesture)
+    assert fired == [], "a scan owns the axes — no autofocus"
+    assert "scan" in logs[-1].lower()
+
+
+def test_lb_rb_stops_all_and_latches(tmp_path, monkeypatch):
+    system, manager, GamepadState, clock, mod = _combo_system(tmp_path,
+                                                              monkeypatch)
+    gesture = GamepadState(connected=True, button_left_shoulder=True,
+                           button_right_shoulder=True)
+    gesture.edges = {}
+    system._on_state(gesture)
+    assert manager.stops == 0, "the hold time gates the stop"
+    clock["t"] += mod.COMBO_HOLD_S + 0.01
+    system._on_state(gesture)
+    assert manager.stops == 1
+    assert system._esc_latch, "the stop gesture latches like Esc"
+    clock["t"] += 1.0
+    system._on_state(gesture)
+    assert manager.stops == 1, "one stop per press"
+
+
+def test_single_bumper_stays_a_fast_modifier(tmp_path, monkeypatch):
+    """Only the PAIR is a gesture — one bumper must keep meaning 'fast'."""
+    system, manager, GamepadState, clock, mod = _combo_system(tmp_path,
+                                                              monkeypatch)
+    one = GamepadState(connected=True, button_left_shoulder=True)
+    one.edges = {}
+    system._on_state(one)
+    clock["t"] += mod.COMBO_HOLD_S + 0.5
+    system._on_state(one)
+    assert manager.stops == 0
+    assert system._esc_latch is False
+
+
+def test_single_trigger_stays_a_focus_jog(tmp_path, monkeypatch):
+    system, _manager, GamepadState, clock, mod = _combo_system(tmp_path,
+                                                               monkeypatch)
+    fired = []
+    system.sig_af_requested.connect(lambda: fired.append(1))
+    one = GamepadState(connected=True, right_trigger=1.0)
+    one.edges = {}
+    system._on_state(one)
+    clock["t"] += mod.COMBO_HOLD_S + 0.5
+    system._on_state(one)
+    assert fired == []
+
+
 def test_keyboard_works_without_gamepad_state_emission(tmp_path):
     """Regression: _tick bailed out until the gamepad controller emitted
     its first state — and it never emits without a gamepad connected, so

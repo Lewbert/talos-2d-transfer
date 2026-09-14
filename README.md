@@ -15,10 +15,13 @@ limits, failure modes — are documented in the code, in
 This software commands physical motion. Read this before running it against
 hardware.
 
-- **`Esc` (or gamepad Start/Back) is STOP ALL** — focus → transfer stage → XYR,
-  verified within a 1.5 s budget. It works from the main window and from the
-  Stage Control / AF dialogs, and it *latches*: motion commands stay suppressed
-  until every input source (keys, on-screen holds, gamepad) is at rest.
+- **`Esc` is STOP ALL** — focus → transfer stage → XYR, verified within a
+  1.5 s budget. It works from the main window and from the Stage Control / AF
+  dialogs, and it *latches*: motion commands stay suppressed until every input
+  source (keys, on-screen holds, gamepad) is at rest. On the gamepad,
+  **LB+RB does the same** (hold both bumpers for 0.2 s); its Start button does
+  NOT stop everything — it toggles the enable gate of the stage Back selected
+  (which halts that stage and drops its commands).
 - **The focus stage has NO limit sensor.** A physical restrain protects the
   objective; the firmware's soft limits are the software bound — and the
   firmware ships with those limits **disabled** (`SLIM=0`), which the app now
@@ -81,7 +84,9 @@ the rest keep working.
 - **Navigation & Control** — live view, quick actions (snapshot, AF-S, origins),
   and foldable right-panel groups for Capture / Camera / Autofocus / Temperature.
   Manual jogging happens in the **Stage Control** dialbox (Windows menu) or with
-  the keyboard/gamepad.
+  the keyboard/gamepad. The Autofocus group also holds the **AF measurement
+  region** (whole frame, or a ROI you drag or type in — drawn on the live view
+  as a dashed "AF ROI" box).
 - **Sample Finding** — flake detection on the current frame, bounded autofocus,
   and the grid scan (serpentine waypoints + manifest + frames on disk).
 
@@ -95,11 +100,30 @@ workspace by design.
 
 ## Input
 
-`Esc` / gamepad Start = **STOP ALL**. Gamepad: left stick = X/Y jog, right stick
-= XYR, D-pad = focus steps (Back toggles which stage the D-pad drives), A/B/X/Y
-= temperature presets. Keyboard: arrows = X/Y, R/F = Z, `+`/`-` = focus (hold
-for continuous, tap for a step), Shift = fast. On-screen hold buttons behave
-the same way and release on pointer-leave, window hide, or Esc.
+`Esc` = **STOP ALL** (the only global stop). Gamepad:
+
+| Control | Action |
+|---|---|
+| left stick | X/Y jog on the transfer (SigmaKoki) stage, analog |
+| right stick | XYR stage, 8-direction |
+| D-pad | X/Y of the *selected* stage — short press = one step, hold = continuous |
+| **Back** | cycles which stage the D-pad drives (transfer ⟷ XYR); the status bar shows the current choice |
+| **Start** | toggles the enable gate of the D-pad-selected stage (as in the reference project). Disabling stops that stage immediately and drops its commands; the strip's Enable checkbox follows |
+| triggers (L/R) | focus, analog speed |
+| **LT + RT** (both) | **autofocus once** |
+| **LB + RB** (both) | **STOP ALL** — same as Esc, including the latch |
+| A / B / X / Y | temperature presets 1–4 |
+
+The two gestures are edge-triggered after a **0.2 s hold**, so a bump past a
+bumper cannot stop a running job by accident. While a gesture is held it owns
+its inputs: LT+RT stops any focus jog and emits none (otherwise the gesture's
+own trigger imbalance would abort the autofocus it just started), and LB+RB
+stops a stick-driven jog. A single bumper keeps its normal meaning (fast
+modifier), as does a single trigger (focus jog).
+
+Keyboard: arrows = X/Y, R/F = Z, `+`/`-` = focus (hold for continuous, tap for a
+step), Shift = fast. On-screen hold buttons behave the same way and release on
+pointer-leave, window hide, or Esc.
 
 ## Calibration
 

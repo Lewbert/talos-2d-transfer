@@ -470,18 +470,76 @@ class CameraGroup(QGroupBox):
         self._persist("color_temperature", value)
 
 
-class AFGroup(QGroupBox):
-    """Right-panel AF knobs: the editable max-window bounds and the
-    rough-scan speed base (the current objective's multiplier applies at
-    AF start), the manual ±µm override, and a readout of the CURRENT
-    objective's computed window and speeds."""
+class AfSettingsWidget(QWidget):
+    """The autofocus settings block — measurement region, window bounds,
+    rough-scan speed, ±µm override and the per-objective readout.
 
-    def __init__(self, settings, state, parent=None):
-        super().__init__("Autofocus", parent)
+    Lives in TWO places (the right-panel Autofocus group and the AF detail
+    window), so the region is driven by the shared ``AfRegionController``
+    and every other field persists immediately and announces itself via
+    ``sig_settings_changed`` — the second instance refreshes from settings
+    instead of drifting.
+    """
+
+    sig_settings_changed = Signal()
+    sig_roi_arm_requested = Signal()   # "Select ROI" -> rubber band on the live view
+
+    def __init__(self, settings, state, roi, parent=None):
+        super().__init__(parent)
         self._settings = settings
         self._state = state
+        self._roi = roi
         af = settings.section("autofocus")
 
+        # --- measurement region ------------------------------------------
+        self._area = QComboBox()
+        self._area.addItem("Full frame", False)
+        self._area.addItem("ROI", True)
+        self._area.currentIndexChanged.connect(self._on_area_changed)
+
+        self._select_btn = QPushButton("Select ROI")
+        self._select_btn.setObjectName("compact")
+        self._select_btn.setToolTip("Drag a rectangle on the live view")
+        self._select_btn.clicked.connect(self.sig_roi_arm_requested.emit)
+        self._reset_btn = QPushButton("Reset ROI")
+        self._reset_btn.setObjectName("compact")
+        self._reset_btn.setToolTip("Back to the centre two-thirds of the frame")
+        self._reset_btn.clicked.connect(self._roi.reset_to_default)
+
+        # One 2-column grid holds the buttons AND the region editor, so the
+        # buttons, the X/Y row and the W/H row all share the same two
+        # column edges (percentages of the frame, label inside each cell).
+        self._roi_spins: dict[str, QDoubleSpinBox] = {}
+        grid = QGridLayout()
+        grid.setContentsMargins(0, 0, 0, 0)
+        grid.setHorizontalSpacing(8)
+        grid.setVerticalSpacing(4)
+        grid.addWidget(self._select_btn, 0, 0)
+        grid.addWidget(self._reset_btn, 0, 1)
+        for index, (key, text) in enumerate((("x", "X"), ("y", "Y"),
+                                             ("w", "W"), ("h", "H"))):
+            spin = QDoubleSpinBox()
+            spin.setRange(0.0, 100.0)
+            spin.setDecimals(1)
+            spin.setSingleStep(1.0)
+            spin.setSuffix(" %")
+            spin.setToolTip(f"Region {text} position/size, as a percentage "
+                            "of the frame")
+            spin.editingFinished.connect(lambda k=key: self._on_roi_spin(k))
+            self._roi_spins[key] = spin
+            cell = QWidget()
+            cell_row = QHBoxLayout(cell)
+            cell_row.setContentsMargins(0, 0, 0, 0)
+            cell_row.setSpacing(4)
+            label = QLabel(f"{text} %")
+            label.setObjectName("dim")
+            cell_row.addWidget(label)
+            cell_row.addWidget(spin, stretch=1)
+            grid.addWidget(cell, 1 + index // 2, index % 2)
+        grid.setColumnStretch(0, 1)
+        grid.setColumnStretch(1, 1)
+
+        # --- window / speed knobs -----------------------------------------
         self._minus = QDoubleSpinBox()
         self._minus.setRange(0.0, 10000.0)
         self._minus.setDecimals(1)
@@ -511,7 +569,19 @@ class AFGroup(QGroupBox):
         self._bounds.editingFinished.connect(
             lambda: self._persist("manual_bounds_um", self._bounds.value()))
 
-        form = QFormLayout(self)
+        # --- layout: a form for the labelled rows, the grid for the ROI ---
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(4)
+        area_row = QHBoxLayout()
+        area_row.setSpacing(6)
+        area_row.addWidget(QLabel("Measure"))
+        area_row.addWidget(self._area, stretch=1)
+        layout.addLayout(area_row)
+        layout.addLayout(grid)
+
+        form = QFormLayout()
+        form.setContentsMargins(0, 0, 0, 0)
         form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
         form.setVerticalSpacing(6)
         form.addRow("Max window − (µm)", self._minus)
@@ -525,14 +595,71 @@ class AFGroup(QGroupBox):
         self._readout.setObjectName("readout")
         self._readout.setWordWrap(True)
         form.addRow(self._readout)
+        layout.addLayout(form)
 
+        self._roi.sig_changed.connect(self._on_roi_changed)
         self._state.sig_objective_changed.connect(
             lambda _idx: self._refresh_readout())
+        self._sync_roi_widgets()
         self._refresh_readout()
+
+    # -- ROI ---------------------------------------------------------------
+
+    def _on_area_changed(self, _index: int) -> None:
+        if self._area.currentData():          # "ROI"
+            if self._roi.is_full_frame():
+                self._roi.reset_to_default()
+            else:
+                self._roi.set_roi(self._roi.roi(), persist=False)
+        else:
+            self._roi.use_full_frame()
+
+    def _on_roi_spin(self, key: str) -> None:
+        value = self._roi_spins[key].value() / 100.0
+        self._roi.move_region(**{key: value})
+
+    def _on_roi_changed(self, _roi) -> None:
+        self._sync_roi_widgets()
+        self.sig_settings_changed.emit()
+
+    def _sync_roi_widgets(self) -> None:
+        roi = self._roi.roi()
+        full = roi is None
+        self._area.blockSignals(True)
+        self._area.setCurrentIndex(0 if full else 1)
+        self._area.blockSignals(False)
+        x, y, w, h = self._roi.as_percent(roi)
+        for spin, value in zip((self._roi_spins["x"], self._roi_spins["y"],
+                                self._roi_spins["w"], self._roi_spins["h"]),
+                               (x, y, w, h)):
+            spin.blockSignals(True)
+            spin.setValue(value)
+            spin.blockSignals(False)
+            # The numbers describe the region; with the whole frame
+            # selected they are showing the default the ROI would start
+            # from, so they stay visible but switch off.
+            spin.setEnabled(not full)
+        self._reset_btn.setEnabled(True)
+
+    # -- window / speed knobs ---------------------------------------------
 
     def _persist(self, key: str, value: float) -> None:
         self._settings.section("autofocus")[key] = value
         self._settings.save()
+        self._refresh_readout()
+        self.sig_settings_changed.emit()
+
+    def refresh_from_settings(self) -> None:
+        """Re-read every knob (the other instance may have edited it)."""
+        af = self._settings.section("autofocus")
+        pairs = ((self._minus, "window_minus_um", 500.0),
+                 (self._plus, "window_plus_um", 500.0),
+                 (self._base, "coarse_speed_base_um_s", 100.0),
+                 (self._bounds, "manual_bounds_um", 0.0))
+        for spin, key, fallback in pairs:
+            spin.blockSignals(True)
+            spin.setValue(float(af.get(key, fallback)))
+            spin.blockSignals(False)
         self._refresh_readout()
 
     def _refresh_readout(self) -> None:
@@ -568,6 +695,28 @@ class AFGroup(QGroupBox):
         if half <= 0:
             return None
         return (int(center_steps) - half, int(center_steps) + half)
+
+
+class AFGroup(QGroupBox):
+    """Right-panel wrapper around the shared AF settings block."""
+
+    def __init__(self, settings, state, roi=None, parent=None):
+        super().__init__("Autofocus", parent)
+        from talos.ui.af_region import AfRegionController
+
+        self._roi = roi or AfRegionController(settings)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        self.widget = AfSettingsWidget(settings, state, self._roi)
+        layout.addWidget(self.widget)
+
+    # Kept as the group's public surface (MainWindow and the tests use
+    # these; the implementation lives in the settings widget).
+    def bounds_um(self) -> float:
+        return self.widget.bounds_um()
+
+    def bounds_steps(self, center_steps: int, um_per_step: float):
+        return self.widget.bounds_steps(center_steps, um_per_step)
 
 
 class TemperatureGroup(QGroupBox):

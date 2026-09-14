@@ -232,6 +232,54 @@ def test_gamepad_triggers_drive_focus(resolver):
     assert stops
 
 
+def test_combo_suppression_stops_focus_and_blocks_starts(resolver):
+    """LT+RT (autofocus once) suppresses the triggers while held: a jog
+    already running must stop, and the gesture's residual imbalance (say
+    LT 0.8 / RT 1.0) must NOT turn into a jog that aborts the AF run it
+    just requested."""
+    pad = FakeGamepad()
+    pad.right_trigger = 1.0
+    commands = tick(resolver, {}, {}, pad, T0)
+    assert any(c[2] == "continuous_start" and c[0] == "focus" for c in commands)
+
+    # both triggers down → suppressed
+    pad.left_trigger, pad.right_trigger = 0.8, 1.0
+    commands = []
+    resolver.resolve({}, {}, pad, now=T0 + 0.05, on_command=commands.append,
+                     suppress_focus=True)
+    assert any(c[2] == "continuous_stop" and c[0] == "focus" for c in commands)
+    assert not [c for c in commands if c[2] == "continuous_start"], \
+        "the gesture must not emit a focus start"
+
+    # released back to a single trigger → normal jogging resumes
+    pad.left_trigger, pad.right_trigger = 0.0, 0.7
+    commands = tick(resolver, {}, {}, pad, T0 + 0.10)
+    assert any(c[2] == "continuous_start" and c[0] == "focus" for c in commands)
+
+
+def test_combo_suppression_blocks_stick_and_dpad_jogs(resolver):
+    """LB+RB (STOP ALL) owns the jogs while held: no new starts from either
+    stick or the D-pad, and anything moving stops."""
+    pad = FakeGamepad()
+    pad.left_x = 0.6
+    commands = tick(resolver, {}, {}, pad, T0)
+    assert any(c[2] == "continuous_start" and c[0] == "sigmakoki" for c in commands)
+
+    pad.dpad_right = True
+    commands = []
+    resolver.resolve({}, {}, pad, now=T0 + 0.05, on_command=commands.append,
+                     suppress_jog=True)
+    assert any(c[2] == "continuous_stop" and c[0] == "sigmakoki" for c in commands)
+    assert not [c for c in commands if c[2] == "continuous_start"], \
+        "the stop gesture must not emit jog starts"
+
+    # a single bumper (fast modifier) is untouched by the suppression
+    pad.dpad_right = False
+    pad.left_x = 0.6
+    commands = tick(resolver, {}, {}, pad, T0 + 0.10)
+    assert any(c[2] == "continuous_start" and c[0] == "sigmakoki" for c in commands)
+
+
 def test_gamepad_left_stick_analog_sigmakoki(resolver):
     pad = FakeGamepad()
     pad.left_x = 0.5

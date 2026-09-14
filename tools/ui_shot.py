@@ -74,15 +74,24 @@ def main() -> int:
     flush(300)
 
     tag = f"_{args.size[0]}x{args.size[1]}" if args.size else "_1080p"
+
+    # The AF measurement region: a deliberately off-centre box so the
+    # overlay style (dashed outline, "AF ROI" tag, no fill) is visible and
+    # the ROI numbers in both settings instances are non-default.
+    window._af_roi.set_roi((0.25, 0.2, 0.4, 0.45))
+    flush(150)
+
     shots = {
         f"nav{tag}": window,
         f"stage{tag}": window._stage_window,
         f"log{tag}": window._log,
         f"focus{tag}": window._focus_window,
         # embedded close-ups for the control-panel QA (checkbox dot,
-        # slider handle, ms exposure, temperature grid)
+        # slider handle, ms exposure, temperature grid, the AF ROI block)
         f"camgroup{tag}": window._navigation.camera_group,
         f"temp{tag}": window._navigation.temp_group,
+        f"afgroup{tag}": window._navigation.af_group,
+        f"roi_live{tag}": window._navigation.live_view,
     }
 
     for name, widget in shots.items():

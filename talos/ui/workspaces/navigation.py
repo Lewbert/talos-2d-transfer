@@ -30,7 +30,7 @@ class NavigationWorkspace(QWidget):
     """Live view (left, stretch) + the fixed-width settings column."""
 
     def __init__(self, manager, settings, input_system=None, parent: QWidget | None = None,
-                 state=None, autofocus_service=None, autogain=None):
+                 state=None, autofocus_service=None, autogain=None, af_roi=None):
         super().__init__(parent)
 
         layout = QVBoxLayout(self)
@@ -70,7 +70,7 @@ class NavigationWorkspace(QWidget):
         self.camera_group = CameraGroup(manager, settings, autogain)
         groups.addWidget(CollapsibleGroup(
             "Camera", self.camera_group, settings=settings, state_key="nav"))
-        self.af_group = AFGroup(settings, state)
+        self.af_group = AFGroup(settings, state, roi=af_roi)
         groups.addWidget(CollapsibleGroup(
             "Autofocus", self.af_group, settings=settings, state_key="nav"))
         self.temp_group = TemperatureGroup(manager, settings)
