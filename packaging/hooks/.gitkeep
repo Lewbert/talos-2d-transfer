@@ -1,0 +1,3 @@
+# PyInstaller hook directory (see talos.spec: hookspath).
+# Kept in git so a fresh clone has the directory the spec points at;
+# drop hook-*.py files here when a package needs custom collection rules.

@@ -1,0 +1,16 @@
+# Runtime dependencies (see pyproject.toml — that file is the source of
+# truth; this one exists for plain `pip install -r` workflows).
+PySide6>=6.6
+numpy>=1.26
+opencv-python>=4.8
+pyserial>=3.5
+inputs>=0.5
+scipy>=1.11
+
+# Development
+pytest>=7.0
+pyinstaller>=6.3
+
+# NOT installed by default: the alternative camera backends
+# (harvesters / pymmcore-plus). They are unwired from the application —
+# see the extras in pyproject.toml.

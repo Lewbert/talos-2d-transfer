@@ -1,0 +1,40 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+build/
+dist/
+*.log
+.vscode/
+.idea/
+*.spec-auto
+
+# virtual environments (the project normally runs from a conda env, but a
+# stray `python -m venv .venv` must never be committed)
+venv/
+.venv/
+env/
+ENV/
+
+# coverage / test artefacts
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+
+# local data the app can write INTO the tree when TALOS_APPDATA points
+# here (talos/paths.py honours that override), plus packaged archives
+*.db
+*.zip
+*.7z
+
+.claude/
+.mcp/
+.mcp.json
+
+# Zeiss decompile outputs (interop RE, local only)
+tools/smartcam_decomp_primitives/
+tools/smartcam_decomp/
+docs/bench/

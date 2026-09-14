@@ -1,0 +1,84 @@
+"""Focus LT/RT trigger display: two mirrored bars with deadzone notches
+plus the computed signed jog speed (same math the ActionResolver uses —
+`focus_trigger_to_speed`). RT = focus up (right bar), LT = down."""
+
+from __future__ import annotations
+
+from PySide6.QtCore import Qt
+from PySide6.QtGui import QColor, QFontMetrics, QPainter
+from PySide6.QtWidgets import QWidget
+
+from talos.input.action_resolver import focus_trigger_to_speed
+from talos.ui import theme
+from talos.ui.theme import LED_OFF, TEXT_DIM, WARN
+
+
+class TriggerBarWidget(QWidget):
+    def __init__(self, settings, parent: QWidget | None = None):
+        super().__init__(parent)
+        cfg = settings.device("focus")
+        self._min_speed = float(cfg.get("min_speed", 50))
+        self._max_speed = float(cfg.get("max_speed", 2000))
+        self._gamma = float(cfg.get("gamma", 2.2))
+        self._deadzone = float(cfg.get("deadzone", 0.05))
+        self._invert = bool(cfg.get("invert", False))
+        self._lt = 0.0
+        self._rt = 0.0
+        self._connected = False
+        self.setMinimumWidth(130)
+        self.setFixedHeight(40)
+        self.setToolTip("Focus jog: gamepad LT (down) / RT (up) triggers")
+
+    def set_state(self, lt: float, rt: float) -> None:
+        """Raw trigger values 0..1."""
+        self._lt = max(0.0, min(float(lt), 1.0))
+        self._rt = max(0.0, min(float(rt), 1.0))
+        self.update()
+
+    def set_connected(self, connected: bool) -> None:
+        self._connected = connected
+        if not connected:
+            self._lt = self._rt = 0.0
+        self.update()
+
+    # ------------------------------------------------------------------
+
+    def paintEvent(self, event) -> None:  # noqa: N802
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        w, h = self.width(), self.height()
+        bar_h = 7
+        bar_y = 8
+
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor(LED_OFF))
+        painter.drawRoundedRect(0, bar_y, w, bar_h, 3, 3)
+
+        # Mirrored fills: LT grows from the left, RT from the right.
+        # module read (not a value import): live accent changes reach it
+        if self._connected:
+            painter.setBrush(QColor(WARN))
+            painter.drawRoundedRect(0, bar_y, int(w * self._lt), bar_h, 3, 3)
+            painter.setBrush(QColor(theme.ACCENT))
+            rt_w = int(w * self._rt)
+            painter.drawRoundedRect(w - rt_w, bar_y, rt_w, bar_h, 3, 3)
+
+        # Deadzone notches (net deadzone fraction from each end).
+        notch = self._deadzone / (1.0 + self._deadzone)
+        painter.setBrush(QColor("#000000"))
+        for x in (int(w * notch), int(w * (1 - notch))):
+            painter.drawRect(x - 1, bar_y - 2, 2, bar_h + 4)
+
+        # Labels + speed.
+        fm = QFontMetrics(self.font())
+        painter.setPen(QColor(TEXT_DIM))
+        painter.drawText(0, h - 3, "LT")
+        painter.drawText(w - fm.horizontalAdvance("RT"), h - 3, "RT")
+        speed = focus_trigger_to_speed(
+            self._lt, self._rt, min_speed=self._min_speed,
+            max_speed=self._max_speed, gamma=self._gamma,
+            deadzone=self._deadzone, invert=self._invert)
+        text = f"→ {speed:+d} sps" if speed else "idle"
+        painter.setPen(QColor(theme.ACCENT if speed else TEXT_DIM))
+        painter.drawText(w // 2 - fm.horizontalAdvance(text) // 2, h - 3, text)
+        painter.end()

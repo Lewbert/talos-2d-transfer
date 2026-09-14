@@ -1,0 +1,14 @@
+# Normalize line endings in the repository, check out with the platform
+# default (Windows: CRLF) — without this a Windows checkout and a Linux
+# one disagree about every text file.
+* text=auto
+
+# Binary assets: never line-ending converted, never diffed as text.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.ico binary
+*.npy binary
+*.afdesign binary
+*.exe binary
+*.dll binary

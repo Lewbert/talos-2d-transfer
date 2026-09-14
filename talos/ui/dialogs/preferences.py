@@ -1,0 +1,666 @@
+"""Preferences dialog (Edit → Preferences): General (UI font, debug
+console/logging), Objectives & Calibration (the merged per-objective
+table), AutoFocus (curated knobs + backlash calibration), and the
+per-device Hardware pages (camera / focus / zolix XYR / sigmakoki XYZ /
+temperature). Workspace-dependent camera settings (exposure/gain/WB)
+live in the right panels only — not here.
+
+Connection parameters are annotated "applies after reconnect", speed
+parameters "applies after restart" (the ActionResolver caches speeds at
+construction). OK/Apply persist via the shared Settings instance.
+"""
+
+from __future__ import annotations
+
+import logging
+
+from PySide6.QtCore import Qt, Signal
+from PySide6.QtGui import QFont, QStandardItem, QStandardItemModel
+from PySide6.QtWidgets import (
+    QCheckBox,
+    QColorDialog,
+    QComboBox,
+    QDialog,
+    QDialogButtonBox,
+    QDoubleSpinBox,
+    QFileDialog,
+    QFormLayout,
+    QGroupBox,
+    QHBoxLayout,
+    QLabel,
+    QLineEdit,
+    QPushButton,
+    QSpinBox,
+    QStackedWidget,
+    QTableWidget,
+    QTableWidgetItem,
+    QTreeWidget,
+    QTreeWidgetItem,
+    QVBoxLayout,
+    QWidget,
+)
+
+from talos import debug_console
+from talos.ui import theme
+from talos.ui.dialogs.objectives_page import ObjectivesPage
+
+logger = logging.getLogger(__name__)
+
+
+class _Field:
+    """One settings value → widget binding (path: "devices.camera.gain").
+
+    ``scale`` maps the DISPLAY value to the stored value
+    (stored = displayed / scale) — e.g. exposure stored in µs but shown
+    in ms uses scale 0.001. Default 1.0 = no conversion."""
+
+    def __init__(self, page: "_FormPage", path: str, label: str,
+                 widget, setter, getter, annotation: str | None = None,
+                 scale: float = 1.0):
+        self.path = path
+        self.widget = widget
+        self._setter = setter
+        self._getter = getter
+        self.annotation = annotation
+        self._scale = scale
+        page._fields.append(self)
+
+    def value(self):
+        value = self._getter()
+        return value / self._scale if self._scale != 1.0 else value
+
+    def set_value(self, value) -> None:
+        self._setter(value)  # display units
+
+
+def _decimals_for(*values: float) -> int:
+    """Decimals needed to represent these numbers exactly (max 6).
+
+    A QDoubleSpinBox defaults to 2 decimals and the float fields used to
+    force 3: `um_per_pulse_r` (0.00125) was silently stored as 0.00 and
+    `um_per_pulse_xy` (0.625) as 0.63 on ANY Apply — real corruption of
+    the live settings file, in the field.
+    """
+    decimals = 0
+    for value in values:
+        try:
+            text = f"{abs(float(value)):.10f}".rstrip("0")
+        except (TypeError, ValueError):
+            continue
+        if "." in text:
+            decimals = max(decimals, len(text.split(".")[1]))
+    return max(0, min(6, decimals))
+
+
+class _FormPage(QWidget):
+    """A form over a settings dict: fields declared via add_* and
+    applied back on _apply(). ``cfg`` is the dict itself (settings
+    sections are top-level only — device dicts come from
+    settings.device(key))."""
+
+    def __init__(self, settings, cfg: dict, annotation: str | None = None,
+                 parent=None):
+        super().__init__(parent)
+        self._settings = settings
+        self._cfg = cfg
+        self._fields: list[_Field] = []
+        self._form = QFormLayout(self)
+        self._form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
+        self._form.setVerticalSpacing(6)
+        self._form.setFieldGrowthPolicy(
+            QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
+        if annotation:
+            label = QLabel(annotation)
+            label.setObjectName("hint")
+            label.setWordWrap(True)
+            self._form.addRow(label)
+
+    # --- field builders ---------------------------------------------------
+
+    def _label(self, text: str, annotation: str | None) -> str:
+        return f"{text} *" if annotation else text
+
+    def add_float(self, key: str, label: str, lo: float, hi: float,
+                  step: float = 1.0, scale: float = 1.0,
+                  annotation: str | None = None) -> None:
+        box = QDoubleSpinBox()
+        box.setRange(lo, hi)
+        box.setSingleStep(step)
+        value = float(self._cfg.get(key, (lo + hi) / 2))
+        # the decimals must fit the configured VALUE as well as the step,
+        # or the spinbox rounds the stored number on the way in
+        decimals = _decimals_for(step, lo, hi, value)
+        box.setDecimals(decimals)
+        box.setValue(round(value * scale, decimals))
+        box.setToolTip(f"{label} {annotation}" if annotation else label)
+        self._form.addRow(self._label(label, annotation), box)
+        _Field(self, key, label, box, box.setValue, box.value, annotation,
+               scale)
+
+    def add_int(self, key: str, label: str, lo: int, hi: int,
+                annotation: str | None = None) -> None:
+        box = QSpinBox()
+        box.setRange(lo, hi)
+        box.setValue(int(self._cfg.get(key, lo)))
+        self._form.addRow(self._label(label, annotation), box)
+        _Field(self, key, label, box, box.setValue, box.value, annotation)
+
+    def add_text(self, key: str, label: str,
+                 annotation: str | None = None) -> None:
+        edit = QLineEdit(str(self._cfg.get(key, "")))
+        self._form.addRow(self._label(label, annotation), edit)
+        _Field(self, key, label, edit, edit.setText, edit.text, annotation)
+
+    def add_bool(self, key: str, label: str, default: bool = False,
+                 annotation: str | None = None) -> None:
+        check = QCheckBox(label)
+        check.setChecked(bool(self._cfg.get(key, default)))
+        self._form.addRow("", check)
+        _Field(self, key, label, check, check.setChecked, check.isChecked,
+               annotation)
+
+    def add_combo(self, key: str, label: str, choices: list[str],
+                  annotation: str | None = None) -> None:
+        combo = QComboBox()
+        combo.addItems(choices)
+        current = str(self._cfg.get(key, choices[0]))
+        if current in choices:
+            combo.setCurrentText(current)
+        self._form.addRow(self._label(label, annotation), combo)
+        _Field(self, key, label, combo, combo.setCurrentText,
+               combo.currentText, annotation)
+
+    def add_dir(self, key: str, label: str, title: str = "Choose folder") -> None:
+        row = QWidget()
+        layout = QHBoxLayout(row)
+        layout.setContentsMargins(0, 0, 0, 0)
+        edit = QLineEdit(str(self._cfg.get(key, "")))
+        browse = QPushButton("…")
+        browse.setObjectName("compact")
+        browse.clicked.connect(
+            lambda: self._browse_dir(edit, title))
+        layout.addWidget(edit, stretch=1)
+        layout.addWidget(browse)
+        self._form.addRow(label, row)
+        _Field(self, key, label, edit, edit.setText, edit.text)
+
+    @staticmethod
+    def _browse_dir(edit: QLineEdit, title: str) -> None:
+        chosen = QFileDialog.getExistingDirectory(edit, title, edit.text())
+        if chosen:
+            edit.setText(chosen)
+
+    def add_custom(self, widget: QWidget, label: str) -> None:
+        self._form.addRow(label, widget)
+
+    def add_custom_row(self, widget: QWidget) -> None:
+        self._form.addRow(widget)
+
+    # --- apply --------------------------------------------------------------
+
+    def _apply(self) -> None:
+        for field in self._fields:
+            self._cfg[field.path] = field.value()
+        self._settings.save()
+
+
+class GeneralPage(_FormPage):
+    def __init__(self, settings, qapp, parent=None):
+        super().__init__(settings, settings.section("ui"), parent=parent)
+        self._qapp = qapp
+        self._debug_cfg = settings.section("debug")
+
+        size = QSpinBox()
+        size.setRange(8, 14)
+        size.setValue(int(self._cfg.get("font_size", 12)))
+        size.valueChanged.connect(self._on_font_size)
+        self._form.addRow("Font size (px)", size)
+        self._font_size = size
+
+        self.add_custom_row(QLabel("Theme: dark (fixed)"))
+
+        # Accent: grouped preset combo (disabled headers) + custom hex
+        # + color-dialog picker.
+        accent_row = QWidget()
+        row = QHBoxLayout(accent_row)
+        row.setContentsMargins(0, 0, 0, 0)
+        self._accent_combo = QComboBox()
+        model = QStandardItemModel(self._accent_combo)
+        self._accent_combo.setModel(model)
+        by_name = {name: hex_ for name, hex_, _dark in theme.ACCENT_PRESETS}
+        header_font = QFont()
+        header_font.setBold(True)
+        for group, names in theme.ACCENT_GROUPS:
+            header = QStandardItem(group)
+            header.setEnabled(False)
+            header.setFont(header_font)
+            model.appendRow(header)
+            for name in names:
+                item = QStandardItem(f"{name} ({by_name[name]})")
+                item.setData(by_name[name], Qt.ItemDataRole.UserRole)
+                model.appendRow(item)
+        model.appendRow(QStandardItem("Custom…"))
+        self._accent_edit = QLineEdit()
+        self._accent_edit.setPlaceholderText("#rrggbb")
+        self._accent_pick = QPushButton("Pick…")
+        self._accent_pick.setObjectName("compact")
+        self._accent_pick.clicked.connect(self._on_accent_pick)
+        self._last_valid_accent_idx = 0
+        self._accent_combo.currentIndexChanged.connect(self._on_accent_changed)
+        self._accent_edit.editingFinished.connect(self._apply_accent_from_edit)
+        row.addWidget(self._accent_combo, stretch=1)
+        row.addWidget(self._accent_edit, stretch=1)
+        row.addWidget(self._accent_pick)
+        self._form.addRow("Accent", accent_row)
+        current = str(self._cfg.get("accent", "#00BCBC"))
+        matching = [i for i in range(self._accent_combo.count())
+                    if self._accent_combo.itemData(i)
+                    and self._accent_combo.itemData(i).lower()
+                    == current.lower()]
+        # signal-blocked init: a live set_accent + setFocus during
+        # construction would steal focus every dialog open when the
+        # saved accent is unmatched — sync the widget states manually.
+        self._accent_combo.blockSignals(True)
+        if matching:
+            self._accent_combo.setCurrentIndex(matching[0])
+            self._accent_edit.setText(current)
+        else:
+            self._accent_combo.setCurrentIndex(
+                self._accent_combo.count() - 1)  # Custom…
+            self._accent_edit.setText(current)
+        self._accent_combo.blockSignals(False)
+        custom = self._accent_combo.currentData() is None
+        self._accent_edit.setEnabled(custom)
+        self._accent_pick.setEnabled(custom)
+        self._last_valid_accent_idx = self._accent_combo.currentIndex()
+
+        self._console = QCheckBox("Debug console (separate system window)")
+        self._console.setChecked(bool(self._debug_cfg.get("console_enabled", True)))
+        self._console.toggled.connect(self._on_console)
+        self._form.addRow("", self._console)
+
+        self._verbose = QCheckBox("Verbose logging (applies on restart)")
+        self._verbose.setChecked(bool(self._debug_cfg.get("verbose_logging", True)))
+        self._form.addRow("", self._verbose)
+
+    # --- accent -------------------------------------------------------------
+
+    def _on_accent_changed(self, index: int) -> None:
+        item = self._accent_combo.model().item(index)
+        if item is not None and not item.isEnabled():
+            # keyboard navigation can land on a disabled group header
+            self._accent_combo.setCurrentIndex(self._last_valid_accent_idx)
+            return
+        self._last_valid_accent_idx = index
+        hex_ = self._accent_combo.itemData(index)
+        custom = hex_ is None
+        self._accent_edit.setEnabled(custom)
+        self._accent_pick.setEnabled(custom)
+        if custom:
+            self._accent_edit.setFocus()
+            return
+        self._accent_edit.setText(str(hex_))
+        theme.set_accent(self._qapp, str(hex_))  # the paired dark applies
+
+    def _apply_accent_from_edit(self) -> None:
+        text = self._accent_edit.text().strip()
+        if self._accent_combo.currentData() is not None and text:
+            return  # a preset is selected — the combo owns the value
+        applied = theme.set_accent(self._qapp, text or theme.ACCENT)
+        self._accent_edit.setText(applied)
+
+    def _on_accent_pick(self) -> None:
+        from PySide6.QtGui import QColor
+
+        initial = QColor(self._accent_edit.text())
+        chosen = QColorDialog.getColor(
+            initial if initial.isValid() else QColor(theme.ACCENT), self,
+            "Accent color")
+        if chosen.isValid():
+            self._accent_edit.setText(chosen.name())
+            self._apply_accent_from_edit()
+
+    def _resolved_accent(self) -> str:
+        hex_ = self._accent_combo.currentData()
+        if hex_ is not None:
+            return str(hex_)
+        applied = theme.set_accent(self._qapp,
+                                   self._accent_edit.text().strip()
+                                   or theme.ACCENT)
+        return applied
+
+    def _on_font_size(self, px: int) -> None:
+        theme.set_font_size(self._qapp, px)
+
+    def _on_console(self, on: bool) -> None:
+        # applies immediately (Blender-style toggle)
+        if on:
+            debug_console.enable()
+        else:
+            debug_console.disable()
+
+    def _apply(self) -> None:
+        self._cfg["font_size"] = self._font_size.value()
+        self._cfg["accent"] = self._resolved_accent()
+        self._debug_cfg["console_enabled"] = self._console.isChecked()
+        self._debug_cfg["verbose_logging"] = self._verbose.isChecked()
+        self._settings.save()
+
+
+class AutoFocusPage(QWidget):
+    """Curated AF knobs + the backlash calibration. The window bounds
+    and the rough-scan speed base live in the right-panel AF group
+    (per-objective multipliers apply at AF start)."""
+
+    _RECONNECT = "applies after restart"
+
+    def __init__(self, settings, autofocus_service, parent=None):
+        super().__init__(parent)
+        self._settings = settings
+        self._service = autofocus_service
+        self._form_page = _FormPage(settings, settings.section("autofocus"),
+                                    parent=self)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.addWidget(self._form_page)
+
+        fp = self._form_page
+        fp.add_float("timeout_s", "Timeout (s)", 10, 600, 10)
+        fp.add_float("quality_threshold", "Quality threshold", 0.0, 1.0, 0.05)
+        fp.add_int("stage2_retries", "Stage-2 retries", 0, 5)
+        fp.add_float("near_window_steps", "Near window (steps)", 0, 2000, 10)
+        fp.add_float("sigma_steps", "σ steps (0 = auto)", 0, 1000, 5)
+
+        cal_row = QWidget()
+        cal_layout = QHBoxLayout(cal_row)
+        cal_layout.setContentsMargins(0, 0, 0, 0)
+        self._cal_btn = QPushButton("Calibrate backlash")
+        self._cal_btn.clicked.connect(self._on_calibrate)
+        cal_layout.addWidget(self._cal_btn)
+        self._backlash_label = QLabel("—")
+        self._backlash_label.setObjectName("dim")
+        cal_layout.addWidget(self._backlash_label)
+        cal_layout.addStretch(1)
+        fp.add_custom_row(cal_row)
+        self._refresh_backlash()
+
+        if autofocus_service is not None:
+            autofocus_service.sig_cal_finished.connect(
+                lambda r: self._refresh_backlash())
+            autofocus_service.sig_cal_finished.connect(
+                lambda r: self._cal_btn.setEnabled(True))
+
+    def _refresh_backlash(self) -> None:
+        cfg = self._settings.device("focus")
+        value = cfg.get("backlash_um", 0.0)
+        measured = cfg.get("backlash_measured_at", "")
+        self._backlash_label.setText(
+            f"measured: {float(value):.2f} µm"
+            + (f" ({str(measured)[:16]})" if measured else ""))
+
+    def _on_calibrate(self) -> None:
+        if self._service is None:
+            return
+        if self._service.busy:
+            return  # a run is already in flight (re-enables on its finish)
+        # calibrate_backlash only SUBMITS a job and returns, so the old
+        # disable/enable pair re-enabled the button immediately: repeat
+        # clicks queued several calibrations. It stays disabled until
+        # sig_cal_finished arrives.
+        self._cal_btn.setEnabled(False)
+        self._service.calibrate_backlash()
+
+    def _apply(self) -> None:
+        self._form_page._apply()
+
+
+class TemperaturePage(QWidget):
+    """Connection + safety limits + the user-editable setpoint presets
+    (the right-panel Temperature group's dropdown)."""
+
+    def __init__(self, settings, parent=None):
+        super().__init__(parent)
+        self._settings = settings
+        self._form_page = _FormPage(settings, settings.device("yudian"),
+                                    parent=self)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.addWidget(self._form_page)
+
+        fp = self._form_page
+        fp.add_text("port", "Port", annotation=_RECONNECT)
+        fp.add_int("baudrate", "Baudrate", 1200, 115200, _RECONNECT)
+        fp.add_int("slave_address", "Modbus slave address", 1, 247,
+                   _RECONNECT)
+        fp.add_float("safety_lo_c", "Safety low (°C)", -100, 400, 1)
+        fp.add_float("safety_hi_c", "Safety high (°C)", -100, 400, 1)
+
+        presets = QGroupBox("Setpoint presets")
+        preset_layout = QVBoxLayout(presets)
+        self._presets = QTableWidget(0, 2)
+        self._presets.setHorizontalHeaderLabels(["Name", "°C"])
+        self._presets.setMaximumHeight(160)  # the dialog stays compact;
+        # beyond this the table's own scrollbar takes over
+        preset_layout.addWidget(self._presets)
+        btn_row = QHBoxLayout()
+        add_btn = QPushButton("Add")
+        add_btn.clicked.connect(self._add_preset)
+        remove_btn = QPushButton("Remove")
+        remove_btn.clicked.connect(self._remove_preset)
+        btn_row.addWidget(add_btn)
+        btn_row.addWidget(remove_btn)
+        btn_row.addStretch(1)
+        preset_layout.addLayout(btn_row)
+        layout.addWidget(presets)
+        layout.addStretch(1)
+        self._load_presets()
+
+    def _load_presets(self) -> None:
+        self._presets.setRowCount(0)
+        for preset in self._settings.device("yudian").get("presets") or []:
+            r = self._presets.rowCount()
+            self._presets.insertRow(r)
+            self._presets.setItem(
+                r, 0, QTableWidgetItem(str(preset.get("name", ""))))
+            self._presets.setItem(
+                r, 1, QTableWidgetItem(str(float(preset.get("temp_c", 25.0)))))
+
+    def _add_preset(self) -> None:
+        r = self._presets.rowCount()
+        self._presets.insertRow(r)
+        self._presets.setItem(r, 0, QTableWidgetItem("New preset"))
+        self._presets.setItem(r, 1, QTableWidgetItem("25.0"))
+
+    def _remove_preset(self) -> None:
+        row = self._presets.currentRow()
+        if row >= 0:
+            self._presets.removeRow(row)
+
+    def _apply(self) -> None:
+        self._form_page._apply()
+        presets = []
+        for r in range(self._presets.rowCount()):
+            name_item = self._presets.item(r, 0)
+            temp_item = self._presets.item(r, 1)
+            name = name_item.text().strip() if name_item else ""
+            if not name:
+                continue
+            try:
+                temp_c = float(temp_item.text().strip()) if temp_item else 25.0
+            except ValueError:
+                temp_c = 25.0
+            presets.append({"name": name, "temp_c": temp_c})
+        self._settings.device("yudian")["presets"] = presets
+        self._settings.save()
+
+
+def _device_page(settings, section: str, fields: list, annotation: str) \
+        -> _FormPage:
+    """fields: (kind, key, label, *args) tuples; section names a DEVICE
+    (settings.device)."""
+    page = _FormPage(settings, settings.device(section), annotation)
+    for spec in fields:
+        kind = spec[0]
+        if kind == "float":
+            page.add_float(*spec[1:])
+        elif kind == "int":
+            page.add_int(*spec[1:])
+        elif kind == "text":
+            page.add_text(*spec[1:])
+        elif kind == "bool":
+            page.add_bool(*spec[1:])
+        elif kind == "combo":
+            page.add_combo(*spec[1:])
+        elif kind == "dir":
+            page.add_dir(*spec[1:])
+    return page
+
+
+_RECONNECT = "applies after reconnect"
+_RESTART = "applies after restart"
+
+
+def _build_pages(settings, qapp, manager, autofocus_service, parent):
+    """The full page list as (parent, label, page) triples — the nav
+    tree groups the device pages under a "Hardware" parent."""
+    pages: list[tuple[str | None, str, QWidget]] = []
+
+    pages.append((None, "General", GeneralPage(settings, qapp, parent)))
+
+    pages.append((None, "Objectives & Calibration",
+                  ObjectivesPage(settings, parent)))
+    pages.append((None, "AutoFocus",
+                  AutoFocusPage(settings, autofocus_service, parent)))
+
+    # Workspace-dependent camera settings (exposure/gain/WB/auto-gain)
+    # live in the right panels only — the device page keeps the
+    # connection-level knobs.
+    cam_fields = [
+        ("int", "resolution", "Live resolution (0=4K, 1=1080p)", 0, 1,
+         _RECONNECT),
+    ]
+    pages.append(("Hardware", "Camera",
+                  _device_page(settings, "camera", cam_fields, "")))
+    focus_fields = [
+        ("text", "port", "Port", _RECONNECT),
+        ("int", "baudrate", "Baudrate", 9600, 460800, _RECONNECT),
+        ("int", "max_speed", "Max speed (steps/s)", 50, 5000, _RESTART),
+        ("int", "min_speed", "Min speed (steps/s)", 10, 1000, _RESTART),
+        ("float", "um_per_step", "µm per step", 0.01, 10, 0.01),
+        ("float", "backlash_um", "Backlash (µm, mechanism)", 0.0, 50, 0.1),
+        ("bool", "slim_on", "Soft limits on"),
+        ("int", "slim_min", "Soft limit min (steps)", -2000000, 2000000),
+        ("int", "slim_max", "Soft limit max (steps)", -2000000, 2000000),
+    ]
+    pages.append(("Hardware", "Focus",
+                  _device_page(settings, "focus", focus_fields, "")))
+    zolix_fields = [
+        ("text", "port", "Port", _RECONNECT),
+        ("int", "baudrate", "Baudrate", 9600, 460800, _RECONNECT),
+        ("int", "slave_address", "Modbus slave address", 1, 247, _RECONNECT),
+        ("float", "um_per_pulse_xy", "µm per pulse XY", 0.01, 10, 0.01),
+        ("float", "um_per_pulse_r", "µm per pulse R", 0.0001, 0.1, 0.0001),
+        ("int", "slow_speed_pps", "Slow speed (pps)", 10, 10000, _RESTART),
+        ("int", "fast_speed_pps", "Fast speed (pps)", 10, 100000, _RESTART),
+        ("bool", "rotation_enabled", "Rotation enabled"),
+    ]
+    pages.append(("Hardware", "Zolix XYR",
+                  _device_page(settings, "zolix", zolix_fields, "")))
+    sigm_fields = [
+        ("text", "port", "Port", _RECONNECT),
+        ("int", "baudrate", "Baudrate", 9600, 460800, _RECONNECT),
+        ("float", "um_per_step_xy", "µm per step XY", 0.01, 10, 0.01),
+        ("float", "um_per_step_z", "µm per step Z", 0.01, 10, 0.01),
+        ("int", "slow_speed_hz", "Slow speed (Hz)", 25, 500, _RESTART),
+        ("int", "fast_speed_hz", "Fast speed (Hz)", 25, 500, _RESTART),
+        ("int", "slow_speed_z", "Slow Z speed (Hz)", 25, 500, _RESTART),
+        ("int", "fast_speed_z", "Fast Z speed (Hz)", 25, 500, _RESTART),
+    ]
+    pages.append(("Hardware", "SigmaKoki XYZ",
+                  _device_page(settings, "sigmakoki", sigm_fields, "")))
+    pages.append(("Hardware", "Temperature",
+                  TemperaturePage(settings, parent)))
+    return pages
+
+
+class PreferencesDialog(QDialog):
+    # Emitted after Apply/OK persists the pages: consumers that cache
+    # settings-derived state (the calibration context, the hardware strip)
+    # must refresh then, not only when the dialog closes.
+    sig_applied = Signal()
+
+    def __init__(self, manager, settings, qapp, autofocus_service,
+                 parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Preferences")
+        self.resize(920, 620)
+        root = QVBoxLayout(self)
+        body = QHBoxLayout()
+
+        # Tree nav: General / Hardware (Camera, Focus, Zolix XYR,
+        # SigmaKoki XYZ, Temperature) / Objectives / AutoFocus /
+        # Calibration.
+        self._nav = QTreeWidget()
+        self._nav.setHeaderHidden(True)
+        self._nav.setObjectName("prefs_nav")
+        self._nav.setFixedWidth(200)
+        self._stack = QStackedWidget()
+        self._pages: list[QWidget] = []
+        self._page_items: list[QTreeWidgetItem] = []
+        parents: dict[str, QTreeWidgetItem] = {}
+        for parent, title, page in _build_pages(settings, qapp, manager,
+                                                autofocus_service, self):
+            self._pages.append(page)
+            self._stack.addWidget(page)
+            if parent is not None:
+                # NOTE: not setdefault — the default QTreeWidgetItem(...)
+                # would be constructed eagerly every iteration and each
+                # construction attaches an orphan top-level item.
+                top = parents.get(parent)
+                if top is None:
+                    top = QTreeWidgetItem(self._nav, [parent])
+                    top.setFlags(top.flags()
+                                 & ~Qt.ItemFlag.ItemIsSelectable)
+                    parents[parent] = top
+                item = QTreeWidgetItem(top, [title])
+            else:
+                item = QTreeWidgetItem(self._nav, [title])
+            self._page_items.append(item)
+        self._nav.currentItemChanged.connect(self._on_nav_changed)
+        self._nav.setCurrentItem(self._page_items[0])
+        self._nav.expandAll()
+        body.addWidget(self._nav)
+        body.addWidget(self._stack, stretch=1)
+        root.addLayout(body, stretch=1)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok
+            | QDialogButtonBox.StandardButton.Apply
+            | QDialogButtonBox.StandardButton.Cancel)
+        buttons.button(QDialogButtonBox.StandardButton.Ok).clicked.connect(
+            self._on_ok)
+        buttons.button(QDialogButtonBox.StandardButton.Apply).clicked.connect(
+            self._on_apply)
+        buttons.rejected.connect(self.reject)
+        root.addWidget(buttons)
+
+    def _on_nav_changed(self, current: QTreeWidgetItem,
+                        _previous) -> None:
+        if current is None:
+            return
+        try:
+            index = self._page_items.index(current)
+        except ValueError:
+            return  # a parent node — no page
+        self._stack.setCurrentIndex(index)
+
+    def _on_apply(self) -> None:
+        for page in self._pages:
+            apply = getattr(page, "_apply", None)
+            if apply is not None:
+                apply()
+        self.sig_applied.emit()
+
+    def _on_ok(self) -> None:
+        self._on_apply()
+        self.accept()
