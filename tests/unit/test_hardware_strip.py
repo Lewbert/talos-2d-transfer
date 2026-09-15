@@ -134,6 +134,32 @@ def test_parse_sigmakoki_falls_back_to_status_strings():
     assert parsed["speed_hz"] == SPEED_LEVEL_TO_HZ[0]
 
 
+def test_temp_power_colour_ladder():
+    """The reference project's heat-status ladder, applied to the PWR
+    readout: full power red → orange → amber, then green when settled on
+    the setpoint, light green when close, blue otherwise."""
+    from talos.ui.widgets.hardware_strip import temp_power_color
+
+    assert temp_power_color(25.0, 25.0, 95.0) == "#e53935"   # full power
+    assert temp_power_color(25.0, 200.0, 50.0) == "#fb8c00"  # moderate
+    assert temp_power_color(25.0, 200.0, 20.0) == "#fdd835"  # gentle
+    assert temp_power_color(25.0, 25.0, 0.0) == "#43a047"    # settled
+    assert temp_power_color(25.0, 26.0, 0.0) == "#66bb6a"    # near
+    assert temp_power_color(25.0, 40.0, 0.0) == "#1e88e5"    # far off
+    # no reading → no colour (the label falls back to the theme's dim)
+    assert temp_power_color(None, 25.0, 0.0) is None
+    assert temp_power_color(25.0, None, 0.0) is None
+    assert temp_power_color(25.0, 25.0, None) is None
+
+
+def test_power_is_ordered_by_power_before_delta():
+    """A heater at full power reads RED even while sitting on the setpoint
+    — the ladder checks the output first (as the reference does)."""
+    from talos.ui.widgets.hardware_strip import temp_power_color
+
+    assert temp_power_color(25.0, 25.0, 100.0) == "#e53935"
+
+
 def test_parse_focus_and_yudian():
     focus = parse_focus({
         "device": "focus",

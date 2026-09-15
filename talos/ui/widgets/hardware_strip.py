@@ -11,8 +11,8 @@ moving is derived from the per-axis flags); sigmakoki position is
 
 from __future__ import annotations
 
-from PySide6.QtCore import Qt
-from PySide6.QtGui import QColor, QPainter
+from PySide6.QtCore import QSize, Qt
+from PySide6.QtGui import QColor, QFontMetrics, QPainter
 from PySide6.QtWidgets import (
     QCheckBox,
     QFrame,
@@ -24,7 +24,7 @@ from PySide6.QtWidgets import (
 
 from talos.hal.base import Axis
 from talos.hal.devices.sigmakoki import SPEED_LEVEL_TO_HZ
-from talos.ui.theme import DANGER, LED_OFF
+from talos.ui.theme import DANGER, LED_OFF, TEXT_DIM
 from talos.ui.widgets.trigger_bar import TriggerBarWidget
 
 #: All four sections are the SAME width (the user's requirement). Their
@@ -126,6 +126,85 @@ def parse_yudian(payload: dict) -> dict:
 # --- widgets ------------------------------------------------------------
 
 
+class _ValueLabel(QWidget):
+    """A label that can be tinted with a DATA colour (a heat ramp).
+
+    A per-widget palette does not survive the app stylesheet — Qt's
+    stylesheet style republishes the widget palette during polish and then
+    paints the text from its own rule/palette, so the value kept the theme
+    colour no matter when setPalette ran (measured). Painting the text here
+    keeps the colour in one place and leaves the QSS for theme colours.
+    """
+
+    def __init__(self, text: str = "", parent: QWidget | None = None):
+        super().__init__(parent)
+        self._text = text
+        self._colour: str | None = None
+
+    def set_text(self, text: str) -> None:
+        if text != self._text:
+            self._text = text
+            self.updateGeometry()
+            self.update()
+
+    def text(self) -> str:
+        return self._text
+
+    def set_colour(self, colour: str | None) -> None:
+        if colour != self._colour:
+            self._colour = colour
+            self.update()
+
+    def sizeHint(self):  # noqa: N802
+        metrics = QFontMetrics(self.font())
+        return QSize(metrics.horizontalAdvance(self._text) + 4,
+                     metrics.height())
+
+    def minimumSizeHint(self):  # noqa: N802
+        return self.sizeHint()
+
+    def paintEvent(self, event) -> None:  # noqa: N802
+        painter = QPainter(self)
+        painter.setPen(QColor(self._colour or TEXT_DIM))
+        painter.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, self._text)
+
+
+def _set_state(widget: QWidget, object_name: str) -> None:
+    """Swap a state colour by objectName. Changing objectName does NOT
+    re-evaluate the stylesheet — Qt only repolishes when asked."""
+    if widget.objectName() == object_name:
+        return
+    widget.setObjectName(object_name)
+    style = widget.style()
+    style.unpolish(widget)
+    style.polish(widget)
+
+
+def temp_power_color(pv: float | None, sv: float | None,
+                     out: float | None) -> str | None:
+    """Heat-status colour for the PWR readout.
+
+    The ramp is the reference project's temperature panel verbatim (its PV
+    colour ladder): full power red → orange → amber, then — once the heater
+    is idling — green when settled on the setpoint, light green when close,
+    blue otherwise. None = no colour (uncalibrated/no reading).
+    """
+    if pv is None or sv is None or out is None:
+        return None
+    delta = float(pv) - float(sv)
+    if out > 80:
+        return "#e53935"        # red — full power
+    if out > 40:
+        return "#fb8c00"        # orange — moderate heating
+    if out > 10:
+        return "#fdd835"        # amber — gentle heating
+    if abs(delta) < 0.5:
+        return "#43a047"        # green — stable at the setpoint
+    if abs(delta) < 2.0:
+        return "#66bb6a"        # light green — approaching it
+    return "#1e88e5"            # blue — heating up / cooling down
+
+
 class _MiniDot(QWidget):
     """8px status dot (lit = triggered)."""
 
@@ -201,17 +280,28 @@ class _StageSection(_Section):
         self._enable.toggled.connect(
             lambda on: manager.set_enabled(device_key, on))
         self.add(self._enable)
+        # Status word right after the toggle — the same IDLE/<state> wording
+        # the focus section uses, in the same style (dim grey at rest, green
+        # while the axis turns). Fixed width: "IDLE" and "MOVE" must not
+        # shift the fields beside them.
+        self._moving = QLabel("IDLE")
+        self._moving.setObjectName("strip_mov_idle")
+        self._moving.setFixedWidth(46)
+        self._moving.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._moving.setToolTip("Green while the axis is turning")
+        self.add(self._moving)
         self.add_gap()
+
         self._pos = QLabel("—")
         self._pos.setObjectName("readout")
         self._pos.setMinimumWidth(180)
         # The readout grows into part of the leftover (it is the main
         # display) but is capped so it cannot become a huge empty box — the
         # even gaps below take the rest.
-        self._pos.setMaximumWidth(250)
+        self._pos.setMaximumWidth(230)
         self._pos.setAlignment(Qt.AlignmentFlag.AlignRight
                                | Qt.AlignmentFlag.AlignVCenter)
-        self.add(self._pos, stretch=1)
+        self.add(self._pos, stretch=2)
         self.add_gap()
 
         self._dots: dict[str, _MiniDot] = {}
@@ -220,22 +310,15 @@ class _StageSection(_Section):
             dot.setToolTip(f"{device_key} limit {key}")
             self._dots[key] = dot
             self.add(dot)
-        self.add_gap()
         self._has_estop = bool(estop)
         self._estop = QLabel("")
         self._estop.setObjectName("strip_estop")
         self._estop.setToolTip("Emergency-stop bit is set on the controller")
         if self._has_estop:
+            self.add_gap()
             self.add(self._estop)
             self._estop.hide()   # NO reserved slot: an E-STOP appearing must
             # shove the neighbours — that is what makes it noticed.
-        # Always visible, grey when idle and green while the axis turns:
-        # an empty reserved slot read as a hole in the panel.
-        self._moving = QLabel("MOV")
-        self._moving.setObjectName("strip_mov_idle")
-        self._moving.setFixedWidth(30)
-        self._moving.setToolTip("Green while the axis is turning")
-        self.add(self._moving)
         self._last_pos: tuple | None = None
 
     def set_compact(self, compact: bool) -> None:
@@ -283,9 +366,8 @@ class _StageSection(_Section):
             self._estop.setText("E-STOP" if estop else "")
             self._estop.setVisible(estop)
         moving = self._is_moving(parsed)
-        self._moving.setObjectName("strip_mov" if moving else "strip_mov_idle")
-        self._moving.style().unpolish(self._moving)
-        self._moving.style().polish(self._moving)
+        self._moving.setText("MOVE" if moving else "IDLE")
+        _set_state(self._moving, "strip_mov" if moving else "strip_mov_idle")
 
 
 def format_focus_pos(pos_steps: int, um_per_step: float) -> str:
@@ -351,9 +433,7 @@ class HardwareStrip(QWidget):
         self._temp_sv.setObjectName("dim")
         self._temp_sv.setAlignment(Qt.AlignmentFlag.AlignCenter)
         temp.add(self._temp_sv, stretch=3)
-        self._temp_out = QLabel("0%")
-        self._temp_out.setObjectName("dim")
-        self._temp_out.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._temp_out = _ValueLabel("PWR —")
         temp.add(self._temp_out, stretch=2)
         layout.addWidget(temp, stretch=_SECTION_STRETCH)
 
@@ -420,11 +500,16 @@ class HardwareStrip(QWidget):
             blocked = parsed["blocked"] not in ("0", "")
             self._focus_state.setText("⚠ BLOCKED" if blocked
                                       else parsed["mode"])
-            # objectName swap + re-polish instead of an inline stylesheet
-            # (the theme's rule wins over QStatusBar's dim descendant rule)
-            self._focus_state.setObjectName("strip_warn" if blocked else "dim")
-            self._focus_state.style().unpolish(self._focus_state)
-            self._focus_state.style().polish(self._focus_state)
+            # Same state styling as the stages' IDLE/MOVE word: dim at rest,
+            # green while the axis moves (CONT = continuous jog, TRAP = a
+            # positioned move), warn when a direction is blocked.
+            if blocked:
+                state = "strip_warn"
+            elif parsed["mode"] in ("CONT", "TRAP"):
+                state = "strip_mov"
+            else:
+                state = "dim"
+            _set_state(self._focus_state, state)
         elif device_key == "yudian":
             parsed = parse_yudian(payload)
             if parsed["pv"] is not None:
@@ -432,4 +517,7 @@ class HardwareStrip(QWidget):
             if parsed["sv"] is not None:
                 self._temp_sv.setText(f"SV {parsed['sv']:.1f} °C")
             if parsed["out"] is not None:
-                self._temp_out.setText(f"{parsed['out']:.0f} %")
+                self._temp_out.set_text(f"PWR {parsed['out']:.0f}%")
+            # Heat-status colour (the reference project's ladder).
+            self._temp_out.set_colour(
+                temp_power_color(parsed["pv"], parsed["sv"], parsed["out"]))

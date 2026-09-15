@@ -468,10 +468,10 @@ def test_telemetry_updates_strip(window):
     # fixed-width fields (the numbers must not jitter as digits change)
     text = window._strip._xyr._pos.text()
     assert "1.2" in text and "2.5" in text and text.endswith("°")
-    # MOV is always visible; only its colour changes (grey → green), so the
-    # panel never shows a hole where the indicator will appear
+    # The status word is always visible and only changes colour (grey →
+    # green), in the same style as the focus section's IDLE/CONT.
     for section in (window._strip._xyr, window._strip._xyz):
-        assert section._moving.text() == "MOV"
+        assert section._moving.text() == "IDLE"
         assert section._moving.objectName() == "strip_mov_idle"
 
 
