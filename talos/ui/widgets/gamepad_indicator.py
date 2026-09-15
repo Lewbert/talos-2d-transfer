@@ -11,7 +11,10 @@ class GamepadIndicator(QWidget):
         layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(8)
-        self._status = QLabel("No Controller")
+        # "Controller" alone read as the MOTION controller (a vision audit
+        # flagged the status bar as claiming the instruments were
+        # disconnected while their LEDs were green) — name the device.
+        self._status = QLabel("No gamepad")
         self._status.setObjectName("dim")
         layout.addWidget(self._status)
         self._dpad = QLabel("")
@@ -20,10 +23,10 @@ class GamepadIndicator(QWidget):
 
     def set_connected(self, connected: bool, name: str = "Xbox Controller") -> None:
         if connected:
-            self._status.setText(f"Controller: {name}")
+            self._status.setText(f"Gamepad: {name}")
             self._restyle(self._status, "ok")
         else:
-            self._status.setText("No Controller")
+            self._status.setText("No gamepad")
             self._restyle(self._status, "dim")
 
     @staticmethod

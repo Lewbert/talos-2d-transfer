@@ -51,6 +51,91 @@ Dependencies point downwards only: UI → input → manager → proxies → driv
    through the queue: `FocusProxy.request_abort()` sets a flag that the
    controller polls, and `move_to_verified` polls it *while the axis travels*.
 
+## Device reconnect (proxy life-cycle)
+
+A driver is constructed **inside its worker thread** from a factory that closes
+over the settings dict and runs exactly once, so an edited port/baudrate never
+reaches a live driver. `InstrumentManager.reconnect(key)` is the supported way
+to apply one:
+
+1. record what the live driver was built with (`_proxy_cfg`, a *copy*),
+2. stop the old worker through its own event loop — queued `enqueue_stop` →
+   `cancel_pending` → `request_shutdown` — and join it,
+3. build a fresh proxy (new factory → new driver → new `connect()`), re-wire
+   the manager's signals, re-broadcast the enable gate, start it.
+
+Rules that make this safe:
+
+- **Retire, don't delete.** The replaced proxy is kept in `_retired` with its
+  signals intact: completions already queued to the GUI thread (a
+  `sig_af_done`, a `sig_command_done`) must still be delivered — destroying the
+  sender drops them and an autofocus run would leave the service busy forever.
+- **Identity, not key.** `_sender_key()` returns `""` for a sender that is not
+  the live proxy for its key, so a retired proxy cannot speak for its
+  replacement (same `device_key`, different device).
+- **Queued jobs FAIL.** `cancel_pending()` emits `sig_command_failed` for every
+  queued job; `request_shutdown` clears the queue silently, which would leave
+  `StageAdapter._call` (and the UI's busy gates) blocked for their full
+  timeout. Failure rather than "done" is deliberate: a done-with-None result is
+  read as a *value* by the adapter.
+- **Refused while a job owns the worker** (`FocusProxy.busy`) and deferred by
+  the UI while a scan/autofocus owns the axes.
+- Test note: a manager must be torn down deterministically (`del` + `gc.collect()`)
+  — letting Python's collector free a proxy/thread graph inside a later nested
+  event loop crashes the interpreter.
+
+## Input mapping (manual motion)
+
+`InputSystem._dispatch` is the single choke point every manual source goes
+through (keyboard, gamepad sticks/D-pad/triggers, on-screen holds and clicks,
+the dialbox). `talos/input/axis_map.py` maps `(axis, direction)` there:
+flip X↔Y first, then invert the (possibly swapped) axis — the reference
+project's order. Stops carry direction 0, so they follow the axis flip and are
+never negated.
+
+Deliberately NOT mapped: position readback, autofocus, the objective focus
+offsets, the flake "go to" move and the grid scan. These are computed motions;
+inverting them would silently corrupt stored coordinates and scan geometry. The
+camera flip is likewise independent — it rotates the image, never an axis.
+
+## Live-view overlays: two layers
+
+- **Baked into the frame pixmap** (`LiveViewWidget._compose`): the
+  inverse-video crosshair and the calibrated tick ruler, painted with
+  `CompositionMode_Difference` against white (= |dst − 255| = invert). This is
+  the only layer where a difference blend is correct: the overlay surface below
+  is a translucent child repainted with every frame, so a difference pen there
+  would compound against its own previous output. Baking also clips the lines
+  to the frame (no drawing across the letterbox bars) and puts them on the
+  frame's true centre. `_frame_pixmap` stays CLEAN; `_compose` copies it.
+- **On the overlay surface** (a mouse-transparent child stacked above the frame
+  label — Qt paints children after the parent): the AF ROI outline + tag, the
+  drag rubber band, the scale bar, the AF status pill and the scan-path panel.
+  These are UI chrome, and their geometry is mapped through
+  `fit_transform`/`roi_for_resolution` so they stay frame-anchored at any
+  window size.
+
+The ruler's spacing comes from the same 1/2/5 ladder as the scale bar
+(`talos/cv/ruler.py`), and its offsets are measured from the FRAME CENTRE, so 0
+sits on the optical axis and the labelled µm span does not change with resizes.
+
+## Image orientation (camera flip)
+
+`devices.camera.flip` (default ON) rotates every decoded frame 180° so the
+optically inverted bench image reads in real-world orientation. It is applied
+in the `Camera` ABC's `apply_flip`, called at each backend's SINGLE frame
+egress — `_decode` for smartcam/mcam, `_render` for the sim, `fetch` for the
+rest — which is what puts it *before* the scale-bar burn: a flip applied later
+would mirror the bar and its label into the corner of every saved snapshot
+while the live view looked correct. Each backend declares `APPLIES_FLIP` and a
+registry test walks them, because a backend that forgets leaves the live view
+corrected and the autofocus/detection path not.
+
+Cost: `cv2.flip` ≈ 3.6 ms at 1080p (~8 % of a 50 ms frame), ≈ 15 ms once per 4K
+snapshot. Toggling it mid-session mirrors `autofocus.default_roi_norm` and
+clears the flake table — both are frame-space state that a 180° rotation
+invalidates.
+
 ## The job model
 
 `InstrumentManager.submit(device, method, *args, priority=0)` wraps the call in
@@ -167,6 +252,10 @@ change, on Apply, and (defensively) if the database is unreadable — a corrupt
   delay — stamped both on disconnect and on every failed-connect cleanup.
 - **Parameter queries stall frame delivery** (~330 ms each, measured). Never
   query in a per-frame loop; `get_properties` caches its readback.
+- **Orientation**: `flip` is a SOFTWARE property — it must never reach
+  `ApiCam_SetParameterValue` (each backend's `set_property` routes it through
+  `try_set_flip` first) and it is deliberately not a camera-profile key, since
+  it is not per-workspace.
 
 ## Testing model
 

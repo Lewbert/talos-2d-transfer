@@ -88,15 +88,41 @@ the rest keep working.
   region** (whole frame, or a ROI you drag or type in — drawn on the live view
   as a dashed "AF ROI" box).
 - **Sample Finding** — flake detection on the current frame, bounded autofocus,
-  and the grid scan (serpentine waypoints + manifest + frames on disk).
+  and the grid scan (serpentine waypoints + manifest + frames on disk). A
+  **scan-path panel** at the top of the viewport previews the serpentine grid
+  from the current field values and highlights the row/column the run is on.
 
 Menus: **File**, **Edit → Preferences** (`Ctrl+,`), **Display** (overlays, scale
 bar), **Windows** (AF Detail, Stage Control, Log), **Help**.
 
-Preferences holds General, Objectives & Calibration, AutoFocus and the Hardware
-device pages. Workspace-dependent camera settings (exposure, gain, WB,
+Display toggles the live-view overlays: scale bar (with an optional burn-in for
+snapshots), AF status pill, **crosshairs** (solid, inverse-video — the line
+inverts whatever is under it, so it stays visible on any image), **tick ruler**
+(calibrated major/minor ticks on all four frame edges, labelled in µm from the
+frame centre) and the scan path.
+
+Preferences holds General, Objectives & Calibration, AutoFocus, Input & Gamepad
+and the Hardware device pages (Camera, Focus, Zolix XYR, SigmaKoki XYZ,
+Temperature), grouped by kind (Connection / Manual controls / Axis direction /
+Scale …). Ports are picked from the ports actually present (a configured port
+that is not detected is kept), baudrates from the standard ladder, and every
+page scrolls. Workspace-dependent camera settings (exposure, gain, WB,
 auto-gain) live in the right panels, not in Preferences — they differ per
 workspace by design.
+
+Two Preferences points worth knowing:
+
+- **Camera flip** (Hardware → Camera → Image orientation, default ON) rotates
+  every frame 180° so the optically inverted image reads in real-world
+  orientation. It applies to the live view, autofocus, flake detection *and*
+  saved snapshots, and is deliberately independent of the stage axis inversion
+  (flipping the camera never inverts a stage, and never changes the scan
+  direction). Changing it mid-session mirrors the AF region and clears the
+  detected-flake table, both of which are tied to the old orientation.
+- **Connection settings reconnect on Apply**: changing a port, baudrate, slave
+  address or timeout rebuilds that device's driver immediately (the LED shows
+  CONNECTING while it swaps). It is refused — with a log line — while a scan or
+  an autofocus run owns the axes; re-apply after the job.
 
 ## Input
 
@@ -125,6 +151,20 @@ Keyboard: arrows = X/Y, R/F = Z, `+`/`-` = focus (hold for continuous, tap for a
 step), Shift = fast. On-screen hold buttons behave the same way and release on
 pointer-leave, window hide, or Esc.
 
+### Inverting the controls
+
+Every axis can be inverted for *manual* motion, and each stage can swap its two
+axes (X↔Y), in **Preferences → Hardware → the device → Axis direction**; the
+focus jog direction and the gamepad's per-stick axes live on their own pages.
+A `flip X↔Y` swap means the Stage Control panel's X+ button drives the physical
+Y axis — the hint on the page says so.
+
+These affect manual motion only (keyboard, gamepad, on-screen buttons and holds,
+the dialbox). Position readback, autofocus, the flake "go to" move and the grid
+scan are computed motions and are never inverted — that would silently corrupt
+stored coordinates. The camera flip is separate again: it rotates the image and
+never touches an axis.
+
 ## Calibration
 
 The canonical calibration is **µm per 4K-sensor pixel**. The live 1080p stream
@@ -145,11 +185,12 @@ python -m pytest                  # everything — the real-time simulations dom
 python -m pytest -m "not slow"    # the fast subset (order of a minute)
 ```
 
-About 660 tests: unit tests for the drivers/CV/settings, integration tests for
-the job/stop machinery, and closed-loop **simulations** (marked `slow`) that run
-the autofocus strategies and the grid scan against simulated focus curves and
-check that they land on the true focus position. Hardware-in-the-loop checks
-live in `tools/` rather than in the suite, so the suite needs no instruments.
+About 750 tests: unit tests for the drivers/CV/settings/UI wiring, integration
+tests for the job/stop/reconnect machinery, and closed-loop **simulations**
+(marked `slow`) that run the autofocus strategies and the grid scan against
+simulated focus curves and check that they land on the true focus position.
+Hardware-in-the-loop checks live in `tools/` rather than in the suite, so the
+suite needs no instruments.
 
 ## Tools
 

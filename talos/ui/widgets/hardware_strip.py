@@ -174,7 +174,7 @@ class _StageSection(_Section):
 
         self._pos = QLabel("—")
         self._pos.setObjectName("readout")
-        self._pos.setMinimumWidth(150)
+        self._pos.setMinimumWidth(120)
         self._pos.setAlignment(Qt.AlignmentFlag.AlignRight
                                | Qt.AlignmentFlag.AlignVCenter)
         self.add(self._pos, stretch=1)
@@ -190,17 +190,28 @@ class _StageSection(_Section):
         # must not move the neighbouring sections around.
         self._estop = QLabel("")
         self._estop.setObjectName("strip_estop")
-        self._estop.setFixedWidth(52)
+        self._estop.setFixedWidth(46)
         self._estop.setToolTip("Emergency-stop bit is set on the controller")
         if limits:
             self.add(self._estop)
 
         self._moving = QLabel("")
         self._moving.setObjectName("strip_mov")
-        self._moving.setFixedWidth(34)
+        self._moving.setFixedWidth(30)
         self._moving.setToolTip("The axis is turning")
         self.add(self._moving)
         self._last_pos: tuple | None = None
+
+    def set_compact(self, compact: bool) -> None:
+        """Drop the optional indicators when the window is too narrow for
+        all four sections (1024 px minimum): the enable toggle, the readout
+        and MOV survive; the limit dots and the E-STOP slot go."""
+        if compact == getattr(self, "_compact", None):
+            return
+        self._compact = compact
+        for dot in self._dots.values():
+            dot.setVisible(not compact and bool(self._dots))
+        self._estop.setVisible(not compact and bool(self._dots))
 
     def _is_moving(self, parsed: dict) -> bool:
         """zolix reports real per-axis moving bits; sigmakoki has none, so
@@ -248,16 +259,16 @@ class HardwareStrip(QWidget):
 
         self._xyr = _StageSection("XYR", "zolix", "Zolix XYR sample stage",
                                   manager, settings, limits=True)
-        self._xyr.setMinimumWidth(240)  # equalized: the readouts'
+        self._xyr.setMinimumWidth(200)  # equalized: the readouts'
         layout.addWidget(self._xyr, stretch=1)  # min-widths would otherwise
         self._xyz = _StageSection("XYZ", "sigmakoki",
                                   "SigmaKoki XYZ transfer stage",
                                   manager, settings, limits=False)
-        self._xyz.setMinimumWidth(240)  # dominate the equal stretch
+        self._xyz.setMinimumWidth(200)  # dominate the equal stretch
         layout.addWidget(self._xyz, stretch=1)
 
         focus = _Section("FOCUS", "Focus stage (no limit sensor)")
-        focus.setMinimumWidth(240)
+        focus.setMinimumWidth(200)
         self._focus_pos = QLabel("—")
         self._focus_pos.setObjectName("readout")
         self._focus_pos.setMinimumWidth(140)  # fits "123.4 µm · 123456 st"
@@ -272,7 +283,7 @@ class HardwareStrip(QWidget):
         layout.addWidget(focus, stretch=1)
 
         temp = _Section("TEMP", "Yudian AI-828 temperature controller")
-        temp.setMinimumWidth(240)
+        temp.setMinimumWidth(200)
         self._temp_pv = QLabel("—")
         self._temp_pv.setObjectName("readout")
         self._temp_pv.setMinimumWidth(52)
@@ -289,6 +300,19 @@ class HardwareStrip(QWidget):
 
         layout.addStretch(0)
         self.setFixedHeight(56)
+        self.setMinimumWidth(0)   # the sections compress; nothing clips
+
+    #: Below this width the four sections cannot show every indicator
+    #: (4 × ~250 px + margins) — see _StageSection.set_compact.
+    COMPACT_WIDTH = 1150
+
+    def resizeEvent(self, event) -> None:  # noqa: N802
+        super().resizeEvent(event)
+        compact = self.width() < self.COMPACT_WIDTH
+        for section in (self._xyr, self._xyz):
+            section.set_compact(compact)
+        self._triggers.setMinimumWidth(90 if compact else 130)
+        self._focus_pos.setMinimumWidth(110 if compact else 140)
 
     def reload_settings(self) -> None:
         """Re-read the scale factors the readouts convert with.

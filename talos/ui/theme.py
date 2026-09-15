@@ -47,6 +47,7 @@ _current_font_size = _DEFAULT_FONT_SIZE
 _up_arrow = str(resource_path("resources/qss/arrows_up.png")).replace("\\", "/")
 _down_arrow = str(resource_path("resources/qss/arrows_down.png")).replace("\\", "/")
 _check_dot = str(resource_path("resources/qss/checkbox_dot.png")).replace("\\", "/")
+_combo_arrow = str(resource_path("resources/qss/combo_arrow.png")).replace("\\", "/")
 
 # (name, accent, accent_dark) — the flat pair list behind the accent
 # combo. The Endfield darks are QColor.darker(140) of the user-mandated
@@ -235,6 +236,14 @@ QLineEdit:focus, QComboBox:focus, QSpinBox:focus, QDoubleSpinBox:focus {{
     border-color: {accent};
 }}
 QComboBox::drop-down {{ border: none; width: 18px; }}
+/* Without an explicit image every combo renders as a plain box: styling
+   the drop-down switches Qt to stylesheet-drawn subcontrols, which have
+   no default arrow (the port/baudrate pickers made this obvious). */
+QComboBox::down-arrow {{
+    image: url("{_combo_arrow}");
+    width: 9px;
+    height: 6px;
+}}
 QSpinBox::up-button, QDoubleSpinBox::up-button,
 QSpinBox::down-button, QDoubleSpinBox::down-button {{
     background: {PANEL_ALT};
