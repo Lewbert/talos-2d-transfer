@@ -641,3 +641,133 @@ def test_autorepeat_churn_does_not_fire_phantom_single_step(tmp_path, monkeypatc
     methods = [(s[0], s[1]) for s in manager.submits]
     assert ("zolix", "stop_axis") in methods
     assert not any(m == ("zolix", "move_rel_um") for m in methods)
+
+
+# ---------------------------------------------------------------------------
+# A pad that disappears, the gesture threshold, and the hold buttons
+# ---------------------------------------------------------------------------
+
+def test_gamepad_unplug_publishes_a_neutral_state(tmp_path):
+    """Regression (2026-09-16): on the disconnect edge the controller emitted
+    ``sig_connected(False)`` and returned without publishing anything, so
+    every consumer kept the LAST LIVE snapshot for the rest of the session —
+    a jog running at unplug kept running (the resolver still saw a deflected
+    stick) and the ESC latch could never see "all sources released", which
+    left the keyboard dead until a pad reappeared."""
+    from talos.config import Settings
+    from talos.input.gamepad import GamepadController
+
+    pad = GamepadController(Settings.load(tmp_path / "s.json"))
+    published = []
+    pad.sig_state.connect(published.append)
+
+    class FakeDll:
+        """rc 0 = connected, 1167 = the pad is gone."""
+
+        def __init__(self):
+            self.rcs = [0, 1167, 1167]
+
+        def XInputGetState(self, index, ptr):
+            return self.rcs.pop(0) if self.rcs else 1167
+
+    pad._dll = FakeDll()
+    pad._prev_buttons = 0x1000        # a face button was held at unplug
+    pad._poll()
+    assert published[-1].connected is True
+
+    pad._poll()                       # falls off the edge
+    neutral = published[-1]
+    assert neutral.connected is False
+    assert (neutral.left_x, neutral.left_y) == (0.0, 0.0)
+    assert (neutral.left_trigger, neutral.right_trigger) == (0.0, 0.0)
+    assert neutral.edges == {}
+    assert pad._prev_buttons == 0, "a held button must still edge on replug"
+
+    # ...and it must NOT re-publish the neutral state on every later poll
+    count = len(published)
+    pad._poll()
+    assert len(published) == count
+
+
+def test_combo_trigger_threshold_comes_from_settings(tmp_path, monkeypatch):
+    """Regression (2026-09-16): ``input.gamepad.trigger_threshold`` shipped as
+    a Preferences knob that nothing read — the gestures used the module
+    constant, so editing the field did nothing."""
+    system, _manager, GamepadState, clock, mod = _combo_system(tmp_path,
+                                                               monkeypatch)
+    system._settings.section("input")["gamepad"]["trigger_threshold"] = 0.9
+    system.reload_settings()
+    assert system._trigger_level == 0.9
+    fired = []
+    system.sig_af_requested.connect(lambda: fired.append(1))
+
+    weak = GamepadState(connected=True, left_trigger=0.8, right_trigger=0.8)
+    weak.edges = {}
+    system._on_state(weak)
+    clock["t"] += mod.COMBO_HOLD_S + 0.01
+    system._on_state(weak)
+    assert fired == [], "0.8 clears the old 0.5 constant but not the setting"
+
+    released = GamepadState(connected=True)
+    released.edges = {}
+    system._on_state(released)
+    clock["t"] += 0.05
+    firm = GamepadState(connected=True, left_trigger=0.95, right_trigger=0.95)
+    firm.edges = {}
+    system._on_state(firm)
+    clock["t"] += mod.COMBO_HOLD_S + 0.01
+    system._on_state(firm)
+    assert fired == [1]
+
+
+def test_combo_trigger_threshold_has_a_sane_floor(tmp_path, monkeypatch):
+    """A resting trigger reads slightly above zero — a level at or below it
+    would count as "held" from the first poll."""
+    system, _manager, _gs, _clock, _mod = _combo_system(tmp_path, monkeypatch)
+    system._settings.section("input")["gamepad"]["trigger_threshold"] = 0.0
+    system.reload_settings()
+    assert system._trigger_level == 0.05
+    system._settings.section("input")["gamepad"]["trigger_threshold"] = "junk"
+    system.reload_settings()
+    assert system._trigger_level == 0.5   # the constant
+
+
+def test_a_bogus_ui_claim_does_not_kill_the_tick(tmp_path, monkeypatch):
+    """The resolver runs from a QTimer slot with a public ui_state API: an
+    unknown claim used to raise inside it, taking down the tick that also
+    feeds the key-press bookkeeping."""
+    system, manager, _gs, _clock, _mod = _combo_system(tmp_path, monkeypatch)
+    system._ui_state["bogus:axis"] = (500.0, 1, False)
+    system._tick()                     # must not raise
+    system._ui_state.clear()
+    system._tick()
+    assert manager.stops == 0
+
+
+def test_hold_button_reads_the_threshold_at_press_time(tmp_path):
+    """Regression (2026-09-16): every _HoldButton was built with a hardcoded
+    300 ms, so the Preferences tap-vs-hold threshold governed the keys and the
+    D-pad but not the on-screen buttons — and an edited value needed a window
+    rebuild to take effect at all."""
+    from PySide6.QtWidgets import QApplication
+
+    from talos.config import Settings
+    from talos.ui.widgets.stage_panel import _HoldButton
+
+    QApplication.instance() or QApplication([])
+    settings = Settings.load(tmp_path / "s.json")
+    settings.section("input")["long_press_threshold_ms"] = 700
+    button = _HoldButton("▲", threshold_ms=lambda: settings.section("input").get(
+        "long_press_threshold_ms", 300))
+
+    clicks, presses = [], []
+    button.sig_click.connect(lambda: clicks.append(1))
+    button.sig_press.connect(lambda: presses.append(1))
+    button._on_press()
+    assert button._timer.interval() == 700
+    assert button._long_press_ms() == 700
+    button._on_release()               # released before the timer fires
+    assert clicks == [1] and presses == []
+    # a hand-edited bad value falls back to the reference default
+    settings.section("input")["long_press_threshold_ms"] = "junk"
+    assert button._long_press_ms() == 300

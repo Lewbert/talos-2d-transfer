@@ -57,20 +57,40 @@ class _HoldButton(QPushButton):
     sig_click = Signal()
     sig_release = Signal()
 
-    def __init__(self, text: str, long_press_ms: int = 300, parent=None):
+    def __init__(self, text: str, threshold_ms=None, parent=None):
+        """``threshold_ms``: the tap-vs-hold threshold, as a value or as a
+        CALLABLE read at press time.
+
+        It must be the same number the resolver applies to keys and the
+        D-pad (``input.long_press_threshold_ms``): this widget decides
+        click-vs-hold BEFORE the resolver ever sees the claim, so a
+        construction-time copy silently ignored the Preferences value (the
+        buttons always broke at 300 ms) and needed a window rebuild to pick
+        an edit up.
+        """
         super().__init__(text, parent)
+        self._threshold_ms = threshold_ms
         self._held = False
         self._clicked_fired = False
         self._timer = QTimer(self)
         self._timer.setSingleShot(True)
-        self._timer.setInterval(long_press_ms)
         self._timer.timeout.connect(self._on_long)
         self.pressed.connect(self._on_press)
         self.released.connect(self._on_release)
 
+    def _long_press_ms(self) -> int:
+        source = self._threshold_ms
+        if source is None:
+            return 300  # the reference default (and the resolver's)
+        try:
+            return int(source() if callable(source) else source)
+        except (TypeError, ValueError):
+            return 300
+
     def _on_press(self) -> None:
         self._held = False
         self._clicked_fired = False
+        self._timer.setInterval(self._long_press_ms())
         self._timer.start()
 
     def _on_long(self) -> None:
@@ -187,7 +207,7 @@ class ReferenceStagePanel(QGroupBox):
             ("y", 1, "Y+"), ("y", -1, "Y-"),
             (zr_axis, 1, zr_pos), (zr_axis, -1, zr_neg),
         )):
-            btn = _HoldButton(text)
+            btn = _HoldButton(text, threshold_ms=self._hold_threshold_ms)
             btn.setFixedHeight(56)
             btn.sig_press.connect(
                 lambda a=axis, d=direction: self._on_hold(a, d))
@@ -295,6 +315,13 @@ class ReferenceStagePanel(QGroupBox):
             moving = status.get("any_moving", False)
             speeds.append(500 if moving else 0)
         self._speed_label.setText(f"{max(speeds) if speeds else 0} step/s")
+
+    def _hold_threshold_ms(self) -> int:
+        """The resolver's tap-vs-hold threshold (input settings) — passed to
+        every hold button so click-vs-hold is decided by the same number the
+        dispatcher uses."""
+        return int(self._settings.section("input").get(
+            "long_press_threshold_ms", 300) or 300)
 
     def _factor(self, axis: str) -> float:
         if self._stage_id == "zolix":

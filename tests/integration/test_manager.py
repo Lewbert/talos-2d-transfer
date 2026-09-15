@@ -66,3 +66,33 @@ def test_manager_stop_all_budget_completes(qapp):
     QTimer.singleShot(2500, loop.quit)
     loop.exec()
     assert done
+
+
+def test_stop_acks_report_only_a_real_stop_all(qapp):
+    """Regression (2026-09-16): every driver-level "stop" acks here —
+    including each jog release (sigmakoki's stop, the focus trigger release) —
+    so the counter reached its threshold without any STOP ALL and then
+    re-fired "All stages stopped" on every later ack."""
+    from talos.hal.registry import MOTION_KEYS
+
+    settings = StubSettings()
+    settings.sim = False
+    manager = InstrumentManager(settings, sim=True)
+    reports = []
+    manager.sig_stop_all_done.connect(lambda: reports.append(True))
+
+    # three unrelated jog releases (one per motion device) — no round open
+    for key in MOTION_KEYS:
+        manager._proxies[key].sig_all_stopped.emit()
+    assert reports == [], "no STOP ALL was requested"
+
+    # a real STOP ALL reports ONCE, when every ack is in
+    manager.stop_all()
+    for key in MOTION_KEYS:
+        manager._proxies[key].sig_all_stopped.emit()
+    assert len(reports) == 1
+
+    # ...and a later release-stop must not report again
+    manager._proxies["focus"].sig_all_stopped.emit()
+    assert len(reports) == 1
+    manager._stop_budget_timer.stop()

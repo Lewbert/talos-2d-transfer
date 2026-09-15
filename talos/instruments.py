@@ -73,7 +73,8 @@ class InstrumentManager(QObject):
         # camera's current exposure (restore after the AF run).
         self._focus_position: int = 0
         self._camera_props: dict[str, Any] = {}
-        self._stop_acks = 0
+        # Negative = no STOP ALL round open (see _on_proxy_stopped).
+        self._stop_acks = -1
         self._stop_budget_timer = QTimer(self)
         self._stop_budget_timer.setSingleShot(True)
         self._stop_budget_timer.timeout.connect(self._on_stop_budget)
@@ -406,16 +407,25 @@ class InstrumentManager(QObject):
         self.sig_device_state.emit("camera", props)
 
     def _on_proxy_stopped(self) -> None:
+        # A negative counter means NO stop round is open. Every driver-level
+        # "stop" job acks here — including each jog release (sigmakoki's
+        # stop, the focus trigger release) — so counting them let three
+        # unrelated releases report "All stages stopped", and once the
+        # threshold was passed the message re-fired on every later ack.
         if self._sender_key() == "":
             return  # a retired proxy's stop ack
+        if self._stop_acks < 0:
+            return  # no STOP ALL round open
         self._stop_acks += 1
         if self._stop_acks >= len([k for k in MOTION_KEYS if k in self._proxies]):
+            self._stop_acks = -1     # one report per round
             self._stop_budget_timer.stop()
             self._log("info", "All stages stopped")
             self.sig_stop_all_done.emit()
 
     @Slot()
     def _on_stop_budget(self) -> None:
+        self._stop_acks = -1         # the round is over, acks or not
         self._log("warning", "STOP ALL budget elapsed (some acks missing)")
         self.sig_stop_all_done.emit()
 

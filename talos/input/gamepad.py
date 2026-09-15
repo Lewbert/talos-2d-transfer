@@ -35,7 +35,6 @@ _XINPUT_GAMEPAD_X = 0x4000
 _XINPUT_GAMEPAD_Y = 0x8000
 
 _ERROR_SUCCESS = 0
-_ERROR_DEVICE_NOT_CONNECTED = 1167
 
 
 class _XInputGamepad(ctypes.Structure):
@@ -188,6 +187,18 @@ class GamepadController(QObject):
         if connected != self._was_connected:
             self._was_connected = connected
             self.sig_connected.emit(connected)
+            if not connected:
+                # ONE neutral snapshot on the falling edge. Without it the
+                # consumers keep the last live values for the rest of the
+                # session: a jog that was running at unplug kept running (the
+                # resolver still saw a deflected stick, and the dispatcher
+                # dedupes repeats so exactly one command stayed in force), and
+                # the ESC latch could never see "all sources released" —
+                # leaving the keyboard dead until a pad reappeared.
+                # `_prev_buttons` is cleared with it, so a button held across
+                # an unplug/replug still produces an edge for Start/Back.
+                self._prev_buttons = 0
+                self.sig_state.emit(GamepadState(connected=False))
         if not connected:
             return
         pad = state.Gamepad

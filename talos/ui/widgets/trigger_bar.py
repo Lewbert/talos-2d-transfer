@@ -8,15 +8,20 @@ from PySide6.QtCore import Qt
 from PySide6.QtGui import QColor, QFontMetrics, QPainter
 from PySide6.QtWidgets import QWidget
 
-from talos.input.action_resolver import focus_trigger_to_speed
+from talos.input.action_resolver import focus_manual_bounds, focus_trigger_to_speed
 from talos.ui import theme
 from talos.ui.theme import LED_OFF, TEXT_DIM, WARN
 
 
 class TriggerBarWidget(QWidget):
-    def __init__(self, settings, parent: QWidget | None = None):
+    def __init__(self, settings, state=None, parent: QWidget | None = None):
         super().__init__(parent)
         self._settings = settings
+        # The AppState (the selected objective) is needed for the SPEED READOUT
+        # only: the dispatcher scales the focus curve by the objective's
+        # focus_manual_multiplier, so a bar without it would print a number the
+        # axes never receive. None = unscaled (tests, no objective selector).
+        self._state = state
         self._load_settings()
         self._lt = 0.0
         self._rt = 0.0
@@ -28,11 +33,22 @@ class TriggerBarWidget(QWidget):
         # out from the height it is actually given.
         self.setMinimumHeight(26)
         self.setToolTip("Focus jog: gamepad LT (down) / RT (up) triggers")
+        if state is not None:
+            state.sig_objective_changed.connect(self._on_objective_changed)
+
+    def _on_objective_changed(self, _index: int) -> None:
+        """The objective carries the manual focus multiplier — the readout's
+        bounds move with it (the selector is the busiest control on the
+        window, so this must not wait for a Preferences Apply)."""
+        self._load_settings()
+        self.update()
 
     def _load_settings(self) -> None:
         cfg = self._settings.device("focus")
-        self._min_speed = float(cfg.get("min_speed", 50))
-        self._max_speed = float(cfg.get("max_speed", 2000))
+        # The SAME bounds the dispatcher uses (device curve × the current
+        # objective's multiplier) — see focus_manual_bounds.
+        self._min_speed, self._max_speed = focus_manual_bounds(
+            self._settings, self._state)
         self._gamma = float(cfg.get("gamma", 2.2))
         self._deadzone = float(cfg.get("deadzone", 0.05))
         # The readout must follow the SAME inversion the dispatcher applies

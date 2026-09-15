@@ -25,7 +25,6 @@ import time
 
 logger = logging.getLogger(__name__)
 
-LONG_PRESS_S = 0.300
 SINGLE_STEP_COOLDOWN_S = 0.2
 FOCUS_FIRMWARE_MIN_SPS = 10
 
@@ -36,6 +35,36 @@ _DIR_MAP = {
     4: (("x", -1),),          5: (("x", -1), ("y", -1)),
     6: (("y", -1),),          7: (("x", 1), ("y", -1)),
 }
+
+
+def objective_multiplier(settings, state, kind: str) -> float:
+    """Per-objective manual speed scale: "stage" → the XYR/XYZ jog
+    multiplier, "focus" → the manual focus multiplier. 0/missing → 1.0
+    (rows without the column, and rigs without an objectives table, stay
+    unscaled)."""
+    rows = settings.get("objectives") or []
+    idx = getattr(state, "objective", 0) if state is not None else 0
+    row = rows[min(int(idx), len(rows) - 1)] if rows else {}
+    key = ("stage_speed_multiplier" if kind == "stage"
+           else "focus_manual_multiplier")
+    m = float(row.get(key, 0.0) or 0.0)
+    return m if m > 0 else 1.0
+
+
+def focus_manual_bounds(settings, state) -> tuple[float, float]:
+    """The (min, max) steps/s the FOCUS JOG actually runs at.
+
+    The curve the operator SEES and the curve the dispatcher applies must be
+    the same pair. The resolver scales the device's min/max by the current
+    objective's ``focus_manual_multiplier``, while the strip's trigger bar
+    called the same function with the raw settings values — the jog-speed
+    readout overstated the commanded speed by that factor (≈9× at 20× with
+    the shipped table).
+    """
+    cfg = settings.device("focus")
+    mult = objective_multiplier(settings, state, "focus")
+    return (float(cfg.get("min_speed", 50)) * mult,
+            float(cfg.get("max_speed", 2000)) * mult)
 
 
 def focus_trigger_to_speed(lt: float, rt: float, *,
@@ -74,8 +103,6 @@ class ActionResolver:
         self._continuous_speed: dict[str, float] = {}
         self._continuous_stick: dict[str, bool] = {}
         self._focus_active = False
-        self._focus_paused = False
-        self._stick_pause: set[str] = set()
         self._last_stick_dir: dict[str, int] = {}
         self._last_stick_fast: dict[str, bool] = {}
         self._stick_dir_counter: dict[str, int] = {}
@@ -101,8 +128,6 @@ class ActionResolver:
         self._fast_z = {"sigmakoki": int(sk.get("fast_speed_z", 500))}
         self._slow_r = {"zolix": int(z.get("slow_speed_r", 1000))}
         self._fast_r = {"zolix": int(z.get("fast_speed_r", 10000))}
-        self._focus_min = int(fc.get("min_speed", 50))
-        self._focus_max = int(fc.get("max_speed", 2000))
         self._focus_gamma = float(fc.get("gamma", 2.2))
         self._focus_deadzone = float(fc.get("deadzone", 0.05))
 
@@ -216,6 +241,8 @@ class ActionResolver:
             self._handle_sticks(gamepad, claimed, emit)
             self._handle_dpad(gamepad, now, claimed, emit)
             self._handle_face_buttons(gamepad, now, claimed, emit)
+        else:
+            self._release_all_sticks(claimed, emit)
         self._handle_triggers(gamepad, claimed, emit)
         self._handle_stops(key_state, gamepad, now, emit, claimed=claimed,
                            ui_state=ui_state)
@@ -267,24 +294,14 @@ class ActionResolver:
         return key_state.get("Shift_L", 0) > 0 or key_state.get("Shift_R", 0) > 0
 
     def _objective_multiplier(self, kind: str) -> float:
-        """Per-objective manual speed scale: "stage" → the XYR/XYZ jog
-        multiplier, "focus" → the manual focus multiplier. 0/missing →
-        1.0 (tests without objectives rows stay unscaled)."""
-        rows = self._settings.get("objectives") or []
-        idx = getattr(self._state, "objective", 0) \
-            if self._state is not None else 0
-        row = rows[min(int(idx), len(rows) - 1)] if rows else {}
-        key = ("stage_speed_multiplier" if kind == "stage"
-               else "focus_manual_multiplier")
-        m = float(row.get(key, 0.0) or 0.0)
-        return m if m > 0 else 1.0
+        """Per-objective manual speed scale (see the module function)."""
+        return objective_multiplier(self._settings, self._state, kind)
 
     def _focus_key_speed(self, fast: bool) -> float:
-        mult = self._objective_multiplier("focus")
+        lo, hi = focus_manual_bounds(self._settings, self._state)
         if fast:
-            return float(self._focus_max) * mult
-        return float(max(FOCUS_FIRMWARE_MIN_SPS, self._focus_min,
-                         self._focus_max // 4)) * mult
+            return hi
+        return max(float(FOCUS_FIRMWARE_MIN_SPS), lo, hi / 4.0)
 
     def _get_speed(self, stage_id: str, axis: str, fast: bool) -> float:
         if stage_id == "focus":
@@ -311,6 +328,26 @@ class ActionResolver:
     # ------------------------------------------------------------------
     # Gamepad sticks / dpad / buttons / triggers / stops (reference port)
     # ------------------------------------------------------------------
+
+    def _release_all_sticks(self, claimed, emit) -> None:
+        """Release every axis a stick still owns because the pad is GONE.
+
+        Stick claims live in ``_continuous_stick``, which ``_handle_stops``
+        never looks at (it walks ``_continuous_keys``), so the disconnect
+        path had no stop at all: the axis kept running on the last command
+        the frozen snapshot produced. The stick state is cleared with it —
+        a pad that comes back deflected must start from a fresh reading, not
+        from the stale direction/hysteresis counters.
+        """
+        for ck in list(self._continuous_stick):
+            self._continuous_stick.pop(ck, None)
+            if ck in claimed:
+                continue          # another source holds it; it owns the stop
+            stage_id, axis = ck.split(":", 1)
+            emit((stage_id, axis, "continuous_stop", 0, 0.0, "gamepad_stick"))
+        self._last_stick_dir.clear()
+        self._last_stick_fast.clear()
+        self._stick_dir_counter.clear()
 
     def _handle_sticks(self, gamepad, claimed, emit) -> None:
         if self._suppress_jog:
@@ -352,23 +389,40 @@ class ActionResolver:
         emit((stage_id, axis, "continuous_start", direction, speed, "gamepad_stick"))
         self._continuous_stick[ck] = True
 
+    def _release_stick_axes(self, stage_id, pairs, claimed, emit) -> None:
+        """Stop ONLY the axes this stick started (``pairs`` = the previous
+        direction's ``(axis, direction)`` list).
+
+        The right stick's recenter and direction-change branches used to
+        emit a stop for every axis of the previous direction regardless of
+        who was driving it: flicking the stick and centring therefore killed
+        a live keyboard or D-pad jog on the same axis, and because the
+        dispatcher's dedupe entry was popped with it, the still-held key
+        never re-commanded — the jog stayed dead until release + repress.
+        ``_continuous_stick`` is the stick's own claim bookkeeping, so it is
+        the exact set to release; ``claimed`` is the belt-and-braces check
+        for an axis another source took over mid-stick.
+        """
+        for ax, _dr in pairs:
+            ck = f"{stage_id}:{ax}"
+            if self._continuous_stick.pop(ck, None) is None:
+                continue          # this stick never started it
+            if ck in claimed:
+                continue          # another source owns it (and its stop)
+            emit((stage_id, ax, "continuous_stop", 0, 0.0, "gamepad_stick"))
+
     def _stick_8dir(self, x, y, stage_id, stick_id, fast, claimed, emit) -> None:
         magnitude = math.sqrt(x * x + y * y)
         speed = (self._fast_speed[stage_id] if fast
                  else self._slow_speed[stage_id]) \
             * self._objective_multiplier("stage")
         if magnitude < 0.50:
-            self._stick_pause.discard(stick_id)
             prev = self._last_stick_dir.pop(stick_id, -1)
             self._stick_dir_counter.pop(stick_id, None)
             if prev >= 0:
-                for ax, _dr in _DIR_MAP.get(prev, ()):
-                    ck = f"{stage_id}:{ax}"
-                    emit((stage_id, ax, "continuous_stop", 0, 0.0, "gamepad_stick"))
-                    self._continuous_stick.pop(ck, None)
+                self._release_stick_axes(stage_id, _DIR_MAP.get(prev, ()),
+                                         claimed, emit)
                 self._last_stick_fast.pop(stick_id, None)
-            return
-        if stick_id in self._stick_pause:
             return
         ax, ay = abs(x), abs(y)
         if ax > 2.0 * ay:
@@ -400,10 +454,8 @@ class ActionResolver:
             return
         self._stick_dir_counter[stick_id] = 0
         if prev_dir >= 0:
-            for ax, _dr in _DIR_MAP.get(prev_dir, ()):
-                ck = f"{stage_id}:{ax}"
-                emit((stage_id, ax, "continuous_stop", 0, 0.0, "gamepad_stick"))
-                self._continuous_stick.pop(ck, None)
+            self._release_stick_axes(stage_id, _DIR_MAP.get(prev_dir, ()),
+                                     claimed, emit)
         self._last_stick_dir[stick_id] = direction
         self._last_stick_fast[stick_id] = fast
         for ax, dr in _DIR_MAP[direction]:
@@ -498,22 +550,12 @@ class ActionResolver:
                 emit(("focus", "z", "continuous_stop", 0, 0.0, "gamepad_trigger"))
                 self._focus_active = False
             return
-        mult = self._objective_multiplier("focus")
-        focus_min = self._focus_min * mult
-        focus_max = self._focus_max * mult
+        focus_min, focus_max = focus_manual_bounds(self._settings, self._state)
         # NOTE: no direction inversion here. `devices.focus.invert` is
         # applied once, in InputSystem._dispatch, together with the stage
         # axis maps — inverting in both places cancelled out for the
         # gamepad only, so the triggers jogged the opposite way from the
         # keyboard and the dialbox buttons.
-        if self._focus_paused:
-            if focus_trigger_to_speed(
-                    gamepad.left_trigger, gamepad.right_trigger,
-                    min_speed=focus_min, max_speed=focus_max,
-                    gamma=self._focus_gamma,
-                    deadzone=self._focus_deadzone) == 0:
-                self._focus_paused = False
-            return
         if "focus:z" in claimed:
             return
         speed = focus_trigger_to_speed(

@@ -778,3 +778,98 @@ def test_af_finished_sets_indicator(window):
         best_position=0, best_score=0.0, success=False, aborted=True,
         message="aborted", phase="coarse"))
     assert view._af_success is False
+
+
+def _window_with_input(tmp_path, monkeypatch, manager=None, **input_attrs):
+    """A MainWindow whose input system is a stub that records calls."""
+    QSettings.setDefaultFormat(QSettings.Format.IniFormat)
+    QSettings.setPath(QSettings.Format.IniFormat, QSettings.Scope.UserScope,
+                      str(tmp_path))
+    from talos.ui import calibration_context as cc_mod
+    monkeypatch.setattr(cc_mod, "get_calibration_db_path",
+                        lambda: tmp_path / "cal.db")
+
+    class StubGamepad(QObject):
+        sig_connected = Signal(bool)
+        sig_state = Signal(object)
+
+    class StubInput(QObject):
+        sig_log = Signal(str)
+        sig_dpad_stage = Signal(str)
+        sig_af_requested = Signal()
+
+        def __init__(self):
+            super().__init__()
+            self.gamepad = StubGamepad()
+            self.escapes = 0
+            for name, value in input_attrs.items():
+                setattr(self, name, value)
+
+        def on_escape(self):
+            self.escapes += 1
+
+        def cancel_all_holds(self, reason="stop requested"):
+            pass
+
+        def reload_settings(self):
+            pass
+
+    stub = StubInput()
+    window = MainWindow(manager or StubManager(), FakeSettings(), AppState(),
+                        input_system=stub,
+                        autofocus_service=StubAutofocusService())
+    return window, stub
+
+
+def test_escape_issues_one_stop_all(tmp_path, monkeypatch):
+    """Regression (2026-09-16): Esc ran STOP ALL twice — MainWindow called
+    manager.stop_all() and then InputSystem.on_escape() did it again, so one
+    press enqueued two rounds of stop jobs (and two ack reports). The input
+    system owns the whole sequence: latch + drop the on-screen holds + stop."""
+    manager = StubManager()
+    window, stub = _window_with_input(tmp_path, monkeypatch, manager=manager)
+    try:
+        window._on_escape()
+        assert stub.escapes == 1
+        assert manager.stopped == 0, "on_escape already stops the axes"
+    finally:
+        window._log.close()
+        window._focus_window.close()
+        window._stage_window.close()
+
+
+def test_trigger_bar_readout_matches_the_commanded_speed(window, qapp):
+    """The strip's jog-speed readout must show the number the dispatcher
+    sends. Regression: the bar called focus_trigger_to_speed with the RAW
+    device bounds while the dispatcher scaled them by the current objective's
+    focus_manual_multiplier — with the shipped 20x row it printed ~9x the
+    commanded speed, and nothing repainted it when the objective changed."""
+    from talos.input.action_resolver import (focus_manual_bounds,
+                                             focus_trigger_to_speed)
+
+    settings = window._settings
+    settings.data["objectives"].append(
+        {"name": "20x", "mag": 20, "na": 0.45, "dof_um": 1.0,
+         "coarse_step_um": 1.0, "fine_step_um": 0.5,
+         "af_speed_multiplier": 0.1063, "focus_manual_multiplier": 0.1063,
+         "stage_speed_multiplier": 0.25, "px_um": 0.0})
+    window._state.set_objective(1)
+    bar = window._strip.trigger_bar()
+    lo, hi = focus_manual_bounds(settings, window._state)
+    assert (lo, hi) == pytest.approx((50 * 0.1063, 2000 * 0.1063))
+    assert (bar._min_speed, bar._max_speed) == pytest.approx((lo, hi))
+    shown = focus_trigger_to_speed(0.0, 1.0, min_speed=bar._min_speed,
+                                   max_speed=bar._max_speed, gamma=bar._gamma,
+                                   deadzone=bar._deadzone, invert=bar._invert)
+    assert shown == 213, "a full press at 20x commands 213 sps, not 2000"
+
+
+def test_on_screen_hold_buttons_use_the_configured_threshold(window, qapp):
+    """The Preferences tap-vs-hold threshold governs the keys and the D-pad;
+    the on-screen hold buttons must use the same number (they decide
+    click-vs-hold before the resolver ever sees the claim)."""
+    window._settings.section("input")["long_press_threshold_ms"] = 700
+    buttons = window._stage_window._panels["zolix"]._buttons
+    assert buttons["x"]._long_press_ms() == 700
+    window._settings.section("input")["long_press_threshold_ms"] = 300
+    assert buttons["x"]._long_press_ms() == 300

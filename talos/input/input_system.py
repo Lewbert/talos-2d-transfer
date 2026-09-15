@@ -28,10 +28,15 @@ RELEASE_CHURN_S = 0.05  # release+press gap below this = auto-repeat churn
 # fires (a brush past a bumper must not stop a running job), and both
 # inputs must pass this level for a trigger pair to count as a gesture.
 COMBO_HOLD_S = 0.20
+#: DEFAULT for the ``input.gamepad.trigger_threshold`` setting (Preferences →
+#: Input & Gamepad). The level a trigger pair must reach to count as a
+#: gesture is user-editable because worn triggers rest well above zero.
 COMBO_TRIGGER_LEVEL = 0.5
 #: A fired gesture keeps owning its inputs until they fall below this —
 #: releasing LT/RT a few ms apart must not leave one of them jogging (see
-#: InputSystem._check_combos).
+#: InputSystem._check_combos). Deliberately NOT the press threshold: the
+#: release is about "the trigger is physically back", which does not move
+#: when the operator tunes the press level.
 COMBO_RELEASE_LEVEL = 0.05
 # Dead-man switch for on-screen holds: a hold whose release signal is lost
 # must not jog the axis forever. Longer than any plausible manual hold.
@@ -72,6 +77,8 @@ class InputSystem(QObject):
         # Manual-control axis mapping (invert / flip X↔Y), refreshed by
         # reload_settings() — see talos.input.axis_map for the scope.
         self._axis_maps = axis_maps(settings)
+        self._trigger_level = COMBO_TRIGGER_LEVEL
+        self._load_settings()
         self.gamepad = GamepadController(settings)
         self.gamepad.sig_state.connect(self._on_state)
         # Seed a disconnected state so the tick loop never depends on a
@@ -91,10 +98,19 @@ class InputSystem(QObject):
                           else "no gamepad — keyboard/mouse only")
         self._tick_timer.start()
 
+    def stop(self) -> None:
+        """Teardown: the 60 Hz tick and the XInput poll both keep running
+        otherwise (they only go inert because the event loop has returned,
+        which is not true on the ragged-exit path). Called from app.shutdown
+        BEFORE the manager's workers are torn down — the tick dispatches into
+        them."""
+        self._tick_timer.stop()
+        self.gamepad.stop()
+        self.cancel_all_holds("shutdown")
+
     def _loop_rate_hz(self) -> int:
-        """The settings' input loop rate (the ``input.loop_rate_hz`` key
-        shipped in the defaults but was never read — the loop always ran
-        at the POLL_HZ constant)."""
+        """The settings' input loop rate, clamped to a sane band (the key
+        used to be ignored — the loop always ran at the POLL_HZ constant)."""
         try:
             rate = int(self._settings.section("input").get(
                 "loop_rate_hz", POLL_HZ) or POLL_HZ)
@@ -105,13 +121,29 @@ class InputSystem(QObject):
     def reload_settings(self) -> None:
         """Pick up edited manual-control settings without a restart: the
         axis mapping (invert / flip X↔Y), the jog speeds, the focus
-        trigger curve, the gamepad curve and the loop rate — all of them
-        were construction-cached before, so a Preferences Apply needed an
-        app restart to take effect."""
+        trigger curve, the gamepad curve, the combo trigger threshold and
+        the loop rate — all of them were construction-cached before, so a
+        Preferences Apply needed an app restart to take effect."""
         self._axis_maps = axis_maps(self._settings)
+        self._load_settings()
         self._resolver.reload_settings()
         self.gamepad.reload_settings()
         self._tick_timer.setInterval(1000 // self._loop_rate_hz())
+
+    def _load_settings(self) -> None:
+        """The combo gesture's trigger level — the one input setting the
+        dispatcher itself reads (the rest live in the resolver and the
+        gamepad controller). ``input.gamepad.trigger_threshold`` shipped as a
+        Preferences knob that nothing read: the gestures used the module
+        constant, so the field was inert."""
+        cfg = self._settings.section("input").get("gamepad", {})
+        try:
+            level = float(cfg.get("trigger_threshold", COMBO_TRIGGER_LEVEL))
+        except (TypeError, ValueError):
+            level = COMBO_TRIGGER_LEVEL
+        # A resting trigger sits slightly above zero; a level at or below
+        # that would read as "held" from the moment the pad is polled.
+        self._trigger_level = min(max(level, 0.05), 1.0)
 
     # --- keyboard feeding (from MainWindow) ------------------------------
 
@@ -233,7 +265,7 @@ class InputSystem(QObject):
         rt = float(state.right_trigger)
         lb = bool(state.button_left_shoulder)
         rb = bool(state.button_right_shoulder)
-        both_triggers = lt >= COMBO_TRIGGER_LEVEL and rt >= COMBO_TRIGGER_LEVEL
+        both_triggers = lt >= self._trigger_level and rt >= self._trigger_level
         both_bumpers = lb and rb
         self._arm_combo("af", both_triggers,
                         lt < COMBO_RELEASE_LEVEL and rt < COMBO_RELEASE_LEVEL,
@@ -289,15 +321,22 @@ class InputSystem(QObject):
         # The combo gestures own their inputs while held AND until they are
         # released (see _check_combos): no focus jog under LT+RT, no
         # stick/D-pad jog under LB+RB.
-        both_triggers = (gamepad.left_trigger >= COMBO_TRIGGER_LEVEL
-                         and gamepad.right_trigger >= COMBO_TRIGGER_LEVEL)
+        both_triggers = (gamepad.left_trigger >= self._trigger_level
+                         and gamepad.right_trigger >= self._trigger_level)
         both_bumpers = bool(gamepad.button_left_shoulder
                             and gamepad.button_right_shoulder)
-        self._resolver.resolve(
-            self._key_state, self._prev_key_state, gamepad,
-            on_command=self._dispatch, ui_state=self._ui_state,
-            suppress_focus=both_triggers or "af" in self._combo_latch,
-            suppress_jog=both_bumpers or "stop" in self._combo_latch)
+        try:
+            self._resolver.resolve(
+                self._key_state, self._prev_key_state, gamepad,
+                on_command=self._dispatch, ui_state=self._ui_state,
+                suppress_focus=both_triggers or "af" in self._combo_latch,
+                suppress_jog=both_bumpers or "stop" in self._combo_latch)
+        except Exception as exc:  # noqa: BLE001 - input must never crash the GUI
+            # _dispatch is guarded but the resolver itself was not: it is
+            # called from a QTimer slot with a public ui_state API (a bogus
+            # "stage:axis" claim raises inside it) and an unhandled exception
+            # here kills the tick that also feeds _prev_key_state.
+            logger.warning("Input resolve failed: %s", exc)
         self._prev_key_state = dict(self._key_state)
 
     def _expire_stale_holds(self) -> None:
@@ -318,8 +357,8 @@ class InputSystem(QObject):
         sticks_centered = (abs(gamepad.left_x) < 0.10 and abs(gamepad.left_y) < 0.10
                            and abs(gamepad.right_x) < 0.50
                            and abs(gamepad.right_y) < 0.50)
-        triggers_released = (abs(gamepad.left_trigger) < 0.05
-                             and abs(gamepad.right_trigger) < 0.05)
+        triggers_released = (abs(gamepad.left_trigger) < COMBO_RELEASE_LEVEL
+                             and abs(gamepad.right_trigger) < COMBO_RELEASE_LEVEL)
         buttons_released = not any((gamepad.button_a, gamepad.button_b,
                                     gamepad.button_x, gamepad.button_y,
                                     gamepad.dpad_up, gamepad.dpad_down,

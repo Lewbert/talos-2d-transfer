@@ -162,6 +162,11 @@ class TALOSApplication:
         return self.qapp.exec()
 
     def shutdown(self) -> None:
+        if self.input is not None:
+            # The input layer dispatches INTO the manager's workers, so it
+            # stops first: its tick and the 60 Hz XInput poll must not outlive
+            # the devices they command.
+            self.input.stop()
         self.autofocus.shutdown()
         self.manager.shutdown()
         logger.info("TALOS exited cleanly")

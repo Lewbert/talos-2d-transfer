@@ -443,7 +443,7 @@ def format_focus_pos(pos_steps: int, um_per_step: float) -> str:
 class HardwareStrip(QWidget):
     """Shared bottom strip — one instance, owned by MainWindow."""
 
-    def __init__(self, manager, settings, input_system=None, parent=None):
+    def __init__(self, manager, settings, input_system=None, state=None, parent=None):
         super().__init__(parent)
         self._settings = settings
         self._manager = manager
@@ -475,8 +475,10 @@ class HardwareStrip(QWidget):
         # colours, same wording.
         self._focus_state = _StateWord("—")
         focus.add(self._focus_state)
-        # THE elastic field of this panel.
-        self._triggers = TriggerBarWidget(settings)
+        # THE elastic field of this panel. It gets the AppState because its
+        # jog-speed readout must show the speed the dispatcher commands (the
+        # objective's focus multiplier scales that curve — see the widget).
+        self._triggers = TriggerBarWidget(settings, state=state)
         focus.add(self._triggers, stretch=1)
         layout.addWidget(focus, stretch=_SECTION_STRETCH)
 

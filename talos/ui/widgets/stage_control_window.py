@@ -30,6 +30,7 @@ class FocusHoldPanel(QGroupBox):
     def __init__(self, input_system, settings, parent=None):
         super().__init__("FOCUS", parent)
         self._input = input_system
+        self._settings = settings
         self._buttons: list[_HoldButton] = []
         layout = QVBoxLayout(self)
         layout.setSpacing(4)
@@ -37,7 +38,7 @@ class FocusHoldPanel(QGroupBox):
         # indicates the speed
         for text, direction, fast in (("▲▲", 1, True), ("▲", 1, False),
                                       ("▼", -1, False), ("▼▼", -1, True)):
-            btn = _HoldButton(text)
+            btn = _HoldButton(text, threshold_ms=self._hold_threshold_ms)
             btn.setToolTip("Hold to jog focus"
                            + (" (fast)" if fast else " (slow)"))
             btn.sig_press.connect(lambda d=direction, f=fast:
@@ -50,6 +51,12 @@ class FocusHoldPanel(QGroupBox):
             btn.setSizePolicy(QSizePolicy.Policy.Preferred,
                               QSizePolicy.Policy.Expanding)
             layout.addWidget(btn, stretch=1)
+
+    def _hold_threshold_ms(self) -> int:
+        """The resolver's tap-vs-hold threshold — same number the keys and
+        the D-pad use (see _HoldButton)."""
+        return int(self._settings.section("input").get(
+            "long_press_threshold_ms", 300) or 300)
 
     def _hold(self, direction: int, fast: bool = False) -> None:
         if self._input is not None:

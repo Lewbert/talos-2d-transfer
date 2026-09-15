@@ -117,7 +117,7 @@ class MainWindow(QMainWindow):
         root.addWidget(self._tabs, stretch=1)
 
         # --- shared bottom hardware strip --------------------------------
-        self._strip = HardwareStrip(manager, settings, input_system)
+        self._strip = HardwareStrip(manager, settings, input_system, state=state)
         root.addWidget(self._strip)
 
         self.setCentralWidget(central)
@@ -815,9 +815,14 @@ class MainWindow(QMainWindow):
             f"({steps * um_per_step:+.1f} µm)")
 
     def _on_escape(self) -> None:
-        self._manager.stop_all()
+        """Esc = the global STOP ALL. The input system owns the whole
+        sequence (latch + drop the on-screen holds + stop the axes): calling
+        ``manager.stop_all()`` here as well issued a second round of stop
+        jobs per press."""
         if self._input is not None:
             self._input.on_escape()
+        else:
+            self._manager.stop_all()   # no input layer (tests/stubs)
 
     def _keysym(self, event) -> str | None:
         key = event.key()

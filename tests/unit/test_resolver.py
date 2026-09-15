@@ -6,6 +6,7 @@ import pytest
 
 from talos.input.action_resolver import (
     ActionResolver,
+    focus_manual_bounds,
     focus_trigger_to_speed,
 )
 
@@ -465,3 +466,94 @@ def test_objective_multiplier_zero_means_unset():
     r = ActionResolver(ObjectiveSettings(rows), state=FakeState(objective=0))
     assert r._objective_multiplier("stage") == 1.0
     assert r._objective_multiplier("focus") == 1.0
+
+
+# ---------------------------------------------------------------------------
+# Stick ownership, a pad that disappears, and the shared focus bounds
+# ---------------------------------------------------------------------------
+
+def test_right_stick_does_not_stop_a_keyboard_axis(resolver):
+    """Regression (2026-09-16): the 8-direction stick's recenter and
+    direction-change branches emitted continuous_stop for EVERY axis of the
+    previous direction without asking who started it. Flicking the stick and
+    centring therefore killed a live keyboard jog on the same axis, and the
+    dispatcher's dedupe entry went with it — the still-held key never
+    re-commanded, so the jog stayed dead until release + repress."""
+    pad = FakeGamepad()
+    pad.right_x = 1.0                     # East → zolix:x
+    tick(resolver, {}, {}, pad, T0)
+    # the keyboard claims the SAME axis and is held past the long press
+    keys = {"d": T0}                      # d = zolix x+
+    commands = tick(resolver, keys, {}, pad, T0 + 0.4)
+    assert any(c[2] == "continuous_start" and c[0] == "zolix"
+               and c[1] == "x" and c[5] == "keyboard" for c in commands)
+    # the stick recenters while the key is still down → no stop for that axis
+    pad.right_x = 0.0
+    commands = tick(resolver, keys, keys, pad, T0 + 0.45)
+    assert not [c for c in commands
+                if c[2] == "continuous_stop" and c[5] == "gamepad_stick"], \
+        "the stick must not stop an axis the keyboard owns"
+    # ...and the keyboard's own release still stops it
+    commands = tick(resolver, {}, keys, pad, T0 + 0.5)
+    assert any(c[2] == "continuous_stop" and c[5] == "keyboard"
+               for c in commands)
+
+
+def test_right_stick_still_stops_its_own_axis(resolver):
+    """The ownership guard must not disable the normal stop."""
+    pad = FakeGamepad()
+    pad.right_x = 1.0
+    tick(resolver, {}, {}, pad, T0)
+    pad.right_x = 0.0
+    commands = tick(resolver, {}, {}, pad, T0 + 0.05)
+    assert any(c[2] == "continuous_stop" and c[0] == "zolix" and c[1] == "x"
+               for c in commands)
+
+
+def test_a_disconnected_gamepad_releases_its_stick_axes(resolver):
+    """Regression (2026-09-16): stick claims live in ``_continuous_stick``,
+    which ``_handle_stops`` never walks — so a pad that vanished mid-jog left
+    the axis running on the last command of the frozen snapshot (the
+    controller now publishes a neutral state on the falling edge, and the
+    resolver releases what that stick owned)."""
+    pad = FakeGamepad()
+    pad.right_x = 1.0
+    tick(resolver, {}, {}, pad, T0)
+    pad.left_x = 1.0
+    tick(resolver, {}, {}, pad, T0 + 0.05)
+    gone = FakeGamepad()
+    gone.connected = False
+    commands = tick(resolver, {}, {}, gone, T0 + 0.1)
+    stops = {(c[0], c[1]) for c in commands if c[2] == "continuous_stop"}
+    assert stops == {("zolix", "x"), ("sigmakoki", "x")}
+    # the stick bookkeeping is gone with the pad
+    assert resolver._continuous_stick == {}
+    assert resolver._last_stick_dir == {}
+
+
+def test_focus_trigger_curve_uses_the_shared_bounds():
+    """The trigger bar's jog-speed readout reads ``focus_manual_bounds``; the
+    dispatcher must command exactly that curve. Regression: the bar used the
+    RAW device bounds while the dispatcher scaled them by the objective's
+    focus_manual_multiplier, so the readout overstated the command (×9.4 at
+    20× with the shipped table) — and the old test passed literals."""
+    r = ActionResolver(ObjectiveSettings(_OBJECTIVE_ROWS),
+                       state=FakeState(objective=1))       # 10× → focus ×0.25
+    lo, hi = focus_manual_bounds(r._settings, r._state)
+    assert (lo, hi) == (50 * 0.25, 2000 * 0.25)
+    pad = FakeGamepad()
+    pad.right_trigger = 1.0
+    commands = tick(r, {}, {}, pad, T0)
+    starts = [c for c in commands
+              if c[2] == "continuous_start" and c[0] == "focus"]
+    assert [c[4] for c in starts] == [500.0]
+    assert focus_trigger_to_speed(0.0, 1.0, min_speed=lo, max_speed=hi,
+                                  gamma=2.2, deadzone=0.05) == 500
+
+
+def test_focus_key_speed_uses_the_shared_bounds():
+    """The keyboard/UI focus holds take the same scaled pair (slow = max/4)."""
+    r = ActionResolver(ObjectiveSettings(_OBJECTIVE_ROWS),
+                       state=FakeState(objective=1))
+    assert r._focus_key_speed(fast=True) == 500.0
+    assert r._focus_key_speed(fast=False) == max(10.0, 12.5, 125.0)
