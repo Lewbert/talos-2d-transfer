@@ -749,9 +749,10 @@ class CameraPage(_FormPage):
 
 
 # Annotations (*-suffixed labels + tooltips). Manual-control values are
-# applied live (InputSystem.reload_settings on Apply); only a connection
-# change and the live resolution need more than that.
-_RECONNECT = "applies after reconnect"
+# applied live (InputSystem.reload_settings on Apply); a connection change
+# reconnects that device on Apply, and the live resolution still needs the
+# next connect.
+_RECONNECT = "reconnects on Apply"
 _NEXT_CONNECT = "applies on the next connect"
 
 

@@ -75,6 +75,18 @@ class FocusProxy(DeviceProxy):
     # GUI thread
     # ------------------------------------------------------------------
 
+    @property
+    def busy(self) -> bool:
+        """A special job (autofocus / backlash calibration) is queued or
+        running — a reconnect would replace the proxy and its completion
+        signals, stranding the service in AUTOFOCUS/busy forever."""
+        # NOTE: the abort latch is deliberately NOT consulted — STOP ALL
+        # arms it with no job in flight, and a stale latch would refuse
+        # every later reconnect.
+        if self._af_ctrl is not None or self._cal_ctrl is not None:
+            return True
+        return any(item[2] in self._special_methods for item in self._queue)
+
     def set_frame_slot(self, slot) -> None:
         """Attach the shared LatestFrameSlot (camera worker writes; the AF
         job reads). Plain attribute — called from the GUI thread before

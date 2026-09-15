@@ -10,7 +10,6 @@ from PySide6.QtCore import QObject, Signal
 from talos.config import Settings
 from talos.cv.autofocus_service import AutofocusService
 from talos.cv.frame_slot import LatestFrameSlot
-from talos.hal.proxies.focus_proxy import FocusProxy
 from talos.instruments import InstrumentManager
 from talos.models import StagePosition
 from talos.ui.main_window import MainWindow
@@ -151,9 +150,9 @@ class TALOSApplication:
         # both workers exist; the camera worker publishes from its first
         # streamed frame on.
         self.manager.camera.set_frame_slot(self.frame_slot)
-        focus = self.manager.device("focus")
-        if isinstance(focus, FocusProxy):
-            focus.set_frame_slot(self.frame_slot)
+        # Through the manager: it stores the slot so a RECONNECTED focus
+        # proxy is wired up as well.
+        self.manager.set_frame_slot(self.frame_slot)
         if self.input is not None:
             self.input.start()
         autoquit_ms = os.environ.get("TALOS_AUTOQUIT_MS")

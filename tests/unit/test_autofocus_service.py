@@ -111,6 +111,7 @@ class FakeFocusProxy(QObject):
 class FakeManager(QObject):
     sig_job_submitted = Signal(str, str)
     sig_device_state = Signal(str, dict)
+    sig_proxy_replaced = Signal(str, object)
 
     def __init__(self):
         super().__init__()
@@ -161,6 +162,44 @@ def test_measurement_region_comes_from_settings(rig):
     assert service._default_roi() == (0.2, 0.3, 0.4, 0.5)
     settings.section("autofocus")["default_roi_norm"] = None
     assert service._default_roi() is None
+
+
+def test_reconnect_rebinds_the_focus_proxy(rig):
+    """A device reconnect replaces the focus proxy: the service must follow
+    it, or a finished run reports into the retired object (dropped) and the
+    service stays busy/AUTOFOCUS forever."""
+    manager, _settings, state, _slot, service = rig
+    service.start_af_s()
+    flush(500)  # the arm timer submits the job
+    assert service.busy
+
+    new_proxy = FakeFocusProxy()
+    manager.sig_proxy_replaced.emit("focus", new_proxy)
+    assert service._focus is new_proxy
+
+    # the OLD proxy is disconnected…
+    manager._focus.sig_af_done.emit(_result())
+    flush()
+    assert service.busy and state.mode == "AUTOFOCUS"
+    # …and the new one drives the completion
+    new_proxy.sig_af_done.emit(_result())
+    flush()
+    assert not service.busy and state.mode == "MANUAL"
+
+
+def test_reconnect_aborts_an_inflight_run(rig):
+    """The job's completion would die with its proxy — a reconnect must
+    abort the run instead of stranding the service."""
+    manager, _settings, state, _slot, service = rig
+    service.start_af_s()
+    flush(500)
+    assert service.busy
+    manager.sig_device_state.emit("focus", {"connecting": True})
+    assert manager._focus.aborts >= 1
+    assert "focus device reconnecting" in manager._focus.abort_reasons
+    # new starts are refused while the device is reconnecting
+    assert service._focus_connected is False
+    assert service.busy  # still waiting for the aborted run's completion
 
 
 def _result(success=True, baseline=1000.0, message="ok"):

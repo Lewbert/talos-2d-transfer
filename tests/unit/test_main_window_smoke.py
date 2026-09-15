@@ -342,6 +342,16 @@ def test_enable_gate_reaches_every_checkbox(window):
     assert window._manager.is_enabled("zolix") is True
 
 
+def test_settings_applied_refreshes_every_cached_consumer(window):
+    """Preferences Apply must push the new values into everything that
+    caches settings-derived state: the calibration context, the strip's
+    scale factors, the input maps and the camera-flip bookkeeping."""
+    window._on_settings_applied()   # must not raise with a stub manager
+    window._settings.device("camera")["flip"] = False
+    window._on_settings_applied()
+    assert window._camera_flip is False
+
+
 def test_snapshot_flow_submits_4k_and_clears_busy(window, tmp_path):
     # Redirect the snapshot dir into tmp (the capture settings default to
     # the appdata snapshots folder otherwise).

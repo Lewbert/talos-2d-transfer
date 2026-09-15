@@ -88,6 +88,24 @@ class DeviceProxy(QObject):
         self._thread.start()
 
     @Slot()
+    def cancel_pending(self) -> None:
+        """Worker-thread slot: FAIL every queued job (reconnect path).
+
+        ``request_shutdown`` clears the queue silently, which leaves any
+        waiter blocked until its own timeout — the grid scan's
+        ``StageAdapter._call`` waits 60-120 s on ``sig_command_done``.
+        Failure (not "done") is deliberate: a done-with-None result is read
+        as a VALUE by the adapter (``get_position`` would return a
+        zeroed StagePosition and the scan would move on numbers that were
+        never read).
+        """
+        while self._queue:
+            _priority, job_id, _method, _args = self._queue.popleft()
+            if job_id >= 0:
+                self.sig_command_failed.emit(job_id, "Reconnecting",
+                                             "device is reconnecting")
+
+    @Slot()
     def request_shutdown(self) -> None:
         """Worker-thread slot: stop, disconnect, and quit the thread."""
         self._queue.clear()

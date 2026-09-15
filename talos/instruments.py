@@ -19,6 +19,20 @@ from talos.models import Job
 logger = logging.getLogger(__name__)
 
 STOP_ALL_BUDGET_MS = 1500
+#: How long a reconnect waits for the retired worker to join before giving
+#: up and keeping the old connection (a wedged device call must not hang
+#: the GUI thread for the full shutdown grace).
+RECONNECT_JOIN_MS = 5000
+
+#: The settings keys the DRIVER reads in its constructor. A change to any
+#: of them needs a new driver instance — the factory runs once inside the
+#: worker thread, so an edited port never reaches a live driver.
+_CONNECTION_KEYS: dict[str, tuple[str, ...]] = {
+    "zolix": ("port", "baudrate", "slave_address", "timeout_s"),
+    "sigmakoki": ("port", "baudrate", "timeout_s"),
+    "focus": ("port", "baudrate", "timeout_s"),
+    "yudian": ("port", "baudrate", "slave_address", "timeout_s"),
+}
 
 
 class InstrumentManager(QObject):
@@ -30,6 +44,7 @@ class InstrumentManager(QObject):
     sig_event = Signal(str, str, dict)       # device key, event, payload
     sig_job_submitted = Signal(str, str)     # device key, method — the AF-S
                                              # input-abort detector (service)
+    sig_proxy_replaced = Signal(str, object)  # device key, the NEW proxy
 
     def __init__(self, settings, sim: bool = False, parent: QObject | None = None):
         super().__init__(parent)
@@ -39,6 +54,14 @@ class InstrumentManager(QObject):
         self._proxies: dict[str, DeviceProxy] = {}
         self._camera: CameraProxy | None = None
         self._enabled: dict[str, bool] = {}
+        # Connection state for the reconnect path: the key values each live
+        # driver was built with (a COPY — settings.device() returns the live
+        # dict, so comparing against it would always match), and the proxies
+        # replaced by a reconnect.
+        self._proxy_cfg: dict[str, dict] = {}
+        self._retired: dict[str, DeviceProxy] = {}
+        self._frame_slot = None
+        self._shutting_down = False
         # True when a worker thread refused to join during shutdown (a
         # wedged device call) — the app must os._exit past Qt teardown
         # (destroying a live QThread aborts the process).
@@ -56,28 +79,9 @@ class InstrumentManager(QObject):
         self._stop_budget_timer.timeout.connect(self._on_stop_budget)
 
         for key in DEVICE_KEYS:
-            device_cfg = settings.device(key)
-            if not device_cfg.get("enabled", True):
+            if not settings.device(key).get("enabled", True):
                 continue
-            poll_ms = int(device_cfg.get("poll_interval_ms", 100))
-            # NOTE: device_cfg must be bound as a default argument — a bare
-            # closure captures the loop variable and every device would get
-            # the LAST section (hardware-verified bug, all-on-COM5).
-            proxy_cls = FocusProxy if key == "focus" else DeviceProxy
-            proxy = proxy_cls(key,
-                              lambda k=key, cfg=device_cfg: make_device(k, cfg, sim),
-                              poll_interval_ms=poll_ms, parent=self)
-            # Bound slots (not lambdas): Qt lambdas with no receiver execute
-            # in the EMITTING (worker) thread; slots on this manager queue
-            # to the GUI thread. The key is recovered via sender().
-            proxy.device_key = key
-            proxy.sig_connected.connect(self._on_proxy_connected)
-            proxy.sig_telem.connect(self._on_proxy_telem)
-            proxy.sig_event.connect(self._on_proxy_event)
-            proxy.sig_command_done.connect(self.sig_job_done)
-            proxy.sig_command_failed.connect(self.sig_job_failed)
-            proxy.sig_all_stopped.connect(self._on_proxy_stopped)
-            self._proxies[key] = proxy
+            self._proxies[key] = self._build_device_proxy(key)
 
         camera_cfg = settings.device("camera")
         # The tick interval is a poll floor only — fetch blocks on the
@@ -96,11 +100,113 @@ class InstrumentManager(QObject):
     # Public API (GUI thread)
     # ------------------------------------------------------------------
 
+    def _build_device_proxy(self, key: str) -> DeviceProxy:
+        """Construct and wire one device proxy (shared by __init__ and
+        reconnect)."""
+        device_cfg = self.settings.device(key)
+        poll_ms = int(device_cfg.get("poll_interval_ms", 100))
+        # NOTE: device_cfg must be bound as a default argument — a bare
+        # closure captures the loop variable and every device would get
+        # the LAST section (hardware-verified bug, all-on-COM5).
+        proxy_cls = FocusProxy if key == "focus" else DeviceProxy
+        proxy = proxy_cls(key,
+                          lambda k=key, cfg=device_cfg: make_device(k, cfg, self.sim),
+                          poll_interval_ms=poll_ms, parent=self)
+        # Bound slots (not lambdas): Qt lambdas with no receiver execute
+        # in the EMITTING (worker) thread; slots on this manager queue
+        # to the GUI thread. The key is recovered via sender().
+        proxy.device_key = key
+        proxy.sig_connected.connect(self._on_proxy_connected)
+        proxy.sig_telem.connect(self._on_proxy_telem)
+        proxy.sig_event.connect(self._on_proxy_event)
+        proxy.sig_command_done.connect(self.sig_job_done)
+        proxy.sig_command_failed.connect(self.sig_job_failed)
+        proxy.sig_all_stopped.connect(self._on_proxy_stopped)
+        self._proxy_cfg[key] = {name: device_cfg.get(name)
+                                for name in _CONNECTION_KEYS.get(key, ())}
+        if isinstance(proxy, FocusProxy) and self._frame_slot is not None:
+            # A replaced focus proxy must get the shared frame mailbox too —
+            # autofocus reads frames from it (a stale one means scoring
+            # frames that no longer arrive).
+            proxy.set_frame_slot(self._frame_slot)
+        return proxy
+
     @Slot()
     def connect_all(self) -> None:
         for proxy in self._proxies.values():
             proxy.start()
         self._camera.start()
+
+    def set_frame_slot(self, slot) -> None:
+        """Attach the shared LatestFrameSlot to the focus proxy; stored so
+        a RECONNECTED proxy gets it as well."""
+        self._frame_slot = slot
+        focus = self._proxies.get("focus")
+        if isinstance(focus, FocusProxy):
+            focus.set_frame_slot(slot)
+
+    def connection_config_changed(self, key: str) -> bool:
+        """True when a connection key differs from the value the LIVE
+        driver was built with (port, baudrate, slave address, timeout)."""
+        previous = self._proxy_cfg.get(key)
+        if previous is None:
+            return False
+        current = self.settings.device(key)
+        return any(current.get(name) != value
+                   for name, value in previous.items())
+
+    @Slot(str)
+    def reconnect(self, key: str) -> bool:
+        """Rebuild one device's connection with the current settings.
+
+        The worker thread is stopped through its own event loop (a queued
+        stop → cancel → shutdown), joined, and replaced by a fresh proxy
+        whose driver factory reads the new configuration. Returns True when
+        the new proxy was started.
+        """
+        if self._shutting_down:
+            return False
+        old = self._proxies.get(key)
+        if old is None:
+            return False
+        if isinstance(old, FocusProxy) and old.busy:
+            # The job's completion would die with its proxy and the
+            # autofocus service would stay in AUTOFOCUS forever.
+            self._log("warning", f"{key}: an autofocus/calibration job owns "
+                                 "the worker — reconnect refused")
+            return False
+        self.sig_device_state.emit(key, {"connecting": True})
+        self._log("info", f"{key}: reconnecting — stopping the current driver")
+        old.enqueue_stop()
+        QMetaObject.invokeMethod(old, "cancel_pending",
+                                 Qt.ConnectionType.QueuedConnection)
+        if isinstance(old, FocusProxy):
+            old.request_abort("device reconnect")
+        QMetaObject.invokeMethod(old, "request_shutdown",
+                                 Qt.ConnectionType.QueuedConnection)
+        if not old.wait(RECONNECT_JOIN_MS):
+            self._log("error", f"{key}: reconnect aborted — the worker did "
+                               f"not stop within {RECONNECT_JOIN_MS} ms; the "
+                               "old connection stays")
+            self.sig_device_state.emit(key, {"connected": True})
+            return False
+        # The retired proxy is KEPT, never deleted: its already-queued
+        # completion signals (sig_af_done, sig_command_done) still have to
+        # be delivered, and destroying a QObject drops them — an autofocus
+        # job that finished just before the swap would then leave the
+        # service busy forever. _sender_key() ignores it from now on.
+        self._retired[key] = old
+        new = self._build_device_proxy(key)
+        self._proxies[key] = new
+        self.sig_proxy_replaced.emit(key, new)
+        # The reconnect keeps the software enable gate (per-device state,
+        # not per-proxy) — re-broadcast so every checkbox agrees.
+        self.sig_device_state.emit(key, {"enabled": self.is_enabled(key)})
+        new.start()
+        cfg = self.settings.device(key)
+        self._log("info", f"{key}: opening {cfg.get('port', '?')} @ "
+                          f"{cfg.get('baudrate', '?')}")
+        return True
 
     def device(self, key: str) -> DeviceProxy | None:
         return self._proxies.get(key)
@@ -191,6 +297,7 @@ class InstrumentManager(QObject):
         invocation): stop/disconnect must never run on the GUI thread while
         the worker may be inside a blocking DLL call (snapshot poll etc.).
         """
+        self._shutting_down = True
         self.stop_all()
         # A running autofocus job blocks the focus worker's drain — abort it
         # directly so the queued stop/disconnect can run afterwards.
@@ -246,20 +353,40 @@ class InstrumentManager(QObject):
     # ------------------------------------------------------------------
 
     def _sender_key(self) -> str:
+        """The device key of the emitting proxy, or "" for a RETIRED one.
+
+        A reconnect cancels the old driver but cannot cancel signals that
+        were already queued: a retired proxy carries the same ``device_key``
+        as its replacement, so without the identity check a late
+        ``sig_connected(False)`` would blank a live LED, late telemetry
+        would overwrite ``last_position`` (the autofocus arm centre), and a
+        late ``sig_all_stopped`` would perturb the stop-ack count.
+        """
         sender = self.sender()
-        return getattr(sender, "device_key", "?") if sender is not None else "?"
+        key = getattr(sender, "device_key", None)
+        if key is None:
+            return "?"
+        if self._proxies.get(key) is not sender:
+            return ""
+        return key
 
     @Slot(bool)
     def _on_proxy_connected(self, ok: bool) -> None:
-        self._on_connected(self._sender_key(), ok)
+        key = self._sender_key()
+        if key:
+            self._on_connected(key, ok)
 
     @Slot(dict)
     def _on_proxy_telem(self, payload: dict) -> None:
-        self._on_telem(self._sender_key(), payload)
+        key = self._sender_key()
+        if key:
+            self._on_telem(key, payload)
 
     @Slot(str, dict)
     def _on_proxy_event(self, event: str, payload: dict) -> None:
-        self._on_event(self._sender_key(), event, payload)
+        key = self._sender_key()
+        if key:
+            self._on_event(key, event, payload)
 
     @Slot(bool)
     def _on_camera_connected(self, ok: bool) -> None:
@@ -279,6 +406,8 @@ class InstrumentManager(QObject):
         self.sig_device_state.emit("camera", props)
 
     def _on_proxy_stopped(self) -> None:
+        if self._sender_key() == "":
+            return  # a retired proxy's stop ack
         self._stop_acks += 1
         if self._stop_acks >= len([k for k in MOTION_KEYS if k in self._proxies]):
             self._stop_budget_timer.stop()

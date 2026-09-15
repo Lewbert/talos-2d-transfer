@@ -75,6 +75,10 @@ class AutofocusService(QObject):
 
         manager.sig_job_submitted.connect(self._on_job_submitted)
         manager.sig_device_state.connect(self._on_device_state)
+        # A reconnect swaps the focus proxy: the service must re-bind its
+        # proxy reference and every completion/progress connection, or a
+        # finished run would report into the retired object.
+        manager.sig_proxy_replaced.connect(self._on_proxy_replaced)
         self._focus.sig_af_done.connect(self._on_af_done)
         self._focus.sig_af_progress.connect(self.sig_af_progress)
         self._focus.sig_af_curve_secondary.connect(self.sig_af_curve_secondary)
@@ -114,8 +118,45 @@ class AutofocusService(QObject):
         """Track the focus proxy's connectivity — a dead worker must
         refuse starts (an armed job into a dead event loop strands the
         service in AUTOFOCUS/busy forever)."""
-        if key == "focus" and "connected" in payload:
+        if key != "focus":
+            return
+        if payload.get("connecting"):
+            # A reconnect is about to replace the worker: read as "not
+            # connected" (refuse new starts) and abort anything in flight,
+            # because the job's completion would be lost with its proxy.
+            self._focus_connected = False
+            if self.busy:
+                logger.warning("Autofocus: focus device reconnecting — aborting")
+                self.abort(reason="focus device reconnecting")
+            return
+        if "connected" in payload:
             self._focus_connected = bool(payload["connected"])
+
+    def _on_proxy_replaced(self, key: str, proxy) -> None:
+        """Rebind to the new focus proxy after a reconnect."""
+        if key != "focus" or proxy is self._focus:
+            return
+        old, self._focus = self._focus, proxy
+        for signal, slot in ((old.sig_af_done, self._on_af_done),
+                             (old.sig_af_progress, self.sig_af_progress),
+                             (old.sig_af_curve_secondary,
+                              self.sig_af_curve_secondary),
+                             (old.sig_af_log, self.sig_af_log),
+                             (old.sig_cal_done, self._on_cal_done),
+                             (old.sig_stop_requested,
+                              self._on_stop_requested)):
+            try:
+                signal.disconnect(slot)
+            except (RuntimeError, TypeError):
+                pass  # never connected / already gone
+        self._focus.sig_af_done.connect(self._on_af_done)
+        self._focus.sig_af_progress.connect(self.sig_af_progress)
+        self._focus.sig_af_curve_secondary.connect(self.sig_af_curve_secondary)
+        self._focus.sig_af_log.connect(self.sig_af_log)
+        self._focus.sig_cal_done.connect(self._on_cal_done)
+        self._focus.sig_stop_requested.connect(self._on_stop_requested)
+        if self._frame_slot is not None:
+            self._focus.set_frame_slot(self._frame_slot)
 
     # ------------------------------------------------------------------
     # AF-S

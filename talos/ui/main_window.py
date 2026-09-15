@@ -27,6 +27,7 @@ from PySide6.QtWidgets import (
 import talos
 from talos.capture import load_capture_config, next_snapshot_path, snapshot_dir
 from talos.cv.scale_bar import burn_spec
+from talos.hal.registry import DEVICE_KEYS
 from talos.models import StagePosition
 from talos.objective_offsets import compute_offset_move
 from talos.ui.auto_gain import AutoGainController
@@ -45,7 +46,7 @@ from talos.ui.widgets.gamepad_indicator import GamepadIndicator
 from talos.ui.widgets.hardware_strip import HardwareStrip
 from talos.ui.widgets.log_window import LogWindow
 from talos.ui.widgets.stage_control_window import StageControlWindow
-from talos.ui.widgets.status_led import ERROR, OFF, ON, StatusLED
+from talos.ui.widgets.status_led import CONNECTING, ERROR, OFF, ON, StatusLED
 from talos.ui.workspaces import NavigationWorkspace, SampleFindingWorkspace
 
 _OBJECTIVES = ["5x", "10x", "20x", "50x", "100x"]
@@ -463,6 +464,36 @@ class MainWindow(QMainWindow):
             # axis inversion / flip X↔Y, jog speeds, focus trigger curve
             self._input.reload_settings()
         self._sync_camera_flip()
+        self._reconnect_changed_devices()
+
+    def _reconnect_changed_devices(self) -> None:
+        """Rebuild the connection of every device whose port / baudrate /
+        slave address / timeout changed (Preferences → Hardware).
+
+        Refused while a job owns the axes: swapping the zolix driver
+        mid-scan breaks the scan's blocking job waits (60-120 s each), and
+        swapping the focus driver mid-autofocus strands the service. The
+        edit stays in the settings — re-apply after the job.
+        """
+        changed = getattr(self._manager, "connection_config_changed", None)
+        reconnect = getattr(self._manager, "reconnect", None)
+        if changed is None or reconnect is None:
+            return  # a manager without the reconnect API (stubs/tests)
+        mode = getattr(self._state, "mode", "MANUAL")
+        busy_axes = mode != "MANUAL" or bool(
+            self._autofocus is not None and self._autofocus.busy)
+        for key in DEVICE_KEYS:
+            if not changed(key):
+                continue
+            if busy_axes:
+                self._on_log_message(
+                    "warning",
+                    f"{key}: connection change deferred — "
+                    f"{mode.lower()} owns the axes; re-apply after the job")
+                continue
+            if self._input is not None:
+                self._input.cancel_all_holds("device reconnect")
+            reconnect(key)
 
     def _sync_camera_flip(self) -> None:
         """React to a camera-flip change (Preferences → Hardware → Camera).
@@ -749,7 +780,10 @@ class MainWindow(QMainWindow):
     def _on_device_state(self, key: str, payload: dict) -> None:
         led = self._leds.get(key)
         if led is not None:
-            if payload.get("connected") is True:
+            if payload.get("connecting"):
+                # A reconnect is swapping the driver (Preferences → Apply).
+                led.set_state(CONNECTING)
+            elif payload.get("connected") is True:
                 led.set_state(ON)
             elif payload.get("connected") is False:
                 led.set_state(ERROR)
