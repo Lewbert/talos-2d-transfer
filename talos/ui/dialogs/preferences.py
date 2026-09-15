@@ -32,6 +32,7 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QPushButton,
     QScrollArea,
+    QSizePolicy,
     QSpinBox,
     QStackedWidget,
     QTableWidget,
@@ -114,6 +115,23 @@ def list_serial_ports() -> list[tuple[str, str]]:
 # Standard ladder for the Modbus/ASCII devices on this bench.
 BAUDRATES = (1200, 2400, 4800, 9600, 14400, 19200, 38400, 57600, 115200,
              230400, 250000, 460800, 500000, 921600)
+
+#: Width of the numeric fields — a QFormLayout with AllNonFixedFieldsGrow
+#: stretches a lone spinbox across the whole page, which reads as an empty
+#: form (the port/baud combos and text rows still grow).
+_NUM_FIELD_W = 170
+
+
+def _port_label(device: str, description: str) -> str:
+    """'COM3' + 'USB Serial Port (COM3)' → 'COM3 — USB Serial Port'.
+
+    pyserial's description usually repeats the port name in parentheses;
+    showing the raw pair reads as "COM3 — USB Serial Port (COM3)".
+    """
+    text = (description or "").strip()
+    if text.endswith(f"({device})"):
+        text = text[: -len(device) - 2].strip()
+    return f"{device} — {text}" if text else device
 
 
 class _FormPage(QWidget):
@@ -201,6 +219,8 @@ class _FormPage(QWidget):
         box = QDoubleSpinBox()
         box.setRange(lo, hi)
         box.setSingleStep(step)
+        box.setMaximumWidth(_NUM_FIELD_W)   # a full-width spinbox reads as
+        box.setAlignment(Qt.AlignmentFlag.AlignRight)  # an empty form
         value = float(self._cfg.get(key, (lo + hi) / 2))
         # the decimals must fit the configured VALUE as well as the step,
         # or the spinbox rounds the stored number on the way in
@@ -217,6 +237,8 @@ class _FormPage(QWidget):
         box = QSpinBox()
         box.setRange(lo, hi)
         box.setValue(int(self._cfg.get(key, lo)))
+        box.setMaximumWidth(_NUM_FIELD_W)
+        box.setAlignment(Qt.AlignmentFlag.AlignRight)
         self._target.addRow(self._label(label, annotation), box)
         _Field(self, key, label, box, box.setValue, box.value, annotation)
 
@@ -274,8 +296,7 @@ class _FormPage(QWidget):
             combo.blockSignals(True)
             combo.clear()
             for device, description in ports:
-                text = f"{device} — {description}" if description else device
-                combo.addItem(text, device)
+                combo.addItem(_port_label(device, description), device)
             if keep and keep not in [p for p, _ in ports]:
                 combo.insertItem(0, f"{keep} (not detected)", keep)
             if not keep:
@@ -576,6 +597,10 @@ class TemperaturePage(QWidget):
         layout.addWidget(self._form_page)
 
         fp = self._form_page
+        # Only its sizeHint height — the page shares the panel with the
+        # presets table, and an expanding form would open a gap.
+        fp.setSizePolicy(QSizePolicy.Policy.Preferred,
+                         QSizePolicy.Policy.Maximum)
         fp.add_group("Connection")
         fp.add_port("port", "Port", annotation=_RECONNECT)
         fp.add_baud("baudrate", "Baudrate", annotation=_RECONNECT)
@@ -591,7 +616,9 @@ class TemperaturePage(QWidget):
         preset_layout = QVBoxLayout(presets)
         self._presets = QTableWidget(0, 2)
         self._presets.setHorizontalHeaderLabels(["Name", "°C"])
-        self._presets.setMaximumHeight(160)  # the dialog stays compact;
+        self._presets.setMaximumHeight(210)  # ~6 rows: the shipped preset
+        # list fits without a half-cut row; beyond this the table's own
+        # scrollbar takes over (the page itself scrolls in the dialog).
         # beyond this the table's own scrollbar takes over
         preset_layout.addWidget(self._presets)
         btn_row = QHBoxLayout()
@@ -839,9 +866,9 @@ class InputPage(QWidget):
         page.add_group("Keyboard & mouse")
         page.add_int("long_press_threshold_ms",
                      "Long-press threshold (ms)", 100, 1000)
-        page.add_hint("A shorter hold turns into a continuous jog sooner; "
-                      "a release below the threshold becomes a single step.")
         page.add_int("loop_rate_hz", "Input loop rate (Hz)", 20, 120)
+        page.add_hint("A hold shorter than the threshold becomes a single "
+                      "step, a longer one a continuous jog.")
         layout.addWidget(page)
 
         gamepad = _FormPage(settings,
@@ -863,6 +890,14 @@ class InputPage(QWidget):
                          "buttons lives on each device's page "
                          "(Hardware → … → Axis direction).")
         layout.addWidget(gamepad)
+        layout.addStretch(1)
+
+        # Each form page must take only its sizeHint height, or the two
+        # pages split the panel and the trailing stretch inside each one
+        # opens a gap between the groups.
+        for form in (page, gamepad):
+            form.setSizePolicy(QSizePolicy.Policy.Preferred,
+                               QSizePolicy.Policy.Maximum)
 
         self._pages = [page, gamepad]
 

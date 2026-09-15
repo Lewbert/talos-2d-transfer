@@ -130,6 +130,14 @@ def main() -> int:
     prefs.grab().save(str(path))
     print(f"saved {path}")
 
+    def prefs_page(label: str) -> None:
+        """Select a page by its nav label (page ORDER is a UI decision —
+        index-based lookups broke every time a page was added)."""
+        labels = [item.text(0) for item in prefs._page_items]
+        prefs._nav.setCurrentItem(prefs._page_items[labels.index(label)])
+        flush(200)
+        prefs.repaint()
+
     # The accent-combo popup (group-header QA).
     combo = prefs._pages[0]._accent_combo
     combo.showPopup()
@@ -140,18 +148,30 @@ def main() -> int:
     combo.hidePopup()
 
     # The merged Objectives & Calibration page (Basic/Advanced tables).
-    prefs._nav.setCurrentItem(prefs._page_items[1])
-    flush(200)
-    prefs.repaint()
+    prefs_page("Objectives & Calibration")
     path = args.out / f"prefs_objectives{tag}.png"
     prefs.grab().save(str(path))
     print(f"saved {path}")
 
     # The Temperature page with the preset editor.
-    prefs._nav.setCurrentItem(prefs._page_items[7])
-    flush(200)
-    prefs.repaint()
+    prefs_page("Temperature")
     path = args.out / f"prefs_temperature{tag}.png"
+    prefs.grab().save(str(path))
+    print(f"saved {path}")
+
+    # Grouped device page (Connection / Manual controls / Axis direction).
+    prefs_page("Zolix XYR")
+    path = args.out / f"prefs_zolix{tag}.png"
+    prefs.grab().save(str(path))
+    print(f"saved {path}")
+
+    # The new input page + the camera page (flip).
+    prefs_page("Input & Gamepad")
+    path = args.out / f"prefs_input{tag}.png"
+    prefs.grab().save(str(path))
+    print(f"saved {path}")
+    prefs_page("Camera")
+    path = args.out / f"prefs_camera{tag}.png"
     prefs.grab().save(str(path))
     print(f"saved {path}")
     prefs.hide()
