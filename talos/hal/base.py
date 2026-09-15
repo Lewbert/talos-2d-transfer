@@ -285,14 +285,6 @@ class XYRStage(AbstractDevice):
         """Poll until no axis is moving."""
 
     @abstractmethod
-    def configure_motion(self, accel_pps2: int, speeds: dict[str, int]) -> None:
-        """Write accel/speed registers on connect; verify by readback."""
-
-    @abstractmethod
-    def save_parameters(self) -> None:
-        """Opcode 0x006D — persist parameters to controller EEPROM."""
-
-    @abstractmethod
     def check_estop(self) -> bool:
         """Status bit 9."""
 

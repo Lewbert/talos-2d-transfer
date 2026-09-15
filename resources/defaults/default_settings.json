@@ -1,7 +1,6 @@
 {
   "_version": 4,
   "selected_objective": 0,
-  "device_mode": "auto",
   "objective_offsets_enabled": true,
   "display": {
     "scale_bar": true,
@@ -30,7 +29,6 @@
   "devices": {
     "zolix": {
       "port": "COM3",
-      "baudrate": 115200,
       "slave_address": 1,
       "timeout_s": 0.05,
       "um_per_pulse_xy": 0.625,
@@ -51,7 +49,6 @@
     },
     "sigmakoki": {
       "port": "COM6",
-      "baudrate": 115200,
       "timeout_s": 0.3,
       "um_per_step_xy": 0.5,
       "um_per_step_z": 0.25,
@@ -68,7 +65,6 @@
     },
     "focus": {
       "port": "COM10",
-      "baudrate": 115200,
       "timeout_s": 0.3,
       "max_speed": 2000,
       "min_speed": 50,
@@ -87,7 +83,6 @@
     },
     "yudian": {
       "port": "COM5",
-      "baudrate": 9600,
       "slave_address": 1,
       "timeout_s": 0.5,
       "poll_interval_ms": 500,

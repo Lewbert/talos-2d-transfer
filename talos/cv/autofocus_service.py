@@ -27,7 +27,7 @@ from talos.cv.autofocus import (
     AutofocusRequest,
     AutofocusResult,
 )
-from talos.cv.backlash_cal import BacklashCalConfig
+from talos.cv.backlash_cal import BacklashCalConfig, BacklashResult
 from talos.hal.proxies.focus_proxy import FocusProxy
 
 logger = logging.getLogger(__name__)
@@ -59,14 +59,20 @@ class AutofocusService(QObject):
         self._settings = settings
         self._state = state                     # AppState
         self._frame_slot = frame_slot
-        self._focus: FocusProxy = manager.device("focus")
+        # Optional: `devices.focus.enabled = false` makes the manager skip the
+        # proxy entirely, and this construction is unguarded at startup — the
+        # service used to raise AttributeError on None and take the whole app
+        # with it. Autofocus is simply unavailable for the session then.
+        self._focus: FocusProxy | None = manager.device("focus")
         self._job_kind = ""                     # "" | "af_s" | "cal"
         self._roi_norm: tuple | None = None
         self._pending_request: AutofocusRequest | None = None
         # Optimistic until the first connect signal: a dead focus worker
         # must refuse starts instead of arming into the void (stuck
-        # AUTOFOCUS/busy forever).
-        self._focus_connected = True
+        # AUTOFOCUS/busy forever). A device the manager never built at all
+        # (disabled in settings) is not optimistic — there is nothing to
+        # connect to, and no connect signal will ever come.
+        self._focus_connected = self._focus is not None
 
         self._arm_timer = QTimer(self)
         self._arm_timer.setSingleShot(True)
@@ -79,14 +85,22 @@ class AutofocusService(QObject):
         # proxy reference and every completion/progress connection, or a
         # finished run would report into the retired object.
         manager.sig_proxy_replaced.connect(self._on_proxy_replaced)
-        self._focus.sig_af_done.connect(self._on_af_done)
-        self._focus.sig_af_progress.connect(self.sig_af_progress)
-        self._focus.sig_af_curve_secondary.connect(self.sig_af_curve_secondary)
-        self._focus.sig_af_log.connect(self.sig_af_log)
-        self._focus.sig_cal_done.connect(self._on_cal_done)
+        if self._focus is None:
+            logger.error("Focus device is disabled in settings — autofocus "
+                         "is unavailable for this session")
+        else:
+            self._wire_focus(self._focus)
+
+    def _wire_focus(self, proxy) -> None:
+        """Every completion/progress connection to one focus proxy."""
+        proxy.sig_af_done.connect(self._on_af_done)
+        proxy.sig_af_progress.connect(self.sig_af_progress)
+        proxy.sig_af_curve_secondary.connect(self.sig_af_curve_secondary)
+        proxy.sig_af_log.connect(self.sig_af_log)
+        proxy.sig_cal_done.connect(self._on_cal_done)
         # STOP ALL reaches the service through the focus proxy so it also
         # cancels a pending arm (the proxy's own abort covers a running job).
-        self._focus.sig_stop_requested.connect(self._on_stop_requested)
+        proxy.sig_stop_requested.connect(self._on_stop_requested)
 
     # ------------------------------------------------------------------
     # Settings-derived helpers
@@ -137,26 +151,22 @@ class AutofocusService(QObject):
         if key != "focus" or proxy is self._focus:
             return
         old, self._focus = self._focus, proxy
-        for signal, slot in ((old.sig_af_done, self._on_af_done),
-                             (old.sig_af_progress, self.sig_af_progress),
-                             (old.sig_af_curve_secondary,
-                              self.sig_af_curve_secondary),
-                             (old.sig_af_log, self.sig_af_log),
-                             (old.sig_cal_done, self._on_cal_done),
-                             (old.sig_stop_requested,
-                              self._on_stop_requested)):
-            try:
-                signal.disconnect(slot)
-            except (RuntimeError, TypeError):
-                pass  # never connected / already gone
-        self._focus.sig_af_done.connect(self._on_af_done)
-        self._focus.sig_af_progress.connect(self.sig_af_progress)
-        self._focus.sig_af_curve_secondary.connect(self.sig_af_curve_secondary)
-        self._focus.sig_af_log.connect(self.sig_af_log)
-        self._focus.sig_cal_done.connect(self._on_cal_done)
-        self._focus.sig_stop_requested.connect(self._on_stop_requested)
+        if old is not None:
+            for signal, slot in ((old.sig_af_done, self._on_af_done),
+                                 (old.sig_af_progress, self.sig_af_progress),
+                                 (old.sig_af_curve_secondary,
+                                  self.sig_af_curve_secondary),
+                                 (old.sig_af_log, self.sig_af_log),
+                                 (old.sig_cal_done, self._on_cal_done),
+                                 (old.sig_stop_requested,
+                                  self._on_stop_requested)):
+                try:
+                    signal.disconnect(slot)
+                except (RuntimeError, TypeError):
+                    pass  # never connected / already gone
+        self._wire_focus(proxy)
         if self._frame_slot is not None:
-            self._focus.set_frame_slot(self._frame_slot)
+            proxy.set_frame_slot(self._frame_slot)
 
     # ------------------------------------------------------------------
     # AF-S
@@ -207,9 +217,21 @@ class AutofocusService(QObject):
             sweep_steps=um_to_steps(60.0, self._um_per_step()),
             um_per_step=self._um_per_step())
         self._job_kind = "cal"
-        self._manager.submit(
+        job_id = self._manager.submit(
             "focus", "backlash_calibrate",
             (self._manager.focus_position, cfg))
+        if job_id < 0:
+            # Unknown/disabled device: no job, no sig_cal_done — the service
+            # would stay busy="cal" forever and both calibration buttons stay
+            # disabled waiting for a completion that cannot come. _arm has
+            # this guard; this path did not.
+            logger.warning("Autofocus: backlash calibration rejected "
+                           "(focus disabled?)")
+            self._job_kind = ""
+            self.sig_cal_finished.emit(BacklashResult(
+                success=False,
+                message="focus stage disabled — calibration unavailable"))
+            return
         self._state.set_mode("AUTOFOCUS")
 
     def _on_cal_done(self, result) -> None:
@@ -405,7 +427,8 @@ class AutofocusService(QObject):
             self.sig_af_finished.emit(AutofocusResult(
                 best_position=self._manager.focus_position, best_score=0.0,
                 aborted=True, message=reason, phase="arm"))
-        self._focus.request_abort(reason)
+        if self._focus is not None:
+            self._focus.request_abort(reason)
 
     def shutdown(self) -> None:
         """Called before the manager teardown: abort everything, stop

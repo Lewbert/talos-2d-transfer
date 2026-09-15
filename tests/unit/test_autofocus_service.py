@@ -519,3 +519,53 @@ def test_user_roi_overrides_default(rig):
     flush(500)
     (request,) = [s for s in manager.submits if s[1] == "autofocus"][0][2]
     assert request.roi_norm == user_roi
+
+
+class NoFocusManager(FakeManager):
+    """The manager skipped the focus proxy entirely (a hand-edited
+    ``devices.focus.enabled = false``): device() returns None and submit()
+    refuses with -1, exactly like InstrumentManager."""
+
+    def device(self, key):
+        return None
+
+    def submit(self, device_key, method_name, *args, priority=0):
+        self.submits.append((device_key, method_name, args, priority))
+        return -1
+
+
+def test_service_survives_a_missing_focus_proxy():
+    """Regression (2026-09-16): with the focus device disabled the service
+    connected its signals on a None proxy — AttributeError at startup, which
+    app.py does not catch, so the whole app died before the window existed."""
+    manager = NoFocusManager()
+    service = AutofocusService(manager, FakeSettings(), FakeState(),
+                               LatestFrameSlot())
+    assert service.busy is False
+    results = []
+    service.sig_af_finished.connect(results.append)
+    service.start_af_s()
+    assert len(results) == 1 and "not connected" in results[0].message
+    assert service.busy is False
+    service.calibrate_backlash()          # refused, not armed
+    assert service.busy is False
+    service.abort()                       # must not raise
+    service.shutdown()
+
+
+def test_calibration_refusal_does_not_strand_the_service():
+    """Regression (2026-09-16): calibrate_backlash ignored submit()'s -1
+    return while _arm guarded it, so _job_kind stayed "cal": the service was
+    busy forever, the mode stayed AUTOFOCUS, and the calibration buttons
+    stayed disabled waiting for a completion that could not arrive."""
+    manager = NoFocusManager()
+    service = AutofocusService(manager, FakeSettings(), FakeState(),
+                               LatestFrameSlot())
+    service._focus_connected = True       # the device is there, then refuses
+    results = []
+    service.sig_cal_finished.connect(results.append)
+    service.calibrate_backlash()
+    assert service.busy is False
+    assert results and not results[0].success
+    assert "disabled" in results[0].message
+    assert service._state.mode == "MANUAL", "the mode must not stay AUTOFOCUS"

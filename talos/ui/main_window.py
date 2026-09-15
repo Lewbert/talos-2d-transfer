@@ -537,9 +537,17 @@ class MainWindow(QMainWindow):
         # Apply keeps the dialog open: the calibration cache (scale bar,
         # snapshot burn) must pick up new µm/px values immediately, not
         # when the dialog is finally closed.
+        applied: list[bool] = []
+        dialog.sig_applied.connect(lambda: applied.append(True))
         dialog.sig_applied.connect(self._on_settings_applied)
         dialog.exec()
-        self._on_settings_applied()
+        if not applied:
+            # Closed without Apply (Cancel or the window button) — some pages
+            # write their values live, so refresh once anyway. When Apply DID
+            # run this second pass was pure repetition: it re-ran the
+            # reconnect sweep, which for a device whose reconnect failed means
+            # another 5 s GUI freeze and a replayed warning.
+            self._on_settings_applied()
 
     def _on_settings_applied(self) -> None:
         """Refresh everything that caches settings-derived state."""

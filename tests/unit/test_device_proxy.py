@@ -367,3 +367,95 @@ def test_missing_optional_capabilities_do_not_fail_poll():
     assert payloads[-1]["output_percent"] is None
     assert "position" not in payloads[-1]
     assert "slim_bounds" not in payloads[-1]
+
+
+# ---------------------------------------------------------------------------
+# Worker-thread life cycle: a failed connect, and concurrent producers
+# ---------------------------------------------------------------------------
+
+def _wait_until(predicate, timeout_s: float = 3.0, step_ms: int = 10) -> bool:
+    import time as _time
+
+    from PySide6.QtCore import QEventLoop, QTimer
+
+    deadline = _time.monotonic() + timeout_s
+    while _time.monotonic() < deadline:
+        if predicate():
+            return True
+        loop = QEventLoop()
+        QTimer.singleShot(step_ms, loop.quit)
+        loop.exec()
+    return predicate()
+
+
+def test_a_failed_connect_leaves_a_usably_dead_proxy():
+    """Regression (2026-09-16): _run is connected to QThread.started, i.e. it
+    runs BEFORE exec(). The failure path called thread.quit() there, so the
+    worker never got an event loop: request_shutdown could not run either, and
+    every later submit was posted into a finished thread and vanished — no
+    completion, no failure, no timeout, and a red LED as the only clue."""
+    from talos.hal.base import DeviceError
+
+    def factory():
+        raise DeviceError("no such port")
+
+    proxy = DeviceProxy("focus", factory, poll_interval_ms=20)
+    collector = Collector()
+    proxy.sig_command_failed.connect(collector.on_failed)
+    proxy.sig_event.connect(collector.on_event)
+    proxy.start()
+    try:
+        assert _wait_until(lambda: any(e == "connect_failed"
+                                       for e, _p in collector.events))
+        assert proxy._thread.isRunning(), "the event loop must stay alive"
+
+        # a submit now FAILS immediately instead of disappearing
+        proxy.enqueue(7, "get_position", (), PRIORITY_NORMAL)
+        assert (7, "NotConnected", "connect failed: no such port") in collector.failed
+
+        # ...and the worker can still be torn down through its own loop
+        from PySide6.QtCore import QMetaObject, Qt
+        QMetaObject.invokeMethod(proxy, "request_shutdown",
+                                 Qt.ConnectionType.QueuedConnection)
+        assert proxy.wait(2000) is True
+    finally:
+        if proxy._thread.isRunning():
+            proxy._thread.quit()
+            proxy.wait(2000)
+
+
+def test_concurrent_producers_lose_no_jobs():
+    """The queue has three producers (GUI, the scan worker, and the drain's
+    own consumer): rebuilding it without a lock dropped whatever was appended
+    between the sort and the rebind."""
+    import threading
+
+    driver = FakeDriver()
+    proxy = DeviceProxy("focus", lambda: driver, poll_interval_ms=1000)
+    collector = Collector()
+    proxy.sig_command_done.connect(collector.on_done)
+    proxy.start()
+    try:
+        assert _wait_until(lambda: proxy._driver is driver)
+        per_thread = 150
+
+        def produce(offset: int) -> None:
+            for i in range(per_thread):
+                proxy.enqueue(offset + i, "get_position", (), PRIORITY_NORMAL)
+
+        threads = [threading.Thread(target=produce, args=(base,))
+                   for base in (0, per_thread)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+        assert _wait_until(
+            lambda: len(collector.done) >= 2 * per_thread, timeout_s=5.0)
+        done = {job_id for job_id, _r in collector.done}
+        assert done == set(range(2 * per_thread)), \
+            f"lost {2 * per_thread - len(done)} jobs"
+    finally:
+        from PySide6.QtCore import QMetaObject, Qt
+        QMetaObject.invokeMethod(proxy, "request_shutdown",
+                                 Qt.ConnectionType.QueuedConnection)
+        proxy.wait(2000)

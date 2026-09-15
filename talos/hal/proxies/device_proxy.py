@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import dataclasses
 import logging
+import threading
 from collections import deque
 from typing import Any, Callable
 
@@ -48,6 +49,11 @@ _COALESCE_KEYS: dict[str, dict[str, Callable[[tuple], tuple]]] = {
 # survive.
 _CONTINUOUS_MOTION = ("set_speed", "move", "move_continuous")
 
+# Every motion method — a STOP purges these (see enqueue_stop), because a
+# stale one behind the stop would move the axis again with nothing held.
+_MOTION = ("set_speed", "move", "move_continuous", "move_rel", "move_abs",
+           "step")
+
 #: Sample the limit switches (a second serial round trip) every Nth poll —
 #: ~0.5 s at the default 100 ms cadence.
 LIMITS_POLL_EVERY = 5
@@ -71,7 +77,21 @@ class DeviceProxy(QObject):
         self._factory = driver_factory
         self._poll_interval_ms = poll_interval_ms
         self._queue: deque[tuple[int, int, str, tuple]] = deque()
+        # The queue has THREE producers (enqueue/enqueue_stop from the GUI and
+        # the scan worker, _drain's consumer on the worker): rebuilding it
+        # without a lock lost items appended between the sort and the rebind
+        # and could raise "deque mutated during iteration". Held only around
+        # the queue itself — NEVER across a driver call.
+        self._queue_lock = threading.Lock()
         self._driver = None
+        # None = usable; a string = the proxy will never run another command
+        # (connect failed, or it was torn down). Read from the GUI thread so a
+        # submit fails immediately instead of queueing into a dead worker.
+        self._unavailable: str | None = None
+        # Set by begin_retire() (GUI thread) so a drain that is ALREADY
+        # queued — or running — stands down instead of executing jobs the
+        # retire is about to fail (see retire).
+        self._retiring = False
         self._draining = False
         self._poll_timer: QTimer | None = None
         self._poll_fail_streak = 0
@@ -95,9 +115,15 @@ class DeviceProxy(QObject):
     def start(self) -> None:
         self._thread.start()
 
+    def mark_unavailable(self, reason: str) -> None:
+        """GUI thread: this proxy will run no further command. Used by the
+        reconnect timeout, where the queued retire cannot run yet (the worker
+        is inside a blocking call) but no submit should be accepted either."""
+        self._unavailable = reason
+
     @Slot()
     def cancel_pending(self) -> None:
-        """Worker-thread slot: FAIL every queued job (reconnect path).
+        """FAIL every queued job (reconnect path).
 
         ``request_shutdown`` clears the queue silently, which leaves any
         waiter blocked until its own timeout — the grid scan's
@@ -107,21 +133,86 @@ class DeviceProxy(QObject):
         zeroed StagePosition and the scan would move on numbers that were
         never read).
         """
-        while self._queue:
-            _priority, job_id, _method, _args = self._queue.popleft()
-            if job_id >= 0:
-                self.sig_command_failed.emit(job_id, "Reconnecting",
-                                             "device is reconnecting")
+        self._fail_queued("device is reconnecting")
+
+    def begin_retire(self) -> None:
+        """GUI thread: stand the drain down and post the retire.
+
+        Two things had to change for the queued job to be FAILED rather than
+        executed. (1) The steps were posted separately, and the drain
+        scheduled by ``enqueue_stop`` ran BEFORE ``cancel_pending``, so the
+        drain consumed the queue — including the blocking job cancel_pending
+        exists to fail — and the waiter it was meant to protect still blocked
+        for its full 60-120 s timeout. (2) A drain posted by an earlier
+        ``enqueue`` is still ahead of the retire in the worker's queue, so it
+        must be told to stand down, which is what ``_retiring`` does.
+        """
+        self._retiring = True
+        QMetaObject.invokeMethod(self, "retire",
+                                 Qt.ConnectionType.QueuedConnection)
+
+    @Slot()
+    def retire(self) -> None:
+        """Worker-thread slot: the whole reconnect teardown, in ONE step —
+        stop the axes, fail what is queued, then let the driver go."""
+        self._retiring = True
+        self._purge_continuous()
+        self._fail_queued("device is reconnecting")
+        self._stop_now()
+        self._teardown("device proxy retired")
 
     @Slot()
     def request_shutdown(self) -> None:
         """Worker-thread slot: stop, disconnect, and quit the thread."""
-        self._queue.clear()
+        self._stop_now()
+        self._teardown("device proxy shut down")
+
+    # -- worker-thread helpers -------------------------------------------
+
+    def _fail_queued(self, reason: str) -> None:
+        """FAIL every queued job. Worker thread for the pop; the emits are
+        signal-to-signal relays (they cross to the GUI thread themselves)."""
+        with self._queue_lock:
+            pending = list(self._queue)
+            self._queue.clear()
+        for _priority, job_id, _method, _args in pending:
+            if job_id >= 0:
+                self.sig_command_failed.emit(job_id, "Reconnecting", reason)
+
+    def _purge_continuous(self) -> None:
+        """Drop every queued MOTION job, COMPLETING it (superseded, not
+        failed — a waiter on a discrete move must not read a phantom
+        failure). Callable from the GUI thread: the lock protects the queue,
+        and the emissions happen outside it."""
+        with self._queue_lock:
+            kept, superseded = [], []
+            for item in self._queue:
+                if item[0] == PRIORITY_NORMAL and item[2] in _MOTION:
+                    superseded.append(item[1])
+                else:
+                    kept.append(item)
+            self._queue = deque(kept)
+        for job_id in superseded:
+            self.sig_command_done.emit(job_id, None)  # superseded
+
+    def _stop_now(self) -> None:
+        """Stop the driver directly (we are already on the worker thread) —
+        a queued stop job would sit behind whatever the worker is doing."""
+        if self._driver is None:
+            return
+        handler = self._special_methods.get("stop")
+        try:
+            (handler if handler is not None else self._driver.stop)()
+        except Exception:  # noqa: BLE001 - a stop must never raise
+            logger.warning("Proxy %s: stop failed during teardown",
+                           self._key, exc_info=True)
+
+    def _teardown(self, reason: str) -> None:
+        """Disconnect, mark unusable, and quit the worker's event loop."""
+        self._unavailable = reason
+        with self._queue_lock:
+            self._queue.clear()
         if self._driver is not None:
-            try:
-                self._driver.stop()
-            except Exception:  # noqa: BLE001
-                pass
             try:
                 self._driver.disconnect()
             except Exception:  # noqa: BLE001
@@ -146,36 +237,54 @@ class DeviceProxy(QObject):
 
     @Slot(int, str, tuple, int)
     def enqueue(self, job_id: int, method_name: str, args: tuple, priority: int) -> None:
+        if self._unavailable is not None:
+            # A proxy whose connect FAILED (or that was torn down) has no
+            # event loop to run this job and never will: failing it here is
+            # the difference between a waiter seeing an error and a waiter
+            # hanging until its own 60-120 s timeout. Before the fix the
+            # worker had already quit its thread, so the job vanished.
+            if job_id >= 0:
+                self.sig_command_failed.emit(job_id, "NotConnected",
+                                             self._unavailable)
+            return
         args = tuple(args)
+        superseded: list[int] = []
         key_fn = _COALESCE_KEYS.get(self._key, {}).get(method_name)
-        if priority == PRIORITY_NORMAL and key_fn is not None:
-            # Newest value for this coalesce key wins: drop older queued
-            # updates (they would otherwise apply late after a slow ACK and
-            # make control laggy). Independent axes keep their own keys.
-            new_key = key_fn(args)
-            kept = []
-            for item in self._queue:
-                if (item[0] == PRIORITY_NORMAL and item[2] == method_name
-                        and key_fn(item[3]) == new_key):
-                    self.sig_command_done.emit(item[1], None)  # superseded
-                else:
-                    kept.append(item)
-            self._queue = deque(kept)
-        elif priority == PRIORITY_STOP and method_name in ("stop", "stop_axis"):
-            # A release-stop must never be followed by a stale CONTINUOUS
-            # command: the drain sorts STOP first, so a queued
-            # set_speed/move/move_continuous behind it would re-start the
-            # axis after the release (no input held). Discrete commands
-            # (single steps, go-to) are intentional and survive.
-            kept = []
-            for item in self._queue:
-                if item[0] == PRIORITY_NORMAL \
-                        and item[2] in _CONTINUOUS_MOTION:
-                    self.sig_command_done.emit(item[1], None)  # superseded
-                else:
-                    kept.append(item)
-            self._queue = deque(kept)
-        self._queue.append((priority, job_id, method_name, args))
+        with self._queue_lock:
+            if priority == PRIORITY_NORMAL and key_fn is not None:
+                # Newest value for this coalesce key wins: drop older queued
+                # updates (they would otherwise apply late after a slow ACK
+                # and make control laggy). Independent axes keep their own
+                # keys.
+                new_key = key_fn(args)
+                kept = []
+                for item in self._queue:
+                    if (item[0] == PRIORITY_NORMAL and item[2] == method_name
+                            and key_fn(item[3]) == new_key):
+                        superseded.append(item[1])
+                    else:
+                        kept.append(item)
+                self._queue = deque(kept)
+            elif priority == PRIORITY_STOP and method_name in ("stop", "stop_axis"):
+                # A release-stop must never be followed by a stale CONTINUOUS
+                # command: the drain sorts STOP first, so a queued
+                # set_speed/move/move_continuous behind it would re-start the
+                # axis after the release (no input held). Discrete commands
+                # (single steps, go-to) are intentional and survive.
+                kept = []
+                for item in self._queue:
+                    if item[0] == PRIORITY_NORMAL \
+                            and item[2] in _CONTINUOUS_MOTION:
+                        superseded.append(item[1])
+                    else:
+                        kept.append(item)
+                self._queue = deque(kept)
+            self._queue.append((priority, job_id, method_name, args))
+        # Superseded jobs are COMPLETED (not failed) — they were replaced, and
+        # a waiter must not see a phantom failure. Emitted outside the lock:
+        # these signals cross to the GUI thread.
+        for old_id in superseded:
+            self.sig_command_done.emit(old_id, None)
         self._schedule_drain()
 
     def _schedule_drain(self) -> None:
@@ -193,16 +302,9 @@ class DeviceProxy(QObject):
         # re-start the axis right after the stop (hardware-verified:
         # "released the trigger but the focus kept jogging"). Purge them,
         # completing the superseded jobs for accounting consistency.
-        _MOTION = ("set_speed", "move", "move_continuous", "move_rel",
-                   "move_abs", "step")
-        kept = []
-        for item in self._queue:
-            if item[0] == PRIORITY_NORMAL and item[2] in _MOTION:
-                self.sig_command_done.emit(item[1], None)  # superseded
-            else:
-                kept.append(item)
-        self._queue = deque(kept)
-        self._queue.appendleft((PRIORITY_STOP, -1, "stop", ()))
+        self._purge_continuous()
+        with self._queue_lock:
+            self._queue.appendleft((PRIORITY_STOP, -1, "stop", ()))
         self._schedule_drain()
 
     # ------------------------------------------------------------------
@@ -211,20 +313,23 @@ class DeviceProxy(QObject):
 
     @Slot()
     def _run(self) -> None:
+        # NOTE: _run is connected to QThread.started, i.e. it runs BEFORE
+        # run() reaches exec(). Calling quit() here (as the failure path used
+        # to) makes exec() return at once: the worker never gets an event
+        # loop, so it can neither poll nor serve a queued request_shutdown —
+        # and every later submit vanished silently. A failed connect now
+        # leaves the loop RUNNING and the proxy marked unusable, so the app
+        # can still tear it down cleanly and the operator gets an error.
         try:
             self._driver = self._factory()
             self._driver.connect()
         except DeviceError as exc:
             logger.error("Proxy %s: connect failed: %s", self._key, exc)
-            self.sig_connected.emit(False)
-            self.sig_event.emit("connect_failed", {"error": str(exc)})
-            self._thread.quit()
+            self._connect_failed(f"connect failed: {exc}")
             return
         except Exception as exc:  # noqa: BLE001
             logger.exception("Proxy %s: unexpected connect failure", self._key)
-            self.sig_connected.emit(False)
-            self.sig_event.emit("connect_failed", {"error": str(exc)})
-            self._thread.quit()
+            self._connect_failed(f"connect failed: {exc!r}")
             return
         self.sig_connected.emit(True)
         self._poll_timer = QTimer(self)
@@ -232,16 +337,33 @@ class DeviceProxy(QObject):
         self._poll_timer.timeout.connect(self._poll)
         self._poll_timer.start()
 
+    def _connect_failed(self, reason: str) -> None:
+        """Worker thread: record the failure, fail what is queued, and leave
+        the event loop alive (see _run)."""
+        if self._driver is not None:
+            try:
+                self._driver.disconnect()   # a half-open port must not linger
+            except Exception:  # noqa: BLE001
+                pass
+            self._driver = None
+        self._unavailable = reason
+        self._fail_queued(reason)
+        self.sig_connected.emit(False)
+        self.sig_event.emit("connect_failed", {"error": reason})
+
     @Slot()
     def _drain(self) -> None:
-        if self._draining or self._driver is None:
+        if self._draining or self._driver is None or self._retiring:
             return
         self._draining = True
         try:
-            while self._queue:
-                # Stable sort by -priority: STOP first, NORMAL FIFO.
-                self._queue = deque(sorted(self._queue, key=lambda item: -item[0]))
-                priority, job_id, method_name, args = self._queue.popleft()
+            while True:
+                if self._retiring:
+                    break   # a retire is queued: it owns the rest of the queue
+                job = self._pop_next_job()
+                if job is None:
+                    break
+                priority, job_id, method_name, args = job
                 try:
                     handler = self._special_methods.get(method_name)
                     result = (handler(*args) if handler is not None
@@ -262,6 +384,21 @@ class DeviceProxy(QObject):
         finally:
             self._draining = False
 
+    def _pop_next_job(self) -> tuple | None:
+        """Pop the next job (STOP first, then FIFO) under the queue lock."""
+        with self._queue_lock:
+            if not self._queue:
+                return None
+            items = sorted(self._queue, key=lambda item: -item[0])
+            job = items[0]
+            self._queue = deque(items[1:])
+            return job
+
+    def pending_jobs(self) -> tuple[tuple, ...]:
+        """Snapshot of the queue (for the FocusProxy's busy check)."""
+        with self._queue_lock:
+            return tuple(self._queue)
+
     @Slot()
     def _poll(self) -> None:
         if self._driver is None or self._draining:
@@ -269,8 +406,9 @@ class DeviceProxy(QObject):
         # Commands get exclusive serial access: status polling interleaved
         # with motion commands garbles the firmware's replies (ERR:UNKNOWN
         # garbage) and slows ACKs — skip polls while commands are pending.
-        if self._queue:
-            return
+        with self._queue_lock:
+            if self._queue:
+                return
         failed = False
         for event in self._driver.drain_events():
             self.sig_event.emit(event, {})

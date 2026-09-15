@@ -54,7 +54,7 @@ Dependencies point downwards only: UI → input → manager → proxies → driv
 ## Device reconnect (proxy life-cycle)
 
 A driver is constructed **inside its worker thread** from a factory that closes
-over the settings dict and runs exactly once, so an edited port/baudrate never
+over the settings dict and runs exactly once, so an edited port never
 reaches a live driver. `InstrumentManager.reconnect(key)` is the supported way
 to apply one:
 

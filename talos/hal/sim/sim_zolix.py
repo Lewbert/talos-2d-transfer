@@ -145,18 +145,6 @@ class SimZolixXYRStage(XYRStage):
         if self._estop:
             pass  # estop is latched until cleared, like the real controller
 
-    def save_parameters(self) -> None:
-        if any(self._moving.values()):
-            raise DeviceBusyError("SimZolix: cannot save while moving")
-
-    def configure_motion(self, accel_pps2: int, speeds: dict[str, int]) -> None:
-        self.accel_pps2 = int(accel_pps2)
-        for key in ("x", "y"):
-            if key in speeds:
-                self.slow_speed_pps = int(speeds[key])
-        if "r" in speeds:
-            self.slow_speed_r = int(speeds["r"])
-
     # Status ---------------------------------------------------------------
 
     def get_status(self) -> StageStatus:

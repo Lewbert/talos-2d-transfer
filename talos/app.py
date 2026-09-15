@@ -96,8 +96,6 @@ class TALOSApplication:
         # columns (idempotent; never raises) — BEFORE any DB read below.
         from talos.migration import materialize_labscope_calibration
         materialize_labscope_calibration(self.settings)
-        if sim:
-            self.settings.update("device_mode", "sim")
         from talos import debug_console
         from talos.ui import theme
 

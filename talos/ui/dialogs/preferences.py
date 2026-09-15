@@ -112,10 +112,6 @@ def list_serial_ports() -> list[tuple[str, str]]:
         return []
 
 
-# Standard ladder for the Modbus/ASCII devices on this bench.
-BAUDRATES = (1200, 2400, 4800, 9600, 14400, 19200, 38400, 57600, 115200,
-             230400, 250000, 460800, 500000, 921600)
-
 #: Width of the numeric fields — a QFormLayout with AllNonFixedFieldsGrow
 #: stretches a lone spinbox across the whole page, which reads as an empty
 #: form (the port/baud combos and text rows still grow).
@@ -317,25 +313,6 @@ class _FormPage(QWidget):
                lambda value: combo.setCurrentIndex(
                    max(0, combo.findData(str(value)))),
                lambda: combo.currentData() or "", annotation)
-
-    def add_baud(self, key: str, label: str,
-                 annotation: str | None = None) -> None:
-        """Baudrate picker over the standard ladder (the configured value
-        is inserted when it is not on it)."""
-        combo = QComboBox()
-        values = [int(v) for v in BAUDRATES]
-        current = int(self._cfg.get(key, BAUDRATES[0]) or BAUDRATES[0])
-        if current not in values:
-            values.append(current)
-            values.sort()
-        for value in values:
-            combo.addItem(str(value), value)
-        combo.setCurrentIndex(max(0, combo.findData(current)))
-        self._target.addRow(self._label(label, annotation), combo)
-        _Field(self, key, label, combo,
-               lambda value: combo.setCurrentIndex(
-                   max(0, combo.findData(int(value)))),
-               lambda: int(combo.currentData()), annotation)
 
     def add_dir(self, key: str, label: str, title: str = "Choose folder") -> None:
         row = QWidget()
@@ -603,7 +580,6 @@ class TemperaturePage(QWidget):
                          QSizePolicy.Policy.Maximum)
         fp.add_group("Connection")
         fp.add_port("port", "Port", annotation=_RECONNECT)
-        fp.add_baud("baudrate", "Baudrate", annotation=_RECONNECT)
         fp.add_int("slave_address", "Modbus slave address", 1, 247,
                    _RECONNECT)
         fp.add_group("Safety limits")
@@ -755,11 +731,13 @@ class CameraPage(_FormPage):
 
 
 # Annotations (*-suffixed labels + tooltips). Manual-control values are
-# applied live (InputSystem.reload_settings on Apply); a connection change
-# reconnects that device on Apply, and the live resolution still needs the
-# next connect.
+# applied live (InputSystem.reload_settings on Apply) and a changed serial
+# connection reconnects that device on Apply. The CAMERA is not in that
+# reconnect path (only the four serial devices are), so its live-resolution
+# switch needs a restart — saying "the next connect" implied an event the app
+# never performs.
 _RECONNECT = "reconnects on Apply"
-_NEXT_CONNECT = "applies on the next connect"
+_NEXT_CONNECT = "applies after an app restart"
 
 
 def _build_pages(settings, qapp, manager, autofocus_service, parent):
@@ -791,7 +769,6 @@ def _build_pages(settings, qapp, manager, autofocus_service, parent):
     focus_fields = [
         ("group", "Connection"),
         ("port", "port", "Port", _RECONNECT),
-        ("baud", "baudrate", "Baudrate", _RECONNECT),
         ("group", "Scale — µm per step"),
         ("float", "um_per_step", "µm per step", 0.01, 10, 0.01),
         ("float", "backlash_um", "Backlash (µm, mechanism)", 0.0, 50, 0.1),
@@ -802,17 +779,19 @@ def _build_pages(settings, qapp, manager, autofocus_service, parent):
         ("group", "Manual control — direction"),
         ("bool", "invert", "Invert jog direction (triggers, keys, buttons)"),
         ("hint", _MANUAL_HINT),
-        ("group", "Soft limits"),
-        ("bool", "slim_on", "Soft limits on (firmware SLIM)"),
-        ("int", "slim_min", "Soft limit min (steps)", -2000000, 2000000),
-        ("int", "slim_max", "Soft limit max (steps)", -2000000, 2000000),
+        ("group", "Soft limits (SLIM)"),
+        ("hint", "A firmware setting, not an app one: the focus controller's "
+                 "soft limits live in its EEPROM and are written by the "
+                 "calibration wizard, so nothing here edits them. The app "
+                 "always clamps autofocus and backlash-calibration moves in "
+                 "software against the bounds it reads back, and warns when "
+                 "the firmware is not enforcing SLIM itself."),
     ]
     pages.append(("Hardware", "Focus",
                   _device_page(settings, "focus", focus_fields, "")))
     zolix_fields = [
         ("group", "Connection"),
         ("port", "port", "Port", _RECONNECT),
-        ("baud", "baudrate", "Baudrate", _RECONNECT),
         ("int", "slave_address", "Modbus slave address", 1, 247, _RECONNECT),
         ("group", "Scale — µm per pulse"),
         ("float", "um_per_pulse_xy", "µm per pulse XY", 0.01, 10, 0.01),
@@ -839,7 +818,6 @@ def _build_pages(settings, qapp, manager, autofocus_service, parent):
     sigm_fields = [
         ("group", "Connection"),
         ("port", "port", "Port", _RECONNECT),
-        ("baud", "baudrate", "Baudrate", _RECONNECT),
         ("group", "Scale — µm per step"),
         ("float", "um_per_step_xy", "µm per step XY", 0.01, 10, 0.01),
         ("float", "um_per_step_z", "µm per step Z", 0.01, 10, 0.01),

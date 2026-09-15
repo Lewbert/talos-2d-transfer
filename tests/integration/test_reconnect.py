@@ -81,9 +81,13 @@ class _Collector(QObject):
     def __init__(self):
         super().__init__()
         self.failed: list[tuple] = []
+        self.done: list[tuple] = []
 
     def on_failed(self, job_id, kind, message):
         self.failed.append((job_id, kind, message))
+
+    def on_done(self, job_id, result):
+        self.done.append((job_id, result))
 
 
 # --- change detection -----------------------------------------------------
@@ -240,3 +244,61 @@ def test_all_devices_can_be_reconnected(qapp):
         assert all(manager.device(k) is not None for k in DEVICE_KEYS)
     finally:
         manager.shutdown()
+
+
+def test_reconnect_fails_the_queue_instead_of_running_it(manager):
+    """A job queued behind a slow command must FAIL on a reconnect, not
+    execute on the driver being torn down.
+
+    Regression (2026-09-16): the drain scheduled by ``enqueue_stop`` ran
+    BEFORE ``cancel_pending``, so it consumed the whole queue — including the
+    blocker cancel_pending exists to fail — and the waiter it was written to
+    protect still blocked for its full 60-120 s timeout.
+    """
+    import time as _time
+
+    manager.connect_all()
+    flush(150)
+    proxy = manager.device("sigmakoki")
+    driver = proxy._driver
+    assert driver is not None
+    real_get_position = driver.get_position
+
+    def slow_get_position():
+        _time.sleep(0.4)
+        return real_get_position()
+
+    driver.get_position = slow_get_position
+    seen = _Collector()
+    proxy.sig_command_done.connect(seen.on_done)
+    proxy.sig_command_failed.connect(seen.on_failed)
+
+    proxy.enqueue(901, "get_position", (), 0)   # occupies the drain
+    flush(60)
+    proxy.enqueue(902, "get_position", (), 0)   # queued behind it
+    manager.settings.device("sigmakoki")["port"] = "COM8"
+    assert manager.reconnect("sigmakoki") is True
+    flush(150)
+
+    failed = {job: (kind, msg) for job, kind, msg in seen.failed}
+    assert 902 in failed, "the queued job must not run on the retired driver"
+    assert failed[902] == ("Reconnecting", "device is reconnecting")
+    assert 902 not in [job for job, _r in seen.done]
+    assert proxy.pending_jobs() == ()
+
+
+def test_reconnect_drops_the_stale_position_cache(manager):
+    """sig_connected(True) arrives BEFORE the new proxy's first poll, so a
+    "go to flake", a stored stage origin or an autofocus arm centre computed
+    in that window would use the PREVIOUS controller's numbers."""
+    manager.connect_all()
+    flush(400)
+    assert manager.last_position.get("zolix"), "no telemetry landed"
+
+    manager.settings.device("zolix")["port"] = "COM9"
+    assert manager.reconnect("zolix") is True
+    assert "zolix" not in manager.last_position
+
+    manager.settings.device("focus")["port"] = "COM11"
+    assert manager.reconnect("focus") is True
+    assert manager.focus_position == 0

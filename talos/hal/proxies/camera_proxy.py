@@ -47,6 +47,11 @@ class CameraProxy(QObject):
         self._frame_interval_ms = frame_interval_ms
         self._camera = None
         self._backend_name = ""
+        # None = usable; a string = the connect failed for good. Read from the
+        # GUI thread so a submit fails immediately: the snapshot busy-gate
+        # (auto-gain) is released by sig_command_failed, and before this the
+        # command was queued into a worker whose thread had quit.
+        self._unavailable: str | None = None
         self._streaming = False          # GUI-requested streaming state
         self._backend_streaming = False  # camera.start() actually active
         self._shutdown_requested = False
@@ -112,6 +117,14 @@ class CameraProxy(QObject):
 
     @Slot(int, str, tuple)
     def enqueue(self, job_id: int, method_name: str, args: tuple) -> None:
+        if self._unavailable is not None:
+            # No worker loop will run this: fail it so a waiter (the snapshot
+            # job's busy-gate) hears back. A snapshot queued into a dead
+            # worker used to disable auto-gain for the rest of the session.
+            if job_id >= 0:
+                self.sig_command_failed.emit(job_id, "NotConnected",
+                                             self._unavailable)
+            return
         self._commands.append((job_id, method_name, tuple(args)))
 
     # ------------------------------------------------------------------
@@ -120,13 +133,16 @@ class CameraProxy(QObject):
 
     @Slot()
     def _run(self) -> None:
+        # NOTE: _run runs on QThread.started, BEFORE exec(). Quitting here (as
+        # the failure paths used to) leaves the worker with no event loop at
+        # all: request_shutdown can never run and every later command is
+        # swallowed. The loop stays alive on failure and the proxy is marked
+        # unusable instead.
         try:
             candidates = self._factory()
         except Exception as exc:  # noqa: BLE001 — e.g. unknown backend in settings
             logger.error("CameraProxy: factory failed: %s", exc)
-            self.sig_connected.emit(False)
-            self.sig_event.emit("connect_failed", {"error": str(exc)})
-            self._thread.quit()
+            self._connect_failed(str(exc))
             return
         if not isinstance(candidates, (list, tuple)):
             candidates = [candidates]
@@ -154,9 +170,7 @@ class CameraProxy(QObject):
                 except Exception:  # noqa: BLE001
                     pass
         if self._camera is None:
-            self.sig_connected.emit(False)
-            self.sig_event.emit("connect_failed", {"error": str(last_error)})
-            self._thread.quit()
+            self._connect_failed(str(last_error))
             return
         if self._shutdown_requested:
             # Shutdown raced the connect window — tear down immediately
@@ -181,6 +195,17 @@ class CameraProxy(QObject):
         self._tick_timer.setTimerType(Qt.TimerType.PreciseTimer)
         self._tick_timer.timeout.connect(self._tick)
         self._tick_timer.start()
+
+    def _connect_failed(self, reason: str) -> None:
+        """Worker thread: record the failure and fail what is queued — the
+        event loop stays alive (see _run)."""
+        self._unavailable = f"connect failed: {reason}"
+        while self._commands:
+            job_id, _method, _args = self._commands.popleft()
+            if job_id >= 0:
+                self.sig_command_failed.emit(job_id, "NotConnected", reason)
+        self.sig_connected.emit(False)
+        self.sig_event.emit("connect_failed", {"error": reason})
 
     def _emit_fps(self) -> None:
         """Rolling 1 s fps, emitted at most twice a second."""

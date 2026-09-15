@@ -74,7 +74,6 @@ OP_CONTINUOUS = 0x0066
 OP_DECEL_STOP = 0x0067
 OP_IMMEDIATE_STOP = 0x0068
 OP_HOME = 0x0069
-OP_SAVE_PARAMS = 0x006D
 
 AXIS_SEL = {"x": 0x31, "y": 0x32, "r": 0x33}
 AXIS_ALL = 0x30
@@ -380,25 +379,6 @@ class ZolixXYRStage(XYRStage):
             if time.monotonic() >= deadline:
                 return False
             time.sleep(poll_s)
-
-    def save_parameters(self) -> None:
-        with self._lock:
-            self._require_connected()
-            if self.get_status().any_moving:
-                raise DeviceBusyError("Cannot save Zolix parameters while moving")
-            self._write_opcode(OP_SAVE_PARAMS, regs=1)
-
-    def configure_motion(self, accel_pps2: int, speeds: dict[str, int]) -> None:
-        with self._lock:
-            self._require_connected()
-            self.accel_pps2 = int(accel_pps2)
-            for axis in self._axes_here():
-                self._write_floats(REG_ACC_X + 2 * _AXIS_IDX[axis], [float(self.accel_pps2)])
-                if axis in speeds:
-                    self._write_floats(REG_SPEED_CONST_X + 2 * _AXIS_IDX[axis],
-                                       [float(speeds[axis])])
-                    self._speed_written[axis] = int(speeds[axis])
-            self._verify_motion_config()
 
     # ------------------------------------------------------------------
     # Status

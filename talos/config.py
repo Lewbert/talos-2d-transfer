@@ -180,10 +180,6 @@ class Settings:
     def device(self, key: str) -> dict:
         return self.section("devices").get(key, {})
 
-    @property
-    def sim(self) -> bool:
-        return self.data.get("device_mode") == "sim"
-
     # -- persistence --------------------------------------------------------
 
     def update(self, key: str, value: Any) -> None:

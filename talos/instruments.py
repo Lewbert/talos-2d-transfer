@@ -27,11 +27,16 @@ RECONNECT_JOIN_MS = 5000
 #: The settings keys the DRIVER reads in its constructor. A change to any
 #: of them needs a new driver instance — the factory runs once inside the
 #: worker thread, so an edited port never reaches a live driver.
+#:
+#: ``baudrate`` is deliberately NOT here: every driver hardcodes the rate its
+#: instrument speaks (zolix/sigmakoki/focus 115200, yudian 9600) and ignores
+#: the key, so listing it bought a full teardown, a ~3 s handshake and a
+#: stopped motor for zero effect.
 _CONNECTION_KEYS: dict[str, tuple[str, ...]] = {
-    "zolix": ("port", "baudrate", "slave_address", "timeout_s"),
-    "sigmakoki": ("port", "baudrate", "timeout_s"),
-    "focus": ("port", "baudrate", "timeout_s"),
-    "yudian": ("port", "baudrate", "slave_address", "timeout_s"),
+    "zolix": ("port", "slave_address", "timeout_s"),
+    "sigmakoki": ("port", "timeout_s"),
+    "focus": ("port", "timeout_s"),
+    "yudian": ("port", "slave_address", "timeout_s"),
 }
 
 
@@ -160,10 +165,11 @@ class InstrumentManager(QObject):
     def reconnect(self, key: str) -> bool:
         """Rebuild one device's connection with the current settings.
 
-        The worker thread is stopped through its own event loop (a queued
-        stop → cancel → shutdown), joined, and replaced by a fresh proxy
-        whose driver factory reads the new configuration. Returns True when
-        the new proxy was started.
+        The worker thread is stopped through its own event loop by ONE queued
+        ``retire`` invocation (stop the axes → fail the queued jobs → let the
+        driver go → quit), joined, and replaced by a fresh proxy whose driver
+        factory reads the new configuration. Returns True when the new proxy
+        was started.
         """
         if self._shutting_down:
             return False
@@ -178,36 +184,71 @@ class InstrumentManager(QObject):
             return False
         self.sig_device_state.emit(key, {"connecting": True})
         self._log("info", f"{key}: reconnecting — stopping the current driver")
-        old.enqueue_stop()
-        QMetaObject.invokeMethod(old, "cancel_pending",
-                                 Qt.ConnectionType.QueuedConnection)
         if isinstance(old, FocusProxy):
+            # Before the teardown: aborts land in the enqueue→construction gap
+            # through the proxy's latch (busy refuses a reconnect otherwise).
             old.request_abort("device reconnect")
-        QMetaObject.invokeMethod(old, "request_shutdown",
-                                 Qt.ConnectionType.QueuedConnection)
+        old.begin_retire()   # stands any queued drain down, then posts retire
         if not old.wait(RECONNECT_JOIN_MS):
-            self._log("error", f"{key}: reconnect aborted — the worker did "
+            # The retire invocation is already queued and WILL run as soon as
+            # the blocking device call returns — the old connection does not
+            # stay, and nothing will speak for the device until the user
+            # re-applies. Say that, and mark the proxy unusable NOW so a
+            # submit fails loudly instead of queueing behind a wedged worker.
+            old.mark_unavailable("reconnect timed out")
+            self._log("error", f"{key}: reconnect timed out — the worker did "
                                f"not stop within {RECONNECT_JOIN_MS} ms; the "
-                               "old connection stays")
-            self.sig_device_state.emit(key, {"connected": True})
+                               "device is unavailable until re-applied")
+            self.sig_device_state.emit(key, {"connected": False})
             return False
-        # The retired proxy is KEPT, never deleted: its already-queued
-        # completion signals (sig_af_done, sig_command_done) still have to
-        # be delivered, and destroying a QObject drops them — an autofocus
-        # job that finished just before the swap would then leave the
-        # service busy forever. _sender_key() ignores it from now on.
+        # The retired proxy is KEPT for now, not deleted: its already-queued
+        # completion signals (sig_af_done, sig_command_done) still have to be
+        # delivered, and destroying a QObject drops them — an autofocus job
+        # that finished just before the swap would then leave the service
+        # busy forever. _sender_key() ignores it from now on.
+        # The PREVIOUS retired proxy of this device is disposed of first: a
+        # dict slot per key silently dropped it on the second reconnect (its
+        # QThread destroyed at an arbitrary moment — the crash the reconnect
+        # tests document), which is why the slot is not a graveyard.
+        self._dispose_retired(key)
         self._retired[key] = old
         new = self._build_device_proxy(key)
         self._proxies[key] = new
+        # The caches are only as good as the device that produced them, and
+        # sig_connected(True) arrives BEFORE the new proxy's first poll: a
+        # "go to flake", a stored stage origin or an autofocus arm centre
+        # computed in that window would use the PREVIOUS controller's
+        # numbers. Drop them; the first poll refills them.
+        self.last_position.pop(key, None)
+        if key == "focus":
+            self._focus_position = 0
         self.sig_proxy_replaced.emit(key, new)
         # The reconnect keeps the software enable gate (per-device state,
         # not per-proxy) — re-broadcast so every checkbox agrees.
         self.sig_device_state.emit(key, {"enabled": self.is_enabled(key)})
         new.start()
         cfg = self.settings.device(key)
-        self._log("info", f"{key}: opening {cfg.get('port', '?')} @ "
-                          f"{cfg.get('baudrate', '?')}")
+        self._log("info", f"{key}: opening {cfg.get('port', '?')}")
         return True
+
+    def _dispose_retired(self, key: str) -> None:
+        """Release the retired proxy this key is about to replace.
+
+        Its thread is already joined (reconnect waits) and it serves no
+        further purpose once the NEW proxy is alive, so it is torn down
+        explicitly instead of being dropped by the garbage collector at an
+        arbitrary moment — destroying a live QThread aborts the interpreter
+        (Windows access violation; see the reconnect test's teardown note).
+        """
+        old = self._retired.pop(key, None)
+        if old is None:
+            return
+        try:
+            QMetaObject.invokeMethod(old, "request_shutdown",
+                                     Qt.ConnectionType.QueuedConnection)
+        except RuntimeError:
+            pass
+        old.wait(1000)
 
     def device(self, key: str) -> DeviceProxy | None:
         return self._proxies.get(key)
@@ -307,11 +348,16 @@ class InstrumentManager(QObject):
             focus.request_abort()
         if self._camera is not None:
             self._camera.set_streaming(False)
-        for proxy in list(self._proxies.values()) + [self._camera]:
+        # Retired proxies are torn down here too: they are stopped, but they
+        # still own a QThread object, and destroying one outside this ladder
+        # is the arbitrary-moment teardown that aborts Qt.
+        graph = (list(self._proxies.values()) + [self._camera]
+                 + list(self._retired.values()))
+        for proxy in graph:
             if proxy is not None:
                 QMetaObject.invokeMethod(proxy, "request_shutdown",
                                          Qt.ConnectionType.QueuedConnection)
-        for proxy in list(self._proxies.values()) + [self._camera]:
+        for proxy in graph:
             if proxy is not None and not proxy.wait(3000):
                 # a wedged backend (e.g. Labscope holding the camera)
                 # blocks the worker in a DLL call — one grace round
@@ -320,6 +366,7 @@ class InstrumentManager(QObject):
                     self._log("error",
                               f"{proxy}: shutdown wait timeout (10 s) — "
                               "the thread is still inside a device call")
+        self._retired.clear()
         self._log("info", "Shutdown complete")
 
     # ------------------------------------------------------------------

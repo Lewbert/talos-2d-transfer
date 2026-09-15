@@ -107,7 +107,7 @@ Preferences holds General, Objectives & Calibration, AutoFocus, Input & Gamepad
 and the Hardware device pages (Camera, Focus, Zolix XYR, SigmaKoki XYZ,
 Temperature), grouped by kind (Connection / Manual controls / Axis direction /
 Scale …). Ports are picked from the ports actually present (a configured port
-that is not detected is kept), baudrates from the standard ladder, and every
+that is not detected is kept), and every
 page scrolls. Workspace-dependent camera settings (exposure, gain, WB,
 auto-gain) live in the right panels, not in Preferences — they differ per
 workspace by design.
@@ -121,8 +121,8 @@ Two Preferences points worth knowing:
   (flipping the camera never inverts a stage, and never changes the scan
   direction). Changing it mid-session mirrors the AF region and clears the
   detected-flake table, both of which are tied to the old orientation.
-- **Connection settings reconnect on Apply**: changing a port, baudrate, slave
-  address or timeout rebuilds that device's driver immediately (the LED shows
+- **Connection settings reconnect on Apply**: changing a port, slave address
+  or timeout rebuilds that device's driver immediately (the LED shows
   CONNECTING while it swaps). It is refused — with a log line — while a scan or
   an autofocus run owns the axes; re-apply after the job.
 

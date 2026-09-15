@@ -85,7 +85,8 @@ class FocusProxy(DeviceProxy):
         # every later reconnect.
         if self._af_ctrl is not None or self._cal_ctrl is not None:
             return True
-        return any(item[2] in self._special_methods for item in self._queue)
+        return any(item[2] in self._special_methods
+                   for item in self.pending_jobs())
 
     def set_frame_slot(self, slot) -> None:
         """Attach the shared LatestFrameSlot (camera worker writes; the AF
