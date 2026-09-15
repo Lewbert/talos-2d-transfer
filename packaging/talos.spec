@@ -15,6 +15,13 @@ datas = [
     (os.path.join(ROOT, "resources", "defaults", "default_settings.json"),
      "resources/defaults"),
 ]
+# The QSS image glyphs (spin-button arrows, the checkbox dot, the combo
+# chevron). Without them the frozen app silently loses those affordances:
+# Qt's stylesheet loads them at runtime by path, and a missing image is a
+# warning, not an error.
+qss_dir = os.path.join(ROOT, "resources", "qss")
+if os.path.isdir(qss_dir):
+    datas.append((qss_dir, "resources/qss"))
 # the app icons (talos.ico / talos.png) — bundled once the user drops
 # them into resources/icons/; the EXE icon comes from the same file
 icons_dir = os.path.join(ROOT, "resources", "icons")
