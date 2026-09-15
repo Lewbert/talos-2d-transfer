@@ -7,17 +7,27 @@ stale ones): zolix position is ``x_pulses/.../x_um/...`` and limits are
 ``limit_x_pos/...`` (``any_moving`` is a property and never serialized —
 moving is derived from the per-axis flags); sigmakoki position is
 ``dict[Axis, int]`` and its status is a ``dict[str, str]``.
+
+LAYOUT RULE (the user's): a panel is a row of components separated by ONE
+fixed gap (``FIELD_GAP``) and holds EXACTLY ONE elastic component that
+absorbs the panel's leftover width — the position readout for the stages,
+the trigger bar for FOCUS, and the three equal value fields for TEMP. The
+fixed components therefore keep their size at every window width and no
+flexible gap can open a hole; the four panels are the same width (equal
+stretch + equal minimum in ``HardwareStrip``).
 """
 
 from __future__ import annotations
 
-from PySide6.QtCore import QSize, Qt
-from PySide6.QtGui import QColor, QFontMetrics, QPainter
+from PySide6.QtCore import QEvent, Qt
+from PySide6.QtGui import QColor, QFont, QFontMetrics, QPainter
 from PySide6.QtWidgets import (
     QCheckBox,
     QFrame,
     QHBoxLayout,
     QLabel,
+    QStyle,
+    QStyleOption,
     QVBoxLayout,
     QWidget,
 )
@@ -27,14 +37,47 @@ from talos.hal.devices.sigmakoki import SPEED_LEVEL_TO_HZ
 from talos.ui.theme import DANGER, LED_OFF, TEXT_DIM
 from talos.ui.widgets.trigger_bar import TriggerBarWidget
 
-#: All four sections are the SAME width (the user's requirement). Their
-#: content differs a lot — the stages carry an enable box, a readout, four
-#: limit dots and MOV, TEMP only three short values — so each section's
-#: leftover width is spent on BOTH its display widgets (which grow a
-#: little) and a few EQUAL flexible gaps between the fields. Without that
-#: split a short section opens a 300 px hole (measured with a Qt geometry
-#: dump) and a long one squeezes its fields together.
+#: All four sections are the SAME width (the user's requirement): equal
+#: stretch, equal explicit minimum. The explicit minimum is what lets them
+#: compress at all — a section's own content minimum is larger.
 _SECTION_STRETCH = 1
+
+#: The one gap between neighbouring components. Every panel uses exactly
+#: this, so the rhythm is identical across the four of them.
+FIELD_GAP = 8
+
+#: The stage readout's minimum, and the smaller one used in compact mode:
+#: at the 1024 px window floor a panel cannot give the readout its full
+#: width, and a lower minimum keeps the BOX inside the panel (the text
+#: truncates in the middle) instead of overflowing the frame's border.
+READOUT_MIN = 180
+COMPACT_READOUT_MIN = 92
+
+#: The words the stage/focus state indicator can show. ONE slot width fits
+#: them all, measured in the BOLD font the lit state uses, so a word change
+#: never shifts the components beside it.
+STATE_WORDS = ("IDLE", "MOVE", "CONT", "TRAP", "BLOCKED")
+
+
+def state_slot_width(font: QFont) -> int:
+    """Fixed width of an ``IDLE``/``MOVE``-style state word."""
+    bold = QFont(font)
+    bold.setBold(True)
+    metrics = QFontMetrics(bold)
+    return max(metrics.horizontalAdvance(word) for word in STATE_WORDS) + 6
+
+
+def centred_readout(text: str) -> str:
+    """Re-pad a space-padded readout symmetrically.
+
+    The numeric fields are right-aligned inside a fixed width, which is
+    what stops the text jittering as digits come and go — but it also puts
+    all of the slack on the LEFT. A centred label aligns the string, spaces
+    included, so the numbers used to land ~6 px right of the middle of the
+    elastic box (measured). Redistributing the same padding keeps the
+    constant width AND centres the ink.
+    """
+    return text.strip().center(len(text))
 
 
 # --- pure parsers (unit-tested) ----------------------------------------
@@ -126,47 +169,42 @@ def parse_yudian(payload: dict) -> dict:
 # --- widgets ------------------------------------------------------------
 
 
-class _ValueLabel(QWidget):
-    """A label that can be tinted with a DATA colour (a heat ramp).
+class _ValueLabel(QLabel):
+    """A ``#readout`` box whose text carries a DATA colour (a heat ramp).
 
-    A per-widget palette does not survive the app stylesheet — Qt's
-    stylesheet style republishes the widget palette during polish and then
-    paints the text from its own rule/palette, so the value kept the theme
-    colour no matter when setPalette ran (measured). Painting the text here
-    keeps the colour in one place and leaves the QSS for theme colours.
+    The box, font and padding come from the QSS rule — the same rule every
+    other value field in the strip uses — so there is one source of truth
+    for the look. Only the TEXT colour is data-driven, which no stylesheet
+    can express: a per-widget palette does not survive the app stylesheet
+    (Qt's stylesheet style republishes the widget palette during polish and
+    paints the text from its own rule — measured, handoff #28b), and a
+    plain QWidget subclass never gets the QSS background at all. So the box
+    is drawn explicitly through ``PE_Widget`` and the text is painted here.
     """
 
     def __init__(self, text: str = "", parent: QWidget | None = None):
-        super().__init__(parent)
-        self._text = text
+        super().__init__(text, parent)
+        self.setObjectName("readout")
+        self.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._colour: str | None = None
-
-    def set_text(self, text: str) -> None:
-        if text != self._text:
-            self._text = text
-            self.updateGeometry()
-            self.update()
-
-    def text(self) -> str:
-        return self._text
 
     def set_colour(self, colour: str | None) -> None:
         if colour != self._colour:
             self._colour = colour
             self.update()
 
-    def sizeHint(self):  # noqa: N802
-        metrics = QFontMetrics(self.font())
-        return QSize(metrics.horizontalAdvance(self._text) + 4,
-                     metrics.height())
-
-    def minimumSizeHint(self):  # noqa: N802
-        return self.sizeHint()
-
     def paintEvent(self, event) -> None:  # noqa: N802
+        # NOT chaining to QLabel.paintEvent: that would draw the text a
+        # second time in the rule's accent colour, over the data colour.
+        option = QStyleOption()
+        option.initFrom(self)
         painter = QPainter(self)
+        self.style().drawPrimitive(QStyle.PrimitiveElement.PE_Widget,
+                                   option, painter, self)
         painter.setPen(QColor(self._colour or TEXT_DIM))
-        painter.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, self._text)
+        # contentsRect(), not rect(): honour the rule's 2px/6px padding.
+        painter.drawText(self.contentsRect(), Qt.AlignmentFlag.AlignCenter,
+                         self.text())
 
 
 def _set_state(widget: QWidget, object_name: str) -> None:
@@ -178,6 +216,37 @@ def _set_state(widget: QWidget, object_name: str) -> None:
     style = widget.style()
     style.unpolish(widget)
     style.polish(widget)
+
+
+class _StateWord(QLabel):
+    """The ``IDLE``/``MOVE`` state word shared by the stage and focus
+    panels — one widget, so the two are the same treatment by construction:
+    dim at rest, green while the axis moves, warn when a direction is
+    blocked, centred in a slot sized for the longest word so the components
+    beside it never shift.
+
+    The slot is measured from the widget's FONT, which the app stylesheet
+    only installs at polish time — hence the recompute on FontChange.
+    """
+
+    def __init__(self, text: str = "IDLE", parent: QWidget | None = None):
+        super().__init__(text, parent)
+        self.setObjectName("strip_mov_idle")
+        self.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._apply_metrics()
+
+    def _apply_metrics(self) -> None:
+        self.setFixedWidth(state_slot_width(self.font()))
+
+    def changeEvent(self, event: QEvent) -> None:  # noqa: N802
+        super().changeEvent(event)
+        if event.type() == QEvent.Type.FontChange:
+            self._apply_metrics()
+
+    def set_state(self, text: str, object_name: str) -> None:
+        if self.text() != text:
+            self.setText(text)
+        _set_state(self, object_name)
 
 
 def temp_power_color(pv: float | None, sv: float | None,
@@ -242,18 +311,13 @@ class _Section(QFrame):
         root.setSpacing(2)
         root.addWidget(self._title)
         self._body = QHBoxLayout()
-        self._body.setSpacing(4)
+        self._body.setSpacing(FIELD_GAP)   # the panel's fixed component gap
         root.addLayout(self._body)
 
     def add(self, widget: QWidget, stretch: int = 0) -> None:
+        """Add a component. Exactly ONE component per panel is added with
+        ``stretch=1`` — that is the panel's elastic field."""
         self._body.addWidget(widget, stretch)
-
-    def add_gap(self, stretch: int = 1) -> None:
-        """A flexible gap. Sections use these BETWEEN their fields (rather
-        than one big stretch) so the leftover width is shared out evenly:
-        every gap in a section is the same size, and the fields grow a
-        little instead of one huge blank area opening up."""
-        self._body.addStretch(stretch)
 
 
 class _StageSection(_Section):
@@ -280,42 +344,41 @@ class _StageSection(_Section):
         self._enable.toggled.connect(
             lambda on: manager.set_enabled(device_key, on))
         self.add(self._enable)
-        # Status word right after the toggle — the same IDLE/<state> wording
-        # the focus section uses, in the same style (dim grey at rest, green
-        # while the axis turns). Fixed width: "IDLE" and "MOVE" must not
-        # shift the fields beside them.
-        self._moving = QLabel("IDLE")
-        self._moving.setObjectName("strip_mov_idle")
-        self._moving.setFixedWidth(46)
-        self._moving.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+        # Status word right after the toggle — the same widget the focus
+        # panel uses, so both read identically (dim grey at rest, green
+        # while the axis turns).
+        self._moving = _StateWord("IDLE")
         self._moving.setToolTip("Green while the axis is turning")
         self.add(self._moving)
-        self.add_gap()
 
+        # THE elastic field: the other components keep their size and this
+        # one takes whatever width the panel has left.
         self._pos = QLabel("—")
         self._pos.setObjectName("readout")
-        self._pos.setMinimumWidth(180)
-        # The readout grows into part of the leftover (it is the main
-        # display) but is capped so it cannot become a huge empty box — the
-        # even gaps below take the rest.
-        self._pos.setMaximumWidth(230)
-        self._pos.setAlignment(Qt.AlignmentFlag.AlignRight
-                               | Qt.AlignmentFlag.AlignVCenter)
-        self.add(self._pos, stretch=2)
-        self.add_gap()
+        self._pos.setMinimumWidth(READOUT_MIN)
+        self._pos.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.add(self._pos, stretch=1)
 
+        # The four limit dots are ONE component, so they sit in their own
+        # tightly-spaced row rather than being spread by the panel's gap.
+        self._dots_box = QWidget(self)
+        dots_row = QHBoxLayout(self._dots_box)
+        dots_row.setContentsMargins(0, 0, 0, 0)
+        dots_row.setSpacing(4)
         self._dots: dict[str, _MiniDot] = {}
         for key in self.LIMIT_KEYS:
-            dot = _MiniDot(self)
+            dot = _MiniDot(self._dots_box)
             dot.setToolTip(f"{device_key} limit {key}")
             self._dots[key] = dot
-            self.add(dot)
+            dots_row.addWidget(dot)
+        self.add(self._dots_box)
+
         self._has_estop = bool(estop)
         self._estop = QLabel("")
         self._estop.setObjectName("strip_estop")
         self._estop.setToolTip("Emergency-stop bit is set on the controller")
         if self._has_estop:
-            self.add_gap()
             self.add(self._estop)
             self._estop.hide()   # NO reserved slot: an E-STOP appearing must
             # shove the neighbours — that is what makes it noticed.
@@ -323,13 +386,15 @@ class _StageSection(_Section):
 
     def set_compact(self, compact: bool) -> None:
         """Drop the optional indicators when the window is too narrow for
-        all four sections (1024 px minimum): the enable toggle, the readout
-        and MOV survive; the limit dots and the E-STOP slot go."""
+        all four sections (1024 px minimum): the enable toggle, the state
+        word, the readout and the E-STOP survive; the limit dots go."""
         if compact == getattr(self, "_compact", None):
             return
         self._compact = compact
-        for dot in self._dots.values():
-            dot.setVisible(not compact)
+        # The whole cluster, not each dot: a visible-but-empty container
+        # would still cost the panel a gap.
+        self._dots_box.setVisible(not compact)
+        self._pos.setMinimumWidth(COMPACT_READOUT_MIN if compact else READOUT_MIN)
         if self._has_estop:
             # never un-hide an E-STOP that is not actually active
             self._estop.setVisible(not compact and bool(self._estop.text()))
@@ -350,13 +415,13 @@ class _StageSection(_Section):
         # the compact "·" style while the text stops jittering horizontally
         # as digits come and go (a monospace font alone does not fix that).
         if "r_deg" in parsed:  # zolix (its r_deg is the discriminator)
-            self._pos.setText(
+            self._pos.setText(centred_readout(
                 f"{parsed['x_um']:6.1f} · {parsed['y_um']:6.1f} µm · "
-                f"{parsed['r_deg']:5.2f}°")
+                f"{parsed['r_deg']:5.2f}°"))
         else:  # sigmakoki (steps → µm done by the strip's caller)
-            self._pos.setText(
+            self._pos.setText(centred_readout(
                 f"{parsed['x_um']:6.1f} · {parsed['y_um']:6.1f} · "
-                f"{parsed['z_um']:6.1f} µm")
+                f"{parsed['z_um']:6.1f} µm"))
         # ONE code path for both stages from here down.
         limits = parsed.get("limits") or {}
         for key, dot in self._dots.items():
@@ -366,8 +431,8 @@ class _StageSection(_Section):
             self._estop.setText("E-STOP" if estop else "")
             self._estop.setVisible(estop)
         moving = self._is_moving(parsed)
-        self._moving.setText("MOVE" if moving else "IDLE")
-        _set_state(self._moving, "strip_mov" if moving else "strip_mov_idle")
+        self._moving.set_state("MOVE" if moving else "IDLE",
+                               "strip_mov" if moving else "strip_mov_idle")
 
 
 def format_focus_pos(pos_steps: int, um_per_step: float) -> str:
@@ -404,54 +469,59 @@ class HardwareStrip(QWidget):
         self._focus_pos = QLabel("—")
         self._focus_pos.setObjectName("readout")
         self._focus_pos.setMinimumWidth(160)  # fits "123.4 µm · 123456 st"
-        self._focus_pos.setAlignment(Qt.AlignmentFlag.AlignRight
-                                     | Qt.AlignmentFlag.AlignVCenter)
-        focus.add(self._focus_pos, stretch=1)
-        focus.add_gap()
-        self._focus_state = QLabel("—")
-        self._focus_state.setObjectName("dim")
+        self._focus_pos.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        focus.add(self._focus_pos)
+        # The same widget as the stages' state word — same slot, same
+        # colours, same wording.
+        self._focus_state = _StateWord("—")
         focus.add(self._focus_state)
-        focus.add_gap()
+        # THE elastic field of this panel.
         self._triggers = TriggerBarWidget(settings)
-        focus.add(self._triggers, stretch=6)
+        focus.add(self._triggers, stretch=1)
         layout.addWidget(focus, stretch=_SECTION_STRETCH)
 
-        # TEMP carries only three short values in a section as wide as the
-        # stages': rather than opening huge gaps between them, each value
-        # owns an equal share of the row and is CENTRED in it, so the three
-        # read evenly spread across the section (a wide left-aligned label
-        # would just look like a gap with a number at one end).
+        # TEMP carries only three short values, in a panel as wide as the
+        # stages': all three are elastic with the SAME stretch and the same
+        # minimum, so they always come out the same width, and each is a
+        # "NAME: VALUE" field in the same box style as every other readout.
         temp = _Section("TEMP", "Yudian AI-828 temperature controller")
         temp.setMinimumWidth(240)
-        self._temp_pv = QLabel("—")
+        self._temp_pv = QLabel("PV: —")
         self._temp_pv.setObjectName("readout")
-        self._temp_pv.setMinimumWidth(90)
-        self._temp_pv.setAlignment(Qt.AlignmentFlag.AlignRight
-                                   | Qt.AlignmentFlag.AlignVCenter)
-        temp.add(self._temp_pv, stretch=3)
-        self._temp_sv = QLabel("SV —")
-        self._temp_sv.setObjectName("dim")
-        self._temp_sv.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        temp.add(self._temp_sv, stretch=3)
-        self._temp_out = _ValueLabel("PWR —")
-        temp.add(self._temp_out, stretch=2)
+        self._temp_sv = QLabel("SV: —")
+        self._temp_sv.setObjectName("readout")
+        self._temp_out = _ValueLabel("PWR: —")
+        for field in (self._temp_pv, self._temp_sv, self._temp_out):
+            field.setMinimumWidth(90)
+            field.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            temp.add(field, stretch=1)
         layout.addWidget(temp, stretch=_SECTION_STRETCH)
 
         layout.addStretch(0)
         self.setFixedHeight(56)
         self.setMinimumWidth(0)   # the sections compress; nothing clips
 
-    #: Below this width the four sections cannot show every indicator
-    #: (4 × ~250 px + margins) — see _StageSection.set_compact.
-    COMPACT_WIDTH = 1150
+    #: Below this width the four sections cannot show every indicator —
+    #: see _StageSection.set_compact. The number is the widest a
+    #: NON-compact stage panel needs: 12 margins + 57 enable + 8 + 59 state
+    #: word + 8 + 180 readout + 8 + 44 dots = 376, so 4×376 + 3×6 + 12 =
+    #: 1534 for the whole row. (It used to be 1150, which let the panels
+    #: overflow their own frames between 1150 and ~1500.)
+    COMPACT_WIDTH = 1540
 
     def resizeEvent(self, event) -> None:  # noqa: N802
         super().resizeEvent(event)
         compact = self.width() < self.COMPACT_WIDTH
         for section in (self._xyr, self._xyz):
             section.set_compact(compact)
-        self._triggers.setMinimumWidth(90 if compact else 130)
-        self._focus_pos.setMinimumWidth(110 if compact else 140)
+        # Compact minimums are chosen so each row still ADDS UP inside its
+        # panel at the 1024 px floor with room to spare: focus
+        # 12+100+8+59+8+50, TEMP 12+3×72+2×8, stage 12+57+8+59+8+92 (the
+        # state word's 59 is fixed and cannot give).
+        self._triggers.setMinimumWidth(50 if compact else 130)
+        self._focus_pos.setMinimumWidth(100 if compact else 140)
+        for field in (self._temp_pv, self._temp_sv, self._temp_out):
+            field.setMinimumWidth(72 if compact else 90)
 
     def reload_settings(self) -> None:
         """Re-read the scale factors the readouts convert with.
@@ -498,26 +568,26 @@ class HardwareStrip(QWidget):
             self._focus_pos.setText(
                 format_focus_pos(parsed["pos"], self._um_focus))
             blocked = parsed["blocked"] not in ("0", "")
-            self._focus_state.setText("⚠ BLOCKED" if blocked
-                                      else parsed["mode"])
-            # Same state styling as the stages' IDLE/MOVE word: dim at rest,
-            # green while the axis moves (CONT = continuous jog, TRAP = a
-            # positioned move), warn when a direction is blocked.
-            if blocked:
-                state = "strip_warn"
-            elif parsed["mode"] in ("CONT", "TRAP"):
-                state = "strip_mov"
-            else:
-                state = "dim"
-            _set_state(self._focus_state, state)
+            # The whole word is one slot wide, so the blocked state reads
+            # BLOCKED rather than "⚠ BLOCKED": the warn colour and weight
+            # carry the alarm, and the trigger bar never has to give up
+            # 40 px to a glyph.
+            self._focus_state.set_state(
+                "BLOCKED" if blocked else parsed["mode"],
+                # Same state styling as the stages' word: dim at rest, green
+                # while the axis moves (CONT = continuous jog, TRAP = a
+                # positioned move), warn when a direction is blocked.
+                "strip_warn" if blocked
+                else ("strip_mov" if parsed["mode"] in ("CONT", "TRAP")
+                      else "strip_mov_idle"))
         elif device_key == "yudian":
             parsed = parse_yudian(payload)
             if parsed["pv"] is not None:
-                self._temp_pv.setText(f"{parsed['pv']:.1f} °C")
+                self._temp_pv.setText(f"PV: {parsed['pv']:.1f} °C")
             if parsed["sv"] is not None:
-                self._temp_sv.setText(f"SV {parsed['sv']:.1f} °C")
+                self._temp_sv.setText(f"SV: {parsed['sv']:.1f} °C")
             if parsed["out"] is not None:
-                self._temp_out.set_text(f"PWR {parsed['out']:.0f}%")
+                self._temp_out.setText(f"PWR: {parsed['out']:.0f}%")
             # Heat-status colour (the reference project's ladder).
             self._temp_out.set_colour(
                 temp_power_color(parsed["pv"], parsed["sv"], parsed["out"]))

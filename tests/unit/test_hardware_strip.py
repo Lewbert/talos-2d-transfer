@@ -160,6 +160,43 @@ def test_power_is_ordered_by_power_before_delta():
     assert temp_power_color(25.0, 25.0, 100.0) == "#e53935"
 
 
+def test_centred_readout_keeps_the_width_and_centres_the_ink():
+    """The readout's numeric fields pad from the left to stop the text
+    jittering; a centred QLabel aligns those spaces too, which put the
+    numbers ~6 px right of the middle of the elastic box (measured).
+    centred_readout() re-pads the SAME width symmetrically."""
+    from talos.ui.widgets.hardware_strip import centred_readout
+
+    text = f"{12.5:6.1f} · {-3.0:6.1f} µm · {1.25:5.2f}°"
+    fixed = centred_readout(text)
+    assert len(fixed) == len(text)          # width still constant
+    lead = len(fixed) - len(fixed.lstrip())
+    trail = len(fixed) - len(fixed.rstrip())
+    assert abs(lead - trail) <= 1
+    assert fixed.strip() == text.strip()
+    # a longer value is passed through, not truncated
+    long = f"{123456.7:6.1f} · {-3.0:6.1f} µm · {1.25:5.2f}°"
+    assert centred_readout(long).strip() == long.strip()
+
+
+def test_state_slot_fits_the_longest_word_in_the_bold_font():
+    """One fixed slot for IDLE/MOVE/CONT/TRAP/BLOCKED, so the components
+    beside it never shift when the word changes — and the slot must fit
+    the word it will actually render (it was 46 px for a 48 px word)."""
+    from PySide6.QtGui import QFont, QFontMetrics
+
+    from talos.ui.widgets.hardware_strip import STATE_WORDS, state_slot_width
+
+    font = QFont("Segoe UI", 12)
+    width = state_slot_width(font)
+    bold = QFont(font)
+    bold.setBold(True)          # the lit states are bold
+    metrics = QFontMetrics(bold)
+    assert "BLOCKED" in STATE_WORDS
+    for word in STATE_WORDS:
+        assert metrics.horizontalAdvance(word) <= width
+
+
 def test_parse_focus_and_yudian():
     focus = parse_focus({
         "device": "focus",

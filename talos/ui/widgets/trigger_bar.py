@@ -22,7 +22,11 @@ class TriggerBarWidget(QWidget):
         self._rt = 0.0
         self._connected = False
         self.setMinimumWidth(130)
-        self.setFixedHeight(40)
+        # NOT a fixed height: the strip's FOCUS row is ~29 px tall, and a
+        # 40 px bar was clipped there — its bottom, i.e. the LT/RT labels
+        # and the jog-speed readout, never appeared. The bar lays itself
+        # out from the height it is actually given.
+        self.setMinimumHeight(26)
         self.setToolTip("Focus jog: gamepad LT (down) / RT (up) triggers")
 
     def _load_settings(self) -> None:
@@ -58,8 +62,12 @@ class TriggerBarWidget(QWidget):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         w, h = self.width(), self.height()
+        fm = QFontMetrics(self.font())
+        # The LT/RT + speed line owns the bottom of whatever height we get;
+        # the bar takes the space above it (no fixed y — see __init__).
+        text_y = h - 2
         bar_h = 7
-        bar_y = 8
+        bar_y = max(2, (text_y - fm.height() - bar_h) // 2)
 
         painter.setPen(Qt.PenStyle.NoPen)
         painter.setBrush(QColor(LED_OFF))
@@ -81,15 +89,14 @@ class TriggerBarWidget(QWidget):
             painter.drawRect(x - 1, bar_y - 2, 2, bar_h + 4)
 
         # Labels + speed.
-        fm = QFontMetrics(self.font())
         painter.setPen(QColor(TEXT_DIM))
-        painter.drawText(0, h - 3, "LT")
-        painter.drawText(w - fm.horizontalAdvance("RT"), h - 3, "RT")
+        painter.drawText(0, text_y, "LT")
+        painter.drawText(w - fm.horizontalAdvance("RT"), text_y, "RT")
         speed = focus_trigger_to_speed(
             self._lt, self._rt, min_speed=self._min_speed,
             max_speed=self._max_speed, gamma=self._gamma,
             deadzone=self._deadzone, invert=self._invert)
         text = f"→ {speed:+d} sps" if speed else "idle"
         painter.setPen(QColor(theme.ACCENT if speed else TEXT_DIM))
-        painter.drawText(w // 2 - fm.horizontalAdvance(text) // 2, h - 3, text)
+        painter.drawText(w // 2 - fm.horizontalAdvance(text) // 2, text_y, text)
         painter.end()

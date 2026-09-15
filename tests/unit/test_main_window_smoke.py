@@ -467,12 +467,123 @@ def test_telemetry_updates_strip(window):
     assert window._leds["zolix"].state() == "on"
     # fixed-width fields (the numbers must not jitter as digits change)
     text = window._strip._xyr._pos.text()
-    assert "1.2" in text and "2.5" in text and text.endswith("°")
+    assert "1.2" in text and "2.5" in text and "°" in text
+    # ...and the ink is CENTRED in the elastic box: the fixed-width numeric
+    # fields pad from the left, and QLabel centres the spaces too, so the
+    # padding is re-balanced (otherwise the numbers sat ~6 px right of the
+    # box's middle — measured).
+    lead = len(text) - len(text.lstrip())
+    trail = len(text) - len(text.rstrip())
+    assert abs(lead - trail) <= 1
     # The status word is always visible and only changes colour (grey →
     # green), in the same style as the focus section's IDLE/CONT.
     for section in (window._strip._xyr, window._strip._xyz):
         assert section._moving.text() == "IDLE"
         assert section._moving.objectName() == "strip_mov_idle"
+
+
+def _strip_panels(window):
+    strip = window._strip
+    focus = strip._focus_state.parentWidget()
+    temp = strip._temp_pv.parentWidget()
+    return strip, [strip._xyr, strip._xyz, focus, temp]
+
+
+def test_strip_panels_share_one_fixed_gap_and_one_elastic_field(window, qapp):
+    """The strip's layout rule (the user's): components separated by ONE
+    fixed gap, and exactly ONE elastic component per panel that takes the
+    leftover. Anything else re-opens the holes the layout keeps growing
+    back."""
+    from talos.ui.widgets.hardware_strip import FIELD_GAP
+
+    window.resize(1920, 1080)
+    window.show()
+    qapp.processEvents()
+    strip, panels = _strip_panels(window)
+    try:
+        assert strip.width() > 1000
+        for panel in panels:
+            body = panel.layout().itemAt(1).layout()
+            assert body.spacing() == FIELD_GAP
+        stage, xyz, focus, temp = panels
+        for panel in (stage, xyz, focus):
+            stretched = [i for i in range(panel.layout().itemAt(1)
+                                          .layout().count())
+                         if panel.layout().itemAt(1).layout().stretch(i)]
+            assert len(stretched) == 1, "one elastic field per panel"
+        # the elastic fields: the readout / the trigger bar / all three
+        # TEMP values, which share the row (the user asked for all three)
+        assert stage._pos.width() > 200
+        assert window._strip._triggers.width() > 100
+        temp_body = temp.layout().itemAt(1).layout()
+        assert [temp_body.stretch(i) for i in range(temp_body.count())] \
+            == [1, 1, 1]
+    finally:
+        window.hide()
+
+
+def test_strip_panels_are_the_same_width_and_temp_fields_match(window, qapp):
+    """Four equal panels at every window width, and TEMP's three value
+    fields equal to each other (both were checked with a Qt geometry dump;
+    this pins them so a layout tweak cannot silently break equality)."""
+    window.show()
+    try:
+        for width in (1024, 1280, 1920):
+            window.resize(width, 800)
+            qapp.processEvents()
+            _, panels = _strip_panels(window)
+            widths = [p.width() for p in panels]
+            assert max(widths) - min(widths) <= 1, (width, widths)
+            fields = [window._strip._temp_pv, window._strip._temp_sv,
+                      window._strip._temp_out]
+            field_w = [f.width() for f in fields]
+            assert max(field_w) - min(field_w) <= 1, (width, field_w)
+    finally:
+        window.hide()
+
+
+def test_strip_rows_fit_inside_their_panel_at_the_window_floor(window, qapp):
+    """At the 1024 px minimum the strip is tight: every row must still ADD
+    UP inside its own panel, or a box overflows the frame and loses its
+    border (the dots drop out to buy the room — see set_compact)."""
+    window.resize(1024, 640)
+    window.show()
+    qapp.processEvents()
+    try:
+        _, panels = _strip_panels(window)
+        for panel in panels:
+            body = panel.layout().itemAt(1).layout()
+            right = 0
+            for i in range(body.count()):
+                widget = body.itemAt(i).widget()
+                if widget is None or widget.isHidden():
+                    continue
+                right = max(right, widget.x() + widget.width())
+            assert right <= panel.width(), (panel.width(), right)
+        assert window._strip._xyr._dots_box.isHidden()
+    finally:
+        window.hide()
+
+
+def test_state_word_length_does_not_move_its_neighbours(window, qapp):
+    """IDLE/MOVE/CONT/BLOCKED all render in ONE slot width — the whole point
+    of sizing it for the longest word — so the elastic readout never jumps
+    sideways when a stage starts moving or a direction blocks."""
+    window.resize(1920, 1080)
+    window.show()
+    qapp.processEvents()
+    try:
+        section = window._strip._xyr
+        state = window._strip._focus_state
+        before = (section._moving.width(), section._pos.x(), state.width())
+        section._moving.set_state("MOVE", "strip_mov")
+        state.set_state("BLOCKED", "strip_warn")
+        qapp.processEvents()
+        assert (section._moving.width(), section._pos.x(),
+                state.width()) == before
+        assert section._moving.width() == state.width()  # one shared slot
+    finally:
+        window.hide()
 
 
 def test_enable_gate_reaches_every_checkbox(window):

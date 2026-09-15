@@ -28,6 +28,7 @@ from PySide6.QtCore import Qt  # noqa: E402
 
 from talos.app import TALOSApplication  # noqa: E402
 from talos.bootstrap import bootstrap  # noqa: E402
+from talos.hal.base import Axis  # noqa: E402
 
 
 def flush(ms: int) -> None:
@@ -109,6 +110,8 @@ def main() -> int:
         f"temp{tag}": window._navigation.temp_group,
         f"afgroup{tag}": window._navigation.af_group,
         f"roi_live{tag}": window._navigation.live_view,
+        # the bottom instrument strip on its own — the layout QA crop
+        f"strip{tag}": window._strip,
     }
 
     for name, widget in shots.items():
@@ -124,6 +127,38 @@ def main() -> int:
             # top-level dialogs get hidden again; embedded groups must
             # stay visible inside the main window for the later shots
             widget.hide()
+
+    # The strip in its live states: a stage turning (state word lit, a
+    # limit switch on), the focus mid-jog, the heater under power. The
+    # idle shot above is the same widget a moment earlier.
+    from dataclasses import asdict
+
+    from talos.models import FocusStatus, StagePosition, StageStatus
+
+    window._on_device_state("zolix", {
+        "connected": True,
+        "status": asdict(StageStatus(x_moving=True, limit_x_pos=True)),
+        "position": asdict(StagePosition(x_um=12.5, y_um=-3.0, r_deg=1.25)),
+    })
+    window._on_device_state("sigmakoki", {
+        "connected": True,
+        "status": {"xspd": "0", "yspd": "0", "zspd": "0"},
+        "position": {Axis.X: 100, Axis.Y: -40, Axis.Z: 12},
+        "limits": {"x+": False, "x-": True, "y+": False, "y-": False},
+    })
+    window._on_device_state("focus", {
+        "status": asdict(FocusStatus(pos=123, mode="CONT", blocked_dir="0")),
+        "slim_bounds": (-1000, 2000),
+    })
+    window._on_device_state("yudian", {"pv": 24.8, "sv": 25.0,
+                                       "output_percent": 12.0})
+    # NO flush(): the sim devices are still polling and would overwrite
+    # these values. repaint() + grab() are synchronous, so the states
+    # above are exactly what lands in the image.
+    window._strip.repaint()
+    path = args.out / f"strip_active{tag}.png"
+    window._strip.grab().save(str(path))
+    print(f"saved {path}")
 
     # The Sample Finding workspace (tab 1), grabbed while it is active.
     window._tabs.setCurrentIndex(1)
