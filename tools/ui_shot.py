@@ -160,6 +160,16 @@ def main() -> int:
     window._strip.grab().save(str(path))
     print(f"saved {path}")
 
+    # ...and with the right trigger held: the bar's middle then shows the
+    # computed jog speed, which is the only time that text exists (at rest
+    # it would just repeat the state word beside the bar).
+    window._strip.trigger_bar().set_connected(True)
+    window._strip.trigger_bar().set_state(0.0, 0.75)
+    window._strip.repaint()
+    path = args.out / f"strip_jog{tag}.png"
+    window._strip.grab().save(str(path))
+    print(f"saved {path}")
+
     # The Sample Finding workspace (tab 1), grabbed while it is active.
     window._tabs.setCurrentIndex(1)
     flush(600)

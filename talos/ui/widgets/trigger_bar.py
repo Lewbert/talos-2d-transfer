@@ -96,7 +96,12 @@ class TriggerBarWidget(QWidget):
             self._lt, self._rt, min_speed=self._min_speed,
             max_speed=self._max_speed, gamma=self._gamma,
             deadzone=self._deadzone, invert=self._invert)
-        text = f"→ {speed:+d} sps" if speed else "idle"
-        painter.setPen(QColor(theme.ACCENT if speed else TEXT_DIM))
-        painter.drawText(w // 2 - fm.horizontalAdvance(text) // 2, text_y, text)
+        # The jog speed, drawn only while a trigger is actually driving the
+        # focus. At rest the middle used to read "idle", which just repeated
+        # the IDLE/CONT word sitting next to the bar.
+        if speed:
+            text = f"→ {speed:+d} sps"
+            painter.setPen(QColor(theme.ACCENT))
+            painter.drawText(w // 2 - fm.horizontalAdvance(text) // 2,
+                             text_y, text)
         painter.end()
