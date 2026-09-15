@@ -42,6 +42,11 @@ class SimCamera(Camera):
         self._frame_no = 0
         self._last_frame_t = 0.0
         self._rng = np.random.default_rng(42)
+        # Per-frame scratch, reused instead of reallocated (see _render_scene
+        # and the profile note there). Keyed by shape because the 4K snapshot
+        # path temporarily changes it.
+        self._base_scenes: dict[tuple[int, int], np.ndarray] = {}
+        self._noise_buf: np.ndarray | None = None
 
     @property
     def device_id(self) -> str:
@@ -71,20 +76,37 @@ class SimCamera(Camera):
         burn (mirroring the SmartCam backend's contract)."""
         return self.apply_flip(self._render_scene())
 
+    def _base_scene(self, h: int, w: int) -> np.ndarray:
+        """The STATIC part of the scene: the textured illumination plus the
+        flake-like features phase correlation locks onto.
+
+        Cached per frame size. Rebuilding it every frame was 41 of the 185 ms
+        a 1080p frame cost in sim mode (a linspace/sin/repeat/astype chain
+        whose result cannot change while the size does not); the 4K snapshot
+        path changes the size temporarily, which is why the key is the size.
+        """
+        cached = self._base_scenes.get((h, w))
+        if cached is None:
+            x = np.linspace(0, 4 * np.pi, w)
+            y = np.linspace(0, 3 * np.pi, h)
+            bg = 90 + 25 * np.sin(x)[None, :] + 15 * np.sin(y)[:, None]
+            bg = np.repeat(bg[:, :, None], 3, axis=2)
+            cached = np.ascontiguousarray(bg.astype(np.uint8))
+            for k, (fx, fy, fr) in enumerate([
+                (w * 0.3, h * 0.4, 14), (w * 0.6, h * 0.7, 22),
+                (w * 0.75, h * 0.2, 10),
+            ]):
+                color = (140 + 40 * k, 90, 60 + 30 * k)
+                cv2.circle(cached, (int(fx), int(fy)), fr, color, -1)
+            if len(self._base_scenes) > 1:
+                self._base_scenes.clear()   # the size went back and forth
+            self._base_scenes[(h, w)] = cached
+        return cached
+
     def _render_scene(self) -> np.ndarray:
         h, w = self.height, self.width
-        # Textured background (substrate-like) with smooth illumination.
-        x = np.linspace(0, 4 * np.pi, w)
-        y = np.linspace(0, 3 * np.pi, h)
-        bg = 90 + 25 * np.sin(x)[None, :] + 15 * np.sin(y)[:, None]
-        bg = np.repeat(bg[:, :, None], 3, axis=2)
-        # A few static small features (flake-like) so phase correlation works.
-        img = np.ascontiguousarray(bg.astype(np.uint8))
-        for k, (fx, fy, fr) in enumerate([
-            (w * 0.3, h * 0.4, 14), (w * 0.6, h * 0.7, 22), (w * 0.75, h * 0.2, 10),
-        ]):
-            color = (140 + 40 * k, 90, 60 + 30 * k)
-            cv2.circle(img, (int(fx), int(fy)), fr, color, -1)
+        # The caller owns the returned array, so hand out a fresh copy.
+        img = self._base_scene(h, w).copy()
         # Moving target: bright disc, sharpest when blur_sigma == 0.
         cv2.circle(img, (int(self.target_x), int(self.target_y)),
                    int(self.target_radius), (255, 255, 255), -1)
@@ -94,9 +116,28 @@ class SimCamera(Camera):
             k = max(1, int(self.blur_sigma) * 2 + 1)
             img = cv2.GaussianBlur(img, (k, k), self.blur_sigma)
         if self.noise > 0:
-            noise = self._rng.normal(0, self.noise * 255, img.shape)
-            img = np.clip(img.astype(np.float32) + noise, 0, 255).astype(np.uint8)
+            img = self._add_noise(img)
         return img
+
+    def _add_noise(self, img: np.ndarray) -> np.ndarray:
+        """img + N(0, noise·255), clipped to uint8.
+
+        Identical PIXELS to the obvious `np.clip(img.astype(np.float32) +
+        rng.normal(...))`, but the float64 temporaries are reused instead of
+        reallocated — this path was 141 ms of a 1080p frame (three 48 MB
+        arrays per frame) and is now 86 ms. Two facts make it exact:
+        ``scale * standard_normal`` IS ``normal(0, scale)`` (same stream,
+        same Ziggurat draws), and uint8 → float64 is exact, so adding the
+        uint8 image directly gives the same float64 sum as the float32 upcast.
+        """
+        if self._noise_buf is None or self._noise_buf.shape != img.shape:
+            self._noise_buf = np.empty(img.shape, dtype=np.float64)
+        buf = self._noise_buf
+        self._rng.standard_normal(img.shape, out=buf)
+        np.multiply(buf, self.noise * 255, out=buf)
+        np.add(img, buf, out=buf, casting="unsafe")
+        np.clip(buf, 0, 255, out=buf)
+        return buf.astype(np.uint8)
 
     def fetch(self, timeout_ms: float = 2000.0) -> np.ndarray | None:
         # Pace to the configured fps.
