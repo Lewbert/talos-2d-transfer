@@ -68,6 +68,34 @@ def test_parse_sigmakoki_enum_keys_and_speed_levels():
     assert parsed["y"] == 200
     assert parsed["z"] == 300
     assert parsed["speed_hz"] == SPEED_LEVEL_TO_HZ[3]
+    assert parsed["levels"] == {"x": 0, "y": 2, "z": 3}
+
+
+def test_sigmakoki_moving_comes_from_the_position_not_the_level():
+    """The firmware's speed LEVEL persists after a stop (stopAxis clears
+    `moving` only — verified in transfer_stage_controller.ino) and starts
+    at level 2, so a level-based MOV lamp would lie from boot onwards."""
+    from talos.ui.widgets.hardware_strip import _StageSection
+
+    assert "moving" not in parse_sigmakoki(
+        {"status": {"zspd": "3"}, "position": {Axis.Z: 10}})
+
+    section = _StageSection.__new__(_StageSection)
+    section._last_pos = None
+    moving = section._is_moving
+    assert moving({"x": 0, "y": 0, "z": 0}) is False        # first poll
+    assert moving({"x": 0, "y": 0, "z": 0}) is False        # settled
+    assert moving({"x": 0, "y": 0, "z": 25}) is True        # turning
+    assert moving({"x": 0, "y": 0, "z": 25}) is False       # stopped again
+
+
+def test_zolix_moving_still_uses_the_hardware_flags():
+    from talos.ui.widgets.hardware_strip import _StageSection
+
+    section = _StageSection.__new__(_StageSection)
+    section._last_pos = None
+    assert section._is_moving({"moving": True}) is True
+    assert section._is_moving({"moving": False}) is False
 
 
 def test_parse_sigmakoki_falls_back_to_status_strings():

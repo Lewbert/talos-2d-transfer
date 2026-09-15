@@ -161,8 +161,7 @@ class MainWindow(QMainWindow):
             # LT+RT = autofocus once (the same path as the AF-S quick action).
             input_system.sig_af_requested.connect(self._on_quick_af)
         manager.camera.sig_connected.connect(self._on_camera_connected)
-        state.sig_mode_changed.connect(
-            lambda mode: self._mode_badge.setText(mode.upper()))
+        state.sig_mode_changed.connect(self._on_mode_changed)
         self._calibration.sig_changed.connect(
             lambda calib: self._for_each_live_view(
                 lambda v: v.set_live_calibration(
@@ -407,11 +406,18 @@ class MainWindow(QMainWindow):
         self._fps_label = QLabel("")
         self._fps_label.setObjectName("readout")
         self._leds: dict[str, StatusLED] = {}
-        for key, label in (("camera", "Camera"), ("zolix", "X-Y-R Stage"),
-                           ("sigmakoki", "Transfer"), ("focus", "Focus"),
-                           ("yudian", "Temp")):
+        # Abbreviated on the bar (it is a glanceable row), named in full in
+        # the tooltip — the same abbreviations the strip's section titles
+        # use, so the two bars read as one system.
+        for key, label, tip in (
+                ("camera", "CAM", "Camera — Zeiss Axiocam 208 (live view)"),
+                ("zolix", "XYR", "Zolix XYR sample stage"),
+                ("sigmakoki", "XYZ", "SigmaKoki XYZ transfer stage"),
+                ("focus", "FOCUS", "Focus stage (no limit sensor)"),
+                ("yudian", "TEMP", "Yudian AI-828 temperature controller")):
             led = StatusLED(label)
             led.set_state(OFF)
+            led.setToolTip(tip)
             self._leds[key] = led
             bar.addWidget(led)
             if key == "camera":
@@ -422,8 +428,11 @@ class MainWindow(QMainWindow):
         bar.addWidget(self._gamepad_indicator)
         bar.addWidget(self._make_separator())
 
-        self._mode_badge = QLabel("MANUAL")
+        # The mode badge is NOT a permanent "MANUAL" sticker: it appears
+        # only while a job owns the axes (SCAN) — see _on_mode_changed.
+        self._mode_badge = QLabel("")
         self._mode_badge.setObjectName("mode_badge")
+        self._mode_badge.hide()
         bar.addWidget(self._mode_badge)
 
         # Brief app messages, docked right (the full log lives in the
@@ -763,6 +772,21 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
     # Telemetry / messages
     # ------------------------------------------------------------------
+
+    def _on_mode_changed(self, mode: str) -> None:
+        """Show the mode badge only when a job owns the axes.
+
+        It used to be a permanent "MANUAL" sticker — noise that said
+        nothing (MANUAL is the resting state, and every manual input is
+        obvious from the motion itself). A non-MANUAL mode means the jog
+        inputs are gated, which is worth a badge.
+        """
+        busy = mode != "MANUAL"
+        self._mode_badge.setText(mode.upper() if busy else "")
+        self._mode_badge.setToolTip(
+            f"{mode} owns the axes — manual jog input is gated"
+            if busy else "")
+        self._mode_badge.setVisible(busy)
 
     def _on_gamepad_state(self, state) -> None:
         self._strip.trigger_bar().set_state(

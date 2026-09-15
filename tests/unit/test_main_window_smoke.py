@@ -174,6 +174,23 @@ def test_status_bar_chrome(window):
     assert window._mode_badge.parent() is bar
     assert window._msg_label.parent() is bar
     assert window._fps_label.parent() is bar
+    # abbreviated LEDs, full names in the tooltips
+    labels = [led.text for led in window._leds.values()]
+    assert labels == ["CAM", "XYR", "XYZ", "FOCUS", "TEMP"]
+    assert all(led.toolTip() for led in window._leds.values())
+
+
+def test_mode_badge_only_shows_when_a_job_owns_the_axes(window):
+    """It used to be a permanent "MANUAL" sticker — noise that said
+    nothing. A non-MANUAL mode gates the jog inputs, so that is worth a
+    badge."""
+    badge = window._mode_badge
+    assert badge.isVisible() is False and badge.text() == ""
+    window._state.set_mode("SCAN")
+    assert badge.isVisible() and badge.text() == "SCAN"
+    assert "gated" in badge.toolTip()
+    window._state.set_mode("MANUAL")
+    assert badge.isVisible() is False
 
 
 def test_camera_fps_readout(window):
@@ -321,7 +338,11 @@ def test_telemetry_updates_strip(window):
         "position": asdict(StagePosition(x_um=1.25, y_um=2.5, r_deg=0.0)),
     })
     assert window._leds["zolix"].state() == "on"
-    assert window._strip._xyr._pos.text().startswith("1.2")
+    # fixed-width fields (the numbers must not jitter as digits change)
+    text = window._strip._xyr._pos.text()
+    assert "1.2" in text and "2.5" in text and text.endswith("°")
+    assert window._strip._xyr._moving.text() == ""      # slot reserved
+    assert window._strip._xyz._moving.text() == ""
 
 
 def test_enable_gate_reaches_every_checkbox(window):

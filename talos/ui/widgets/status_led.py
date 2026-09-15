@@ -38,6 +38,10 @@ class StatusLED(QWidget):
         layout.addWidget(self._dot)
         layout.addWidget(self._label)
 
+    @property
+    def text(self) -> str:
+        return self._label.text()
+
     def set_state(self, state: str) -> None:
         if state != self._state:
             self._state = state

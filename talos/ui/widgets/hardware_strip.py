@@ -24,7 +24,7 @@ from PySide6.QtWidgets import (
 
 from talos.hal.base import Axis
 from talos.hal.devices.sigmakoki import SPEED_LEVEL_TO_HZ
-from talos.ui.theme import BORDER, DANGER, LED_OFF, OK, PANEL, WARN
+from talos.ui.theme import DANGER, LED_OFF
 from talos.ui.widgets.trigger_bar import TriggerBarWidget
 
 
@@ -51,6 +51,16 @@ def parse_zolix(payload: dict) -> dict:
 
 
 def parse_sigmakoki(payload: dict) -> dict:
+    """STATUS? carries POSITIONS as x/y/z and SPEED LEVELS as xspd/yspd/
+    zspd.
+
+    The levels are a SETTING, not a motion flag: the firmware's default is
+    level 2 and ``stopAxis()`` clears ``moving`` but NOT ``speed_level``
+    (verified in transfer_stage_controller.ino), so a level > 0 would light
+    a "moving" lamp forever. Motion is inferred from the position changing
+    between polls — the same settle detection the driver's ``wait_idle``
+    uses (the firmware has no per-axis busy flag).
+    """
     status = payload.get("status") or {}
     pos = payload.get("position") or {}
 
@@ -64,12 +74,16 @@ def parse_sigmakoki(payload: dict) -> dict:
         except (TypeError, ValueError):
             return 0
 
-    try:
-        speed_hz = float(SPEED_LEVEL_TO_HZ.get(int(status.get("zspd", 0)), 0.0))
-    except (TypeError, ValueError):
-        speed_hz = 0.0
+    def level(key: str) -> int:
+        try:
+            return int(status.get(key, 0))
+        except (TypeError, ValueError):
+            return 0
+
+    levels = {axis: level(f"{axis}spd") for axis in ("x", "y", "z")}
     return {"x": steps("X"), "y": steps("Y"), "z": steps("Z"),
-            "speed_hz": speed_hz}
+            "levels": levels,
+            "speed_hz": float(SPEED_LEVEL_TO_HZ.get(levels["z"], 0.0))}
 
 
 def parse_focus(payload: dict) -> dict:
@@ -95,7 +109,7 @@ def parse_yudian(payload: dict) -> dict:
 
 
 class _MiniDot(QWidget):
-    """6px status dot (lit = triggered)."""
+    """8px status dot (lit = triggered)."""
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -116,15 +130,16 @@ class _MiniDot(QWidget):
 
 
 class _Section(QFrame):
-    """A strip section: title row + body."""
+    """A strip section: title row + body. Styled by objectName (theme QSS)
+    — inline stylesheets with hardcoded colours are the house anti-pattern."""
 
-    def __init__(self, title: str, parent=None):
+    def __init__(self, title: str, tooltip: str = "", parent=None):
         super().__init__(parent)
-        self.setStyleSheet(
-            f"QFrame {{ border: 1px solid {BORDER}; border-radius: 4px;"
-            f" background: {PANEL}; }}")
+        self.setObjectName("strip_section")
         self._title = QLabel(title)
         self._title.setObjectName("dim")
+        if tooltip:
+            self.setToolTip(tooltip)
         root = QVBoxLayout(self)
         root.setContentsMargins(6, 3, 6, 3)
         root.setSpacing(2)
@@ -138,59 +153,79 @@ class _Section(QFrame):
 
 
 class _StageSection(_Section):
-    """XYR/XYZ compact status: enable toggle, µm readout, limit dots."""
+    """XYR/XYZ compact status: enable toggle, axis readout, MOV (a motion
+    command is in flight / the axis is turning) and — where the hardware
+    has them — limit dots and the E-STOP latch.
 
-    def __init__(self, title: str, device_key: str, axes: list[str],
-                 manager, settings, parent=None):
-        super().__init__(title, parent)
-        self._axes = axes
+    Both stages behave identically: MOV lights for the same reason, the
+    readout uses the same fixed-width format, and every optional indicator
+    keeps its slot reserved so lighting up never re-flows the bar.
+    """
+
+    def __init__(self, title: str, device_key: str, tooltip: str,
+                 manager, settings, *, limits: bool, parent=None):
+        super().__init__(title, tooltip, parent)
         self._enable = QCheckBox("Enable")
         self._enable.setChecked(True)  # matches the manager's default gate
+        self._enable.setToolTip(f"Enable commands for {tooltip or title}")
         self._enable.toggled.connect(
             lambda on: manager.set_enabled(device_key, on))
         self.add(self._enable)
 
         self._pos = QLabel("—")
         self._pos.setObjectName("readout")
-        self._pos.setMinimumWidth(120)
+        self._pos.setMinimumWidth(150)
         self._pos.setAlignment(Qt.AlignmentFlag.AlignRight
                                | Qt.AlignmentFlag.AlignVCenter)
-        self.add(self._pos)
+        self.add(self._pos, stretch=1)
 
         self._dots: dict[str, _MiniDot] = {}
-        for key in ("x+", "x-", "y+", "y-"):
-            dot = _MiniDot(self)
-            dot.setToolTip(f"limit {key}")
-            self._dots[key] = dot
-            self.add(dot)
-        self._estop = QLabel("E-STOP")
-        self._estop.setObjectName("ok")
-        self._estop.setStyleSheet(f"color: {DANGER}; font-weight: 700;")
-        self._estop.hide()
-        self.add(self._estop)
+        if limits:
+            for key in ("x+", "x-", "y+", "y-"):
+                dot = _MiniDot(self)
+                dot.setToolTip(f"{device_key} limit {key}")
+                self._dots[key] = dot
+                self.add(dot)
+        # Reserved slots (fixed width, text toggled): showing MOV/E-STOP
+        # must not move the neighbouring sections around.
+        self._estop = QLabel("")
+        self._estop.setObjectName("strip_estop")
+        self._estop.setFixedWidth(52)
+        self._estop.setToolTip("Emergency-stop bit is set on the controller")
+        if limits:
+            self.add(self._estop)
 
-        self._moving = QLabel("MOV")
-        self._moving.setStyleSheet(f"color: {OK};")
-        self._moving.hide()
+        self._moving = QLabel("")
+        self._moving.setObjectName("strip_mov")
+        self._moving.setFixedWidth(34)
+        self._moving.setToolTip("The axis is turning")
         self.add(self._moving)
+        self._last_pos: tuple | None = None
+
+    def _is_moving(self, parsed: dict) -> bool:
+        """zolix reports real per-axis moving bits; sigmakoki has none, so
+        its motion is the position changing between polls (the driver's own
+        settle detection — the speed level persists after a stop)."""
+        if "moving" in parsed:
+            return bool(parsed["moving"])
+        pos = (parsed["x"], parsed["y"], parsed["z"])
+        moved = self._last_pos is not None and pos != self._last_pos
+        self._last_pos = pos
+        return moved
 
     def set_telem(self, parsed: dict) -> None:
         if "r_deg" in parsed:  # zolix (its r_deg is the discriminator)
             self._pos.setText(
-                f"{parsed['x_um']:.1f} · {parsed['y_um']:.1f} µm · "
-                f"{parsed['r_deg']:.2f}°")
+                f"{parsed['x_um']:8.1f} {parsed['y_um']:8.1f} µm "
+                f"{parsed['r_deg']:6.2f}°")
             for key, dot in self._dots.items():
                 dot.set_on(bool(parsed["limits"].get(key)))
-            self._estop.setVisible(bool(parsed.get("estop")))
+            self._estop.setText("E-STOP" if parsed.get("estop") else "")
         else:  # sigmakoki (steps → µm done by the strip's caller)
             self._pos.setText(
-                f"{parsed['x_um']:.1f} · {parsed['y_um']:.1f} · "
-                f"{parsed['z_um']:.1f} µm")
-            for dot in self._dots.values():
-                dot.set_on(False)
-            self._estop.hide()
-            self._moving.hide()  # no busy flag — speed level is not motion
-        self._moving.setVisible(bool(parsed.get("moving")))
+                f"{parsed['x_um']:8.1f} {parsed['y_um']:8.1f} "
+                f"{parsed['z_um']:7.1f} µm")
+        self._moving.setText("MOV" if self._is_moving(parsed) else "")
 
 
 def format_focus_pos(pos_steps: int, um_per_step: float) -> str:
@@ -211,16 +246,17 @@ class HardwareStrip(QWidget):
         layout.setContentsMargins(6, 3, 6, 3)
         layout.setSpacing(6)
 
-        self._xyr = _StageSection("XYR STAGE", "zolix", ["x", "y", "r"],
-                                  manager, settings)
+        self._xyr = _StageSection("XYR", "zolix", "Zolix XYR sample stage",
+                                  manager, settings, limits=True)
         self._xyr.setMinimumWidth(240)  # equalized: the readouts'
         layout.addWidget(self._xyr, stretch=1)  # min-widths would otherwise
-        self._xyz = _StageSection("XYZ STAGE", "sigmakoki", ["x", "y", "z"],
-                                  manager, settings)
+        self._xyz = _StageSection("XYZ", "sigmakoki",
+                                  "SigmaKoki XYZ transfer stage",
+                                  manager, settings, limits=False)
         self._xyz.setMinimumWidth(240)  # dominate the equal stretch
         layout.addWidget(self._xyz, stretch=1)
 
-        focus = _Section("FOCUS")
+        focus = _Section("FOCUS", "Focus stage (no limit sensor)")
         focus.setMinimumWidth(240)
         self._focus_pos = QLabel("—")
         self._focus_pos.setObjectName("readout")
@@ -235,7 +271,7 @@ class HardwareStrip(QWidget):
         focus.add(self._triggers, stretch=1)
         layout.addWidget(focus, stretch=1)
 
-        temp = _Section("TEMP")
+        temp = _Section("TEMP", "Yudian AI-828 temperature controller")
         temp.setMinimumWidth(240)
         self._temp_pv = QLabel("—")
         self._temp_pv.setObjectName("readout")
@@ -299,13 +335,13 @@ class HardwareStrip(QWidget):
             self._focus_pos.setText(
                 format_focus_pos(parsed["pos"], self._um_focus))
             blocked = parsed["blocked"] not in ("0", "")
-            if blocked:
-                self._focus_state.setText("⚠ BLOCKED")
-                self._focus_state.setStyleSheet(
-                    f"color: {WARN}; font-weight: 700;")
-            else:
-                self._focus_state.setText(parsed["mode"])
-                self._focus_state.setStyleSheet("")
+            self._focus_state.setText("⚠ BLOCKED" if blocked
+                                      else parsed["mode"])
+            # objectName swap + re-polish instead of an inline stylesheet
+            # (the theme's rule wins over QStatusBar's dim descendant rule)
+            self._focus_state.setObjectName("strip_warn" if blocked else "dim")
+            self._focus_state.style().unpolish(self._focus_state)
+            self._focus_state.style().polish(self._focus_state)
         elif device_key == "yudian":
             parsed = parse_yudian(payload)
             if parsed["pv"] is not None:

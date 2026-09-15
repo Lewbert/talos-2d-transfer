@@ -388,6 +388,16 @@ QTextEdit#log {{
     border: 1px solid {BORDER};
     font-family: "Consolas", monospace;
 }}
+/* Hardware strip (the bottom instrument bar): framed sections plus the
+   two condition indicators that used to be inline stylesheets. */
+QFrame#strip_section {{
+    border: 1px solid {BORDER};
+    border-radius: 4px;
+    background: {PANEL};
+}}
+QLabel#strip_mov {{ color: {OK}; font-weight: 700; }}
+QLabel#strip_estop {{ color: {DANGER}; font-weight: 700; }}
+QLabel#strip_warn {{ color: {WARN}; font-weight: 700; }}
 """
 
 
