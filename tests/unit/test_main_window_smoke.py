@@ -167,40 +167,58 @@ def test_menu_bar_structure(window):
 
 
 def _display_actions(window) -> dict:
+    """Flat items of the Display menu plus every submenu ITEM, by label."""
     display = [a.menu() for a in window.menuBar().actions()
                if a.text() == "&Display"][0]
-    return {a.text(): a for a in display.actions() if not a.isSeparator()}
+    found: dict = {}
+    for action in display.actions():
+        if action.isSeparator():
+            continue
+        found[action.text()] = action
+        if action.menu() is not None:
+            for child in action.menu().actions():
+                if not child.isSeparator():
+                    found[child.text()] = child
+    return found
 
 
-def test_display_overlay_toggles_are_flat_and_work(window):
-    """Every overlay item must be toggleable with ONE click.
+def test_overlay_toggles_work_and_are_never_submenu_parents(window):
+    """Every overlay toggle must be CLICKABLE.
 
-    Regression: the scale bar and the crosshair were checkable ACTIONS THAT
-    OWNED A SUBMENU — Qt opens a submenu instead of triggering its parent
-    action (verified with QTest), so neither could be switched off, and the
-    menu gave no sign of it.
+    Regression: the scale bar and the crosshair were checkable actions that
+    OWNED A SUBMENU. Qt opens a submenu instead of triggering its parent
+    action (verified with QTest), so neither could ever be switched off.
+    The toggles now live INSIDE the submenu ("Show …").
     """
     actions = _display_actions(window)
-    assert set(actions) == {"Scale bar", "Burn scale bar into snapshots",
-                            "Crosshair", "Crosshair ticks", "AF Indicator",
-                            "Tick ruler", "Scan path"}
-    for label, action in actions.items():
+    assert set(actions) == {"Scale Bar", "Show scale bar",
+                            "Burn into snapshots", "Crosshair",
+                            "Show crosshair", "Crosshair ticks",
+                            "AF Indicator", "Tick ruler", "Scan path"}
+    for label in ("Show scale bar", "Burn into snapshots", "Show crosshair",
+                  "Crosshair ticks", "AF Indicator", "Tick ruler",
+                  "Scan path"):
+        action = actions[label]
         assert action.isCheckable(), label
         assert action.menu() is None, f"{label} owns a submenu — untoggleable"
+    # the submenus themselves are plain openers
+    for label in ("Scale Bar", "Crosshair"):
+        assert actions[label].menu() is not None
+        assert actions[label].isCheckable() is False
 
-    # …and each one really toggles its overlay
-    actions["Scale bar"].trigger()
+    # …and each toggle really drives its overlay
+    actions["Show scale bar"].trigger()
     assert window._navigation.live_view._scale_bar_enabled is False
-    actions["Scale bar"].trigger()
+    actions["Show scale bar"].trigger()
     assert window._navigation.live_view._scale_bar_enabled is True
 
-    actions["Crosshair"].trigger()
+    actions["Show crosshair"].trigger()
     assert window._navigation.live_view._crosshair_display is True
     actions["Crosshair ticks"].trigger()
     assert window._navigation.live_view._crosshair_ticks is True
     actions["Tick ruler"].trigger()
     assert window._navigation.live_view._ruler_enabled is True
-    actions["Crosshair"].trigger()
+    actions["Show crosshair"].trigger()
     assert window._navigation.live_view._crosshair_display is False
     # switching the crosshair off takes its ticks with it
     assert window._navigation.live_view._crosshair_ticks is False
@@ -212,13 +230,59 @@ def test_dependent_overlay_options_follow_their_parent(window):
     """Burn needs a scale bar, ticks need a crosshair: both are disabled
     while the parent is off, and the state persists."""
     actions = _display_actions(window)
-    assert actions["Burn scale bar into snapshots"].isEnabled() is True
-    actions["Scale bar"].trigger()          # off
-    assert actions["Burn scale bar into snapshots"].isEnabled() is False
-    assert actions["Burn scale bar into snapshots"].isChecked() is False
+    assert actions["Burn into snapshots"].isEnabled() is True
+    actions["Show scale bar"].trigger()          # off
+    assert actions["Burn into snapshots"].isEnabled() is False
+    assert actions["Burn into snapshots"].isChecked() is False
     assert window._settings.section("display")["burn_scale_bar"] is False
-    actions["Scale bar"].trigger()          # back on
-    assert actions["Burn scale bar into snapshots"].isEnabled() is True
+    actions["Show scale bar"].trigger()          # back on
+    assert actions["Burn into snapshots"].isEnabled() is True
+
+
+def test_stored_overlays_are_applied_at_launch(qapp, tmp_path, monkeypatch):
+    """Regression: a stored crosshair_ticks came back CHECKED in the menu
+    but absent from the live view — the build path set the check state with
+    signals blocked and never pushed the value, so only a manual
+    uncheck/recheck made it appear."""
+    from talos.ui import calibration_context as cc_mod
+
+    QSettings.setDefaultFormat(QSettings.Format.IniFormat)
+    QSettings.setPath(QSettings.Format.IniFormat, QSettings.Scope.UserScope,
+                      str(tmp_path))
+    monkeypatch.setattr(cc_mod, "get_calibration_db_path",
+                        lambda: tmp_path / "cal.db")
+    settings = FakeSettings()
+    settings.section("display").update({"scale_bar": False,
+                                        "crosshair": True,
+                                        "crosshair_ticks": True,
+                                        "burn_scale_bar": True})
+    window = MainWindow(StubManager(), settings, AppState(),
+                        input_system=None,
+                        autofocus_service=StubAutofocusService())
+    view = window._navigation.live_view
+    assert view._scale_bar_enabled is False
+    assert view._crosshair_display is True
+    assert view._crosshair_ticks is True
+
+
+def test_ticks_cannot_be_stored_without_the_crosshair(qapp, tmp_path,
+                                                      monkeypatch):
+    """The dependent option is meaningless on its own — a stored
+    ticks=True with crosshair=False must not light up."""
+    from talos.ui import calibration_context as cc_mod
+
+    QSettings.setDefaultFormat(QSettings.Format.IniFormat)
+    QSettings.setPath(QSettings.Format.IniFormat, QSettings.Scope.UserScope,
+                      str(tmp_path))
+    monkeypatch.setattr(cc_mod, "get_calibration_db_path",
+                        lambda: tmp_path / "cal.db")
+    settings = FakeSettings()
+    settings.section("display").update({"crosshair": False,
+                                        "crosshair_ticks": True})
+    window = MainWindow(StubManager(), settings, AppState(),
+                        input_system=None,
+                        autofocus_service=StubAutofocusService())
+    assert window._navigation.live_view._crosshair_ticks is False
 
 
 def test_objective_combo_in_workspace_corner(window):

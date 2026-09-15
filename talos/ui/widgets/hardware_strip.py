@@ -27,6 +27,16 @@ from talos.hal.devices.sigmakoki import SPEED_LEVEL_TO_HZ
 from talos.ui.theme import DANGER, LED_OFF
 from talos.ui.widgets.trigger_bar import TriggerBarWidget
 
+#: How the strip's width is shared between the four sections — roughly
+#: proportional to their CONTENT (stages ≈380 px with their displays,
+#: focus ≈450, temp ≈275). Equal widths left TEMP with a 300 px hole and
+#: the stages with 100 px ones (measured with a Qt geometry dump); giving
+#: the displays a bit more room and the sections widths to match makes the
+#: gaps inside every section come out the same moderate size (~35 px).
+_STRETCH_STAGE = 29
+_STRETCH_FOCUS = 29
+_STRETCH_TEMP = 19
+
 
 # --- pure parsers (unit-tested) ----------------------------------------
 
@@ -160,8 +170,11 @@ class _Section(QFrame):
     def add(self, widget: QWidget, stretch: int = 0) -> None:
         self._body.addWidget(widget, stretch)
 
-    def add_stretch(self, stretch: int = 1) -> None:
-        """Push everything added AFTER this to the right edge."""
+    def add_gap(self, stretch: int = 1) -> None:
+        """A flexible gap. Sections use these BETWEEN their fields (rather
+        than one big stretch) so the leftover width is shared out evenly:
+        every gap in a section is the same size, and the fields grow a
+        little instead of one huge blank area opening up."""
         self._body.addStretch(stretch)
 
 
@@ -189,17 +202,18 @@ class _StageSection(_Section):
         self._enable.toggled.connect(
             lambda on: manager.set_enabled(device_key, on))
         self.add(self._enable)
-        # The numbers and indicators cluster at the RIGHT edge: a stretched
-        # readout box looked like an input field and left the section
-        # lopsided (the enable toggle alone on the left).
-        self.add_stretch()
+        self.add_gap()
         self._pos = QLabel("—")
         self._pos.setObjectName("readout")
-        self._pos.setMinimumWidth(120)
-        self._pos.setMaximumWidth(240)
+        self._pos.setMinimumWidth(230)
+        # The readout takes the largest single share of the leftover width
+        # (it is the main display) but is capped so it cannot become a huge
+        # empty box — the even gaps below take the rest.
+        self._pos.setMaximumWidth(300)
         self._pos.setAlignment(Qt.AlignmentFlag.AlignRight
                                | Qt.AlignmentFlag.AlignVCenter)
-        self.add(self._pos)
+        self.add(self._pos, stretch=3)
+        self.add_gap()
 
         self._dots: dict[str, _MiniDot] = {}
         for key in self.LIMIT_KEYS:
@@ -207,6 +221,7 @@ class _StageSection(_Section):
             dot.setToolTip(f"{device_key} limit {key}")
             self._dots[key] = dot
             self.add(dot)
+        self.add_gap()
         self._has_estop = bool(estop)
         self._estop = QLabel("")
         self._estop.setObjectName("strip_estop")
@@ -295,45 +310,49 @@ class HardwareStrip(QWidget):
         self._xyr = _StageSection("XYR STAGE", "zolix",
                                   "Zolix XYR sample stage",
                                   manager, settings, estop=True)
-        self._xyr.setMinimumWidth(240)  # equalized: the readouts'
-        layout.addWidget(self._xyr, stretch=1)  # min-widths would otherwise
+        self._xyr.setMinimumWidth(240)
+        layout.addWidget(self._xyr, stretch=_STRETCH_STAGE)
         self._xyz = _StageSection("XYZ STAGE", "sigmakoki",
                                   "SigmaKoki XYZ transfer stage",
                                   manager, settings, estop=False)
-        self._xyz.setMinimumWidth(240)  # dominate the equal stretch
-        layout.addWidget(self._xyz, stretch=1)
+        self._xyz.setMinimumWidth(240)
+        layout.addWidget(self._xyz, stretch=_STRETCH_STAGE)
 
         focus = _Section("FOCUS", "Focus stage (no limit sensor)")
         focus.setMinimumWidth(240)
-        focus.add_stretch()          # the readouts cluster right, like the
-        self._focus_pos = QLabel("—")  # stage sections
+        self._focus_pos = QLabel("—")
         self._focus_pos.setObjectName("readout")
-        self._focus_pos.setMinimumWidth(140)  # fits "123.4 µm · 123456 st"
+        self._focus_pos.setMinimumWidth(160)  # fits "123.4 µm · 123456 st"
         self._focus_pos.setAlignment(Qt.AlignmentFlag.AlignRight
                                      | Qt.AlignmentFlag.AlignVCenter)
-        focus.add(self._focus_pos)
+        focus.add(self._focus_pos, stretch=2)
+        focus.add_gap()
         self._focus_state = QLabel("—")
         self._focus_state.setObjectName("dim")
         focus.add(self._focus_state)
+        focus.add_gap()
         self._triggers = TriggerBarWidget(settings)
-        focus.add(self._triggers)
-        layout.addWidget(focus, stretch=1)
+        focus.add(self._triggers, stretch=6)
+        layout.addWidget(focus, stretch=_STRETCH_FOCUS)
 
         temp = _Section("TEMP", "Yudian AI-828 temperature controller")
         temp.setMinimumWidth(240)
-        temp.add_stretch()
         self._temp_pv = QLabel("—")
         self._temp_pv.setObjectName("readout")
-        self._temp_pv.setMinimumWidth(52)
+        self._temp_pv.setMinimumWidth(90)
+        self._temp_pv.setMaximumWidth(200)
         self._temp_pv.setAlignment(Qt.AlignmentFlag.AlignRight
                                    | Qt.AlignmentFlag.AlignVCenter)
-        temp.add(self._temp_pv)
+        temp.add(self._temp_pv, stretch=2)
+        temp.add_gap()
         self._temp_sv = QLabel("SV —")
         self._temp_sv.setObjectName("dim")
         temp.add(self._temp_sv)
+        temp.add_gap()
         self._temp_out = QLabel("0%")
         self._temp_out.setObjectName("dim")
         temp.add(self._temp_out)
+        layout.addWidget(temp, stretch=_STRETCH_TEMP)
         layout.addWidget(temp, stretch=1)
 
         layout.addStretch(0)

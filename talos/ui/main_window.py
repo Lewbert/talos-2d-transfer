@@ -275,24 +275,28 @@ class MainWindow(QMainWindow):
     def _build_display_menu(self, menu) -> None:
         """Display → live-view overlays (persisted to display.*).
 
-        FLAT checkable items — one click toggles, and the menu itself shows
-        the state. The dependent options (snapshot burn, crosshair ticks)
-        sit directly under their parent and are enabled only while it is
-        on. NOTE: a checkable action that OWNS A SUBMENU cannot be toggled
-        by a click at all — Qt opens the submenu instead (verified with
-        QTest) — which is why this is flat: both the scale bar and the
-        crosshair were previously impossible to switch off.
+        The grouped overlays live in submenus whose FIRST item is the
+        on/off toggle ("Show scale bar" / "Show crosshair"), with the
+        option that depends on it directly below (enabled only while the
+        toggle is on).
+
+        The toggle is an ITEM INSIDE the submenu, not the submenu's own
+        action: Qt opens a submenu when its parent action is clicked and
+        never triggers it, so a checkable submenu parent is permanently
+        stuck (verified with QTest — that is how the scale bar and the
+        crosshair used to be impossible to switch off).
         """
         display = self._settings.section("display")
 
         def _apply_scale_bar(on: bool) -> None:
             self._for_each_live_view(lambda v: v.set_scale_bar_enabled(on))
 
-        self._scale_bar_action = menu.addAction("Scale bar")
+        scale_menu = menu.addMenu("Scale Bar")
+        self._scale_bar_action = scale_menu.addAction("Show scale bar")
         self._scale_bar_action.setCheckable(True)
         self._scale_bar_action.setToolTip(
             "Calibrated bar in the frame's bottom-right corner")
-        self._burn_action = menu.addAction("Burn scale bar into snapshots")
+        self._burn_action = scale_menu.addAction("Burn into snapshots")
         self._burn_action.setCheckable(True)
         self._burn_action.setToolTip(
             "Draw the same bar into every saved snapshot")
@@ -300,26 +304,27 @@ class MainWindow(QMainWindow):
         self._burn_action.toggled.connect(
             lambda on: self._on_display_toggle("burn_scale_bar",
                                                lambda _o: None, on))
-        menu.addSeparator()
 
         def _apply_crosshair(on: bool) -> None:
             self._for_each_live_view(lambda v: v.set_crosshair_enabled(on))
 
-        self._crosshair_action = menu.addAction("Crosshair")
+        def _apply_crosshair_ticks(on: bool) -> None:
+            self._for_each_live_view(
+                lambda v: v.set_crosshair_ticks_enabled(on))
+
+        cross_menu = menu.addMenu("Crosshair")
+        self._crosshair_action = cross_menu.addAction("Show crosshair")
         self._crosshair_action.setCheckable(True)
         self._crosshair_action.setToolTip(
             "Solid inverse-video crosshair through the frame centre")
-        self._crosshair_ticks_action = menu.addAction("Crosshair ticks")
+        self._crosshair_ticks_action = cross_menu.addAction("Crosshair ticks")
         self._crosshair_ticks_action.setCheckable(True)
         self._crosshair_ticks_action.setToolTip(
             "Calibrated major/minor ticks along the crosshair lines")
         self._crosshair_action.toggled.connect(self._on_crosshair_toggled)
         self._crosshair_ticks_action.toggled.connect(
-            lambda on: self._on_display_toggle(
-                "crosshair_ticks",
-                lambda state: self._for_each_live_view(
-                    lambda v: v.set_crosshair_ticks_enabled(state)), on))
-        menu.addSeparator()
+            lambda on: self._on_display_toggle("crosshair_ticks",
+                                               _apply_crosshair_ticks, on))
 
         scale_on = bool(display.get("scale_bar", True))
         burn_on = bool(display.get("burn_scale_bar", False))
@@ -334,7 +339,12 @@ class MainWindow(QMainWindow):
 
         cross_on = bool(display.get("crosshair", False))
         ticks_on = bool(display.get("crosshair_ticks", False))
+        # BOTH must be pushed to the views: blockSignals above suppresses
+        # the toggled handlers, and relying on them meant a stored
+        # crosshair-ticks=on came back CHECKED in the menu but absent from
+        # the live view until the user toggled it twice.
         _apply_crosshair(cross_on)
+        _apply_crosshair_ticks(ticks_on and cross_on)
         self._crosshair_action.blockSignals(True)
         self._crosshair_action.setChecked(cross_on)
         self._crosshair_action.blockSignals(False)
@@ -369,9 +379,8 @@ class MainWindow(QMainWindow):
             action.blockSignals(False)
 
     def _on_crosshair_toggled(self, on: bool) -> None:
-        """Crosshairs on/off; the ticks child follows the parent (a reticle
-        without a crosshair makes no sense), exactly like the scale bar's
-        burn option."""
+        """Crosshair on/off; the ticks option follows it (a reticle without
+        a crosshair makes no sense), exactly like the scale bar's burn."""
         self._for_each_live_view(lambda v: v.set_crosshair_enabled(on))
         self._settings.section("display")["crosshair"] = bool(on)
         if not on:
