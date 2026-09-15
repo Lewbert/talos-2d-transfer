@@ -97,9 +97,11 @@ bar), **Windows** (AF Detail, Stage Control, Log), **Help**.
 
 Display toggles the live-view overlays: scale bar (with an optional burn-in for
 snapshots), AF status pill, **crosshairs** (solid, inverse-video — the line
-inverts whatever is under it, so it stays visible on any image), **tick ruler**
-(calibrated major/minor ticks on all four frame edges, labelled in µm from the
-frame centre) and the scan path.
+inverts whatever is under it, so it stays visible on any image) with an
+optional **crosshair ticks** child that turns them into a calibrated measuring
+reticle, **tick ruler** (calibrated major/minor ticks on all four frame edges,
+labelled in µm from the frame centre — the centre is left unlabelled, the
+crosshair marks it) and the scan path.
 
 Preferences holds General, Objectives & Calibration, AutoFocus, Input & Gamepad
 and the Hardware device pages (Camera, Focus, Zolix XYR, SigmaKoki XYZ,
