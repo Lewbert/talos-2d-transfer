@@ -405,6 +405,7 @@ QFrame#strip_section {{
     background: {PANEL};
 }}
 QLabel#strip_mov {{ color: {OK}; font-weight: 700; }}
+QLabel#strip_mov_idle {{ color: {TEXT_DIM}; }}
 QLabel#strip_estop {{ color: {DANGER}; font-weight: 700; }}
 QLabel#strip_warn {{ color: {WARN}; font-weight: 700; }}
 """

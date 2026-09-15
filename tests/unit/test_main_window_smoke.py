@@ -166,30 +166,59 @@ def test_menu_bar_structure(window):
     assert all(a.isCheckable() for a in windows.actions())
 
 
-def test_display_menu_crosshair_submenu(window):
-    """Display → Crosshairs → Crosshair ticks, mirroring the scale bar's
-    burn option: turning the parent off unchecks AND disables the child."""
+def _display_actions(window) -> dict:
     display = [a.menu() for a in window.menuBar().actions()
                if a.text() == "&Display"][0]
-    titles = [a.text() for a in display.actions()]
-    assert "Scale Bar" in titles and "Crosshairs" in titles
-    assert "Tick ruler" in titles and "Scan path" in titles
-    assert window._crosshair_action.isCheckable()
-    assert window._crosshair_ticks_action.text() == "Crosshair ticks"
-    assert window._crosshair_action.isChecked() is False
-    assert window._crosshair_ticks_action.isEnabled() is False
+    return {a.text(): a for a in display.actions() if not a.isSeparator()}
 
-    window._crosshair_action.setChecked(True)
-    assert window._crosshair_ticks_action.isEnabled() is True
+
+def test_display_overlay_toggles_are_flat_and_work(window):
+    """Every overlay item must be toggleable with ONE click.
+
+    Regression: the scale bar and the crosshair were checkable ACTIONS THAT
+    OWNED A SUBMENU — Qt opens a submenu instead of triggering its parent
+    action (verified with QTest), so neither could be switched off, and the
+    menu gave no sign of it.
+    """
+    actions = _display_actions(window)
+    assert set(actions) == {"Scale bar", "Burn scale bar into snapshots",
+                            "Crosshair", "Crosshair ticks", "AF Indicator",
+                            "Tick ruler", "Scan path"}
+    for label, action in actions.items():
+        assert action.isCheckable(), label
+        assert action.menu() is None, f"{label} owns a submenu — untoggleable"
+
+    # …and each one really toggles its overlay
+    actions["Scale bar"].trigger()
+    assert window._navigation.live_view._scale_bar_enabled is False
+    actions["Scale bar"].trigger()
+    assert window._navigation.live_view._scale_bar_enabled is True
+
+    actions["Crosshair"].trigger()
     assert window._navigation.live_view._crosshair_display is True
-    window._crosshair_ticks_action.setChecked(True)
+    actions["Crosshair ticks"].trigger()
     assert window._navigation.live_view._crosshair_ticks is True
-
-    window._crosshair_action.setChecked(False)
-    assert window._crosshair_ticks_action.isChecked() is False
-    assert window._crosshair_ticks_action.isEnabled() is False
+    actions["Tick ruler"].trigger()
+    assert window._navigation.live_view._ruler_enabled is True
+    actions["Crosshair"].trigger()
+    assert window._navigation.live_view._crosshair_display is False
+    # switching the crosshair off takes its ticks with it
     assert window._navigation.live_view._crosshair_ticks is False
-    assert window._settings.section("display")["crosshair_ticks"] is False
+    assert actions["Crosshair ticks"].isChecked() is False
+    assert actions["Crosshair ticks"].isEnabled() is False
+
+
+def test_dependent_overlay_options_follow_their_parent(window):
+    """Burn needs a scale bar, ticks need a crosshair: both are disabled
+    while the parent is off, and the state persists."""
+    actions = _display_actions(window)
+    assert actions["Burn scale bar into snapshots"].isEnabled() is True
+    actions["Scale bar"].trigger()          # off
+    assert actions["Burn scale bar into snapshots"].isEnabled() is False
+    assert actions["Burn scale bar into snapshots"].isChecked() is False
+    assert window._settings.section("display")["burn_scale_bar"] is False
+    actions["Scale bar"].trigger()          # back on
+    assert actions["Burn scale bar into snapshots"].isEnabled() is True
 
 
 def test_objective_combo_in_workspace_corner(window):
@@ -375,8 +404,11 @@ def test_telemetry_updates_strip(window):
     # fixed-width fields (the numbers must not jitter as digits change)
     text = window._strip._xyr._pos.text()
     assert "1.2" in text and "2.5" in text and text.endswith("°")
-    assert window._strip._xyr._moving.text() == ""      # slot reserved
-    assert window._strip._xyz._moving.text() == ""
+    # MOV is always visible; only its colour changes (grey → green), so the
+    # panel never shows a hole where the indicator will appear
+    for section in (window._strip._xyr, window._strip._xyz):
+        assert section._moving.text() == "MOV"
+        assert section._moving.objectName() == "strip_mov_idle"
 
 
 def test_enable_gate_reaches_every_checkbox(window):

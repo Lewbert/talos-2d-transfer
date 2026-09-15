@@ -706,11 +706,17 @@ def _device_page(settings, section: str, fields: list, annotation: str) \
     return page
 
 
-# Shown while a change needs a driver rebuild (flip is pushed live).
-_AXIS_HINT = ("Manual moves only — these never affect the position "
-              "readout, autofocus or the grid scan. Flip X↔Y swaps the "
-              "two axes: the Stage Control buttons X+/Y+ then drive the "
-              "other physical axis.")
+# Hints. Every group that only affects MANUAL motion says so — the
+# distinction between "what I drive by hand" and "what the automation
+# does" is the one that matters when tuning a scan.
+_MANUAL_HINT = ("Manual control only — never affects the position readout, "
+                "autofocus or the grid scan. Flip X↔Y swaps the two axes: "
+                "the Stage Control buttons X+/Y+ then drive the other "
+                "physical axis.")
+_SCALE_HINT = ("Used by EVERY move — manual jogs, autofocus and the grid "
+               "scan — so a wrong value here shows up everywhere. The "
+               "objective's µm/px (Objectives & Calibration) is what the "
+               "scale bar and measurements use.")
 
 
 class CameraPage(_FormPage):
@@ -778,19 +784,24 @@ def _build_pages(settings, qapp, manager, autofocus_service, parent):
     # construction, so a range narrower than the stored value silently
     # rewrites the setting on any Apply (um_per_pulse_r was lost to this
     # before). Ranges here always include the shipped defaults.
+    # Page order is CONNECTION → SCALE → MANUAL CONTROL → the rest: the
+    # step↔µm conversion affects every move (manual, autofocus AND the grid
+    # scan), so it outranks the purely-manual jog settings, and every
+    # manual-only group says so in its title.
     focus_fields = [
         ("group", "Connection"),
         ("port", "port", "Port", _RECONNECT),
         ("baud", "baudrate", "Baudrate", _RECONNECT),
-        ("group", "Manual controls"),
-        ("int", "min_speed", "Min speed (steps/s)", 10, 1000),
-        ("int", "max_speed", "Max speed (steps/s)", 50, 5000),
-        ("bool", "invert", "Invert jog direction (triggers, keys, buttons)"),
-        ("hint", "Applies to manual focus only — autofocus and its sweeps "
-                 "are unaffected."),
-        ("group", "Travel"),
+        ("group", "Scale — µm per step"),
         ("float", "um_per_step", "µm per step", 0.01, 10, 0.01),
         ("float", "backlash_um", "Backlash (µm, mechanism)", 0.0, 50, 0.1),
+        ("hint", _SCALE_HINT),
+        ("group", "Manual control — jog speeds"),
+        ("int", "min_speed", "Min speed (steps/s)", 10, 1000),
+        ("int", "max_speed", "Max speed (steps/s)", 50, 5000),
+        ("group", "Manual control — direction"),
+        ("bool", "invert", "Invert jog direction (triggers, keys, buttons)"),
+        ("hint", _MANUAL_HINT),
         ("group", "Soft limits"),
         ("bool", "slim_on", "Soft limits on (firmware SLIM)"),
         ("int", "slim_min", "Soft limit min (steps)", -2000000, 2000000),
@@ -803,22 +814,23 @@ def _build_pages(settings, qapp, manager, autofocus_service, parent):
         ("port", "port", "Port", _RECONNECT),
         ("baud", "baudrate", "Baudrate", _RECONNECT),
         ("int", "slave_address", "Modbus slave address", 1, 247, _RECONNECT),
-        ("group", "Manual controls"),
+        ("group", "Scale — µm per pulse"),
+        ("float", "um_per_pulse_xy", "µm per pulse XY", 0.01, 10, 0.01),
+        ("float", "um_per_pulse_r", "µm per pulse R", 0.0001, 0.1, 0.0001),
+        ("hint", _SCALE_HINT),
+        ("group", "Manual control — jog speeds & steps"),
         ("int", "slow_speed_pps", "Slow speed (pps)", 10, 10000),
         ("int", "fast_speed_pps", "Fast speed (pps)", 10, 100000),
         ("int", "slow_speed_r", "Slow R speed (pps)", 10, 100000),
         ("int", "fast_speed_r", "Fast R speed (pps)", 10, 200000),
         ("int", "single_step", "Single step XY (pulses)", 1, 100000),
         ("int", "single_step_r", "Single step R (pulses)", 1, 100000),
-        ("group", "Axis direction"),
+        ("group", "Manual control — direction"),
         ("bool", "invert_x", "Invert X"),
         ("bool", "invert_y", "Invert Y"),
         ("bool", "invert_r", "Invert R"),
         ("bool", "flip_xy", "Flip X↔Y (swap the two axes)"),
-        ("hint", _AXIS_HINT),
-        ("group", "Scale"),
-        ("float", "um_per_pulse_xy", "µm per pulse XY", 0.01, 10, 0.01),
-        ("float", "um_per_pulse_r", "µm per pulse R", 0.0001, 0.1, 0.0001),
+        ("hint", _MANUAL_HINT),
         ("group", "Options"),
         ("bool", "rotation_enabled", "Rotation enabled"),
     ]
@@ -828,22 +840,23 @@ def _build_pages(settings, qapp, manager, autofocus_service, parent):
         ("group", "Connection"),
         ("port", "port", "Port", _RECONNECT),
         ("baud", "baudrate", "Baudrate", _RECONNECT),
-        ("group", "Manual controls"),
+        ("group", "Scale — µm per step"),
+        ("float", "um_per_step_xy", "µm per step XY", 0.01, 10, 0.01),
+        ("float", "um_per_step_z", "µm per step Z", 0.01, 10, 0.01),
+        ("hint", _SCALE_HINT),
+        ("group", "Manual control — jog speeds & steps"),
         ("int", "slow_speed_hz", "Slow speed XY (Hz)", 25, 2000),
         ("int", "fast_speed_hz", "Fast speed XY (Hz)", 25, 2000),
         ("int", "slow_speed_z", "Slow Z speed (Hz)", 25, 2000),
         ("int", "fast_speed_z", "Fast Z speed (Hz)", 25, 2000),
         ("int", "single_step", "Single step XY (steps)", 1, 100000),
         ("int", "single_step_z", "Single step Z (steps)", 1, 100000),
-        ("group", "Axis direction"),
+        ("group", "Manual control — direction"),
         ("bool", "invert_x", "Invert X"),
         ("bool", "invert_y", "Invert Y"),
         ("bool", "invert_z", "Invert Z"),
         ("bool", "flip_xy", "Flip X↔Y (swap the two axes)"),
-        ("hint", _AXIS_HINT),
-        ("group", "Scale"),
-        ("float", "um_per_step_xy", "µm per step XY", 0.01, 10, 0.01),
-        ("float", "um_per_step_z", "µm per step Z", 0.01, 10, 0.01),
+        ("hint", _MANUAL_HINT),
     ]
     pages.append(("Hardware", "SigmaKoki XYZ",
                   _device_page(settings, "sigmakoki", sigm_fields, "")))
@@ -864,7 +877,7 @@ class InputPage(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
 
         page = _FormPage(settings, settings.section("input"), parent=self)
-        page.add_group("Keyboard & mouse")
+        page.add_group("Manual control — keyboard & mouse")
         page.add_int("long_press_threshold_ms",
                      "Long-press threshold (ms)", 100, 1000)
         page.add_int("loop_rate_hz", "Input loop rate (Hz)", 20, 120)
@@ -875,12 +888,12 @@ class InputPage(QWidget):
         gamepad = _FormPage(settings,
                             settings.section("input").setdefault("gamepad", {}),
                             parent=self)
-        gamepad.add_group("Gamepad")
+        gamepad.add_group("Manual control — gamepad")
         gamepad.add_float("deadzone", "Stick deadzone", 0.0, 0.9, 0.05)
         gamepad.add_float("gamma", "Stick response gamma", 1.0, 4.0, 0.1)
         gamepad.add_float("trigger_threshold", "Trigger threshold",
                           0.0, 1.0, 0.05)
-        gamepad.add_group("Stick direction")
+        gamepad.add_group("Manual control — stick direction")
         gamepad.add_bool("invert_left_x", "Invert left stick X")
         gamepad.add_bool("invert_left_y", "Invert left stick Y")
         gamepad.add_bool("invert_right_x", "Invert right stick X")
@@ -889,7 +902,7 @@ class InputPage(QWidget):
                          "stage, the right stick the XYR stage. Axis "
                          "inversion for the keyboard, D-pad and on-screen "
                          "buttons lives on each device's page "
-                         "(Hardware → … → Axis direction).")
+                         "(Hardware → … → Manual control — direction).")
         layout.addWidget(gamepad)
         layout.addStretch(1)
 

@@ -160,6 +160,10 @@ class _Section(QFrame):
     def add(self, widget: QWidget, stretch: int = 0) -> None:
         self._body.addWidget(widget, stretch)
 
+    def add_stretch(self, stretch: int = 1) -> None:
+        """Push everything added AFTER this to the right edge."""
+        self._body.addStretch(stretch)
+
 
 class _StageSection(_Section):
     """XYR/XYZ compact status — the SAME layout and behaviour on both
@@ -185,13 +189,17 @@ class _StageSection(_Section):
         self._enable.toggled.connect(
             lambda on: manager.set_enabled(device_key, on))
         self.add(self._enable)
-
+        # The numbers and indicators cluster at the RIGHT edge: a stretched
+        # readout box looked like an input field and left the section
+        # lopsided (the enable toggle alone on the left).
+        self.add_stretch()
         self._pos = QLabel("—")
         self._pos.setObjectName("readout")
         self._pos.setMinimumWidth(120)
+        self._pos.setMaximumWidth(240)
         self._pos.setAlignment(Qt.AlignmentFlag.AlignRight
                                | Qt.AlignmentFlag.AlignVCenter)
-        self.add(self._pos, stretch=1)
+        self.add(self._pos)
 
         self._dots: dict[str, _MiniDot] = {}
         for key in self.LIMIT_KEYS:
@@ -207,10 +215,12 @@ class _StageSection(_Section):
             self.add(self._estop)
             self._estop.hide()   # NO reserved slot: an E-STOP appearing must
             # shove the neighbours — that is what makes it noticed.
-        self._moving = QLabel("")
-        self._moving.setObjectName("strip_mov")
+        # Always visible, grey when idle and green while the axis turns:
+        # an empty reserved slot read as a hole in the panel.
+        self._moving = QLabel("MOV")
+        self._moving.setObjectName("strip_mov_idle")
         self._moving.setFixedWidth(30)
-        self._moving.setToolTip("The axis is turning")
+        self._moving.setToolTip("Green while the axis is turning")
         self.add(self._moving)
         self._last_pos: tuple | None = None
 
@@ -258,7 +268,10 @@ class _StageSection(_Section):
             estop = bool(parsed.get("estop"))
             self._estop.setText("E-STOP" if estop else "")
             self._estop.setVisible(estop)
-        self._moving.setText("MOV" if self._is_moving(parsed) else "")
+        moving = self._is_moving(parsed)
+        self._moving.setObjectName("strip_mov" if moving else "strip_mov_idle")
+        self._moving.style().unpolish(self._moving)
+        self._moving.style().polish(self._moving)
 
 
 def format_focus_pos(pos_steps: int, um_per_step: float) -> str:
@@ -292,7 +305,8 @@ class HardwareStrip(QWidget):
 
         focus = _Section("FOCUS", "Focus stage (no limit sensor)")
         focus.setMinimumWidth(240)
-        self._focus_pos = QLabel("—")
+        focus.add_stretch()          # the readouts cluster right, like the
+        self._focus_pos = QLabel("—")  # stage sections
         self._focus_pos.setObjectName("readout")
         self._focus_pos.setMinimumWidth(140)  # fits "123.4 µm · 123456 st"
         self._focus_pos.setAlignment(Qt.AlignmentFlag.AlignRight
@@ -302,11 +316,12 @@ class HardwareStrip(QWidget):
         self._focus_state.setObjectName("dim")
         focus.add(self._focus_state)
         self._triggers = TriggerBarWidget(settings)
-        focus.add(self._triggers, stretch=1)
+        focus.add(self._triggers)
         layout.addWidget(focus, stretch=1)
 
         temp = _Section("TEMP", "Yudian AI-828 temperature controller")
         temp.setMinimumWidth(240)
+        temp.add_stretch()
         self._temp_pv = QLabel("—")
         self._temp_pv.setObjectName("readout")
         self._temp_pv.setMinimumWidth(52)

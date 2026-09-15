@@ -173,6 +173,30 @@ def test_camera_page_keeps_device_level_fields_only(dialog):
     assert [f.path for f in camera_page._fields] == ["resolution", "flip"]
 
 
+def test_device_page_group_order_and_manual_labelling(dialog):
+    """Connection → Scale (affects every move) → Manual control → rest.
+
+    The step↔µm conversion outranks the jog settings because it applies to
+    the manual jogs, autofocus AND the grid scan; the purely-manual groups
+    say so in their titles so they cannot be mistaken for scan settings.
+    """
+    from PySide6.QtWidgets import QGroupBox
+
+    for label in ("Zolix XYR", "SigmaKoki XYZ", "Focus"):
+        page = _page(dialog, label)
+        titles = [box.title() for box in page.findChildren(QGroupBox)]
+        assert titles[0] == "Connection", (label, titles)
+        assert titles[1].startswith("Scale —"), (label, titles)
+        manual = [t for t in titles if t.startswith("Manual control —")]
+        assert manual, (label, titles)
+        # every manual group sits after the scale group
+        assert titles.index(manual[0]) > 1, (label, titles)
+
+    input_page = _page(dialog, "Input & Gamepad")
+    input_titles = [box.title() for box in input_page.findChildren(QGroupBox)]
+    assert input_titles[0].startswith("Manual control —")
+
+
 def test_objectives_merged_page_present(dialog):
     page = _page(dialog, "Objectives & Calibration")
     assert page._offsets_check.isChecked() is True
