@@ -14,6 +14,7 @@ from enum import Enum, IntEnum, IntFlag
 from pathlib import Path
 from typing import Any
 
+import cv2
 import numpy as np
 
 
@@ -129,6 +130,47 @@ class AbstractDevice(ABC):
 
 class Camera(AbstractDevice):
     """Streaming camera. All methods are called from the owning proxy thread only."""
+
+    #: Concrete backends MUST route every decoded frame through
+    #: ``apply_flip`` — set on each backend class and pinned by a
+    #: registry-walking test (a backend that forgets leaves the live view
+    #: flipped and the autofocus/detection path unflipped).
+    APPLIES_FLIP = False
+
+    def __init__(self, config: dict[str, Any]):
+        super().__init__(config)
+        # The bench optics present the specimen rotated 180°; the default
+        # restores the real-world orientation for the live view, autofocus,
+        # flake detection AND the saved snapshots — the flip happens where
+        # the frame is decoded, i.e. before any scale-bar burn.
+        self._flip = bool(config.get("flip", True))
+
+    @property
+    def flip_enabled(self) -> bool:
+        return self._flip
+
+    def set_flip(self, on: bool) -> None:
+        """Software 180° rotation, applied per frame at decode time."""
+        self._flip = bool(on)
+
+    def try_set_flip(self, name: str, value: Any) -> bool:
+        """Shared ``set_property`` prefix: True when ``name`` was handled."""
+        if name != "flip":
+            return False
+        self.set_flip(value)
+        return True
+
+    def apply_flip(self, frame: np.ndarray | None) -> np.ndarray | None:
+        """Rotate a decoded frame 180°, or pass it through untouched.
+
+        CONTRACT: returns a FRESH C-contiguous array when active (cv2.flip
+        allocates) so ``fetch()``'s "new allocation every call" promise
+        holds; returns the very same object when the flip is off or the
+        frame is None (a failed fetch must stay None).
+        """
+        if frame is None or not self._flip:
+            return frame
+        return cv2.flip(frame, -1)
 
     @abstractmethod
     def start(self) -> None:

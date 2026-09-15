@@ -28,8 +28,10 @@ from PySide6.QtWidgets import (
     QGroupBox,
     QHBoxLayout,
     QLabel,
+    QFrame,
     QLineEdit,
     QPushButton,
+    QScrollArea,
     QSpinBox,
     QStackedWidget,
     QTableWidget,
@@ -92,11 +94,38 @@ def _decimals_for(*values: float) -> int:
     return max(0, min(6, decimals))
 
 
+def list_serial_ports() -> list[tuple[str, str]]:
+    """(port, description) pairs currently present, [] when unavailable.
+
+    ``comports()`` can raise (or hang) with a buggy driver — the reference
+    project cached the list for exactly that reason — so enumeration must
+    never break the dialog: failures degrade to an empty list and the port
+    field falls back to the configured value.
+    """
+    try:
+        from serial.tools import list_ports
+
+        return [(p.device, p.description or "") for p in list_ports.comports()]
+    except Exception:  # noqa: BLE001
+        logger.debug("serial port enumeration failed", exc_info=True)
+        return []
+
+
+# Standard ladder for the Modbus/ASCII devices on this bench.
+BAUDRATES = (1200, 2400, 4800, 9600, 14400, 19200, 38400, 57600, 115200,
+             230400, 250000, 460800, 500000, 921600)
+
+
 class _FormPage(QWidget):
     """A form over a settings dict: fields declared via add_* and
     applied back on _apply(). ``cfg`` is the dict itself (settings
     sections are top-level only — device dicts come from
-    settings.device(key))."""
+    settings.device(key)).
+
+    Fields added before any ``add_group()`` land in an ungrouped form at
+    the top; each ``add_group(title)`` opens a titled box that collects
+    everything declared after it.
+    """
 
     def __init__(self, settings, cfg: dict, annotation: str | None = None,
                  parent=None):
@@ -104,16 +133,62 @@ class _FormPage(QWidget):
         self._settings = settings
         self._cfg = cfg
         self._fields: list[_Field] = []
-        self._form = QFormLayout(self)
-        self._form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
-        self._form.setVerticalSpacing(6)
-        self._form.setFieldGrowthPolicy(
-            QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
+        self._layout = QVBoxLayout(self)
+        self._layout.setContentsMargins(9, 9, 9, 9)
+        self._layout.setSpacing(10)
+        # Kept last so groups sit at the top of the page instead of being
+        # stretched to fill it.
+        self._layout.addStretch(1)
+        self._form: QFormLayout | None = None
         if annotation:
             label = QLabel(annotation)
             label.setObjectName("hint")
             label.setWordWrap(True)
+            self._layout.insertWidget(self._layout.count() - 1, label)
+
+    # --- layout -----------------------------------------------------------
+
+    def _new_form(self, target: QVBoxLayout) -> QFormLayout:
+        form = QFormLayout()
+        form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
+        form.setVerticalSpacing(6)
+        form.setHorizontalSpacing(12)
+        form.setFieldGrowthPolicy(
+            QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
+        if target is self._layout:
+            # before the trailing stretch that keeps groups top-aligned
+            target.insertLayout(target.count() - 1, form)
+        else:
+            target.addLayout(form)
+        self._form = form
+        return form
+
+    @property
+    def _target(self) -> QFormLayout:
+        """The form new fields go into (created on first use)."""
+        if self._form is None:
+            self._new_form(self._layout)
+        return self._form
+
+    def add_group(self, title: str) -> QGroupBox:
+        """Open a titled group; subsequent add_* calls land inside it."""
+        box = QGroupBox(title)
+        inner = QVBoxLayout(box)
+        inner.setContentsMargins(9, 6, 9, 9)
+        self._layout.insertWidget(self._layout.count() - 1, box)
+        self._new_form(inner)
+        return box
+
+    def add_hint(self, text: str) -> QLabel:
+        """A wrapped dim note inside the CURRENT group (or the page)."""
+        label = QLabel(text)
+        label.setObjectName("hint")
+        label.setWordWrap(True)
+        if self._form is None:
+            self._layout.insertWidget(self._layout.count() - 1, label)
+        else:
             self._form.addRow(label)
+        return label
 
     # --- field builders ---------------------------------------------------
 
@@ -133,7 +208,7 @@ class _FormPage(QWidget):
         box.setDecimals(decimals)
         box.setValue(round(value * scale, decimals))
         box.setToolTip(f"{label} {annotation}" if annotation else label)
-        self._form.addRow(self._label(label, annotation), box)
+        self._target.addRow(self._label(label, annotation), box)
         _Field(self, key, label, box, box.setValue, box.value, annotation,
                scale)
 
@@ -142,20 +217,22 @@ class _FormPage(QWidget):
         box = QSpinBox()
         box.setRange(lo, hi)
         box.setValue(int(self._cfg.get(key, lo)))
-        self._form.addRow(self._label(label, annotation), box)
+        self._target.addRow(self._label(label, annotation), box)
         _Field(self, key, label, box, box.setValue, box.value, annotation)
 
     def add_text(self, key: str, label: str,
                  annotation: str | None = None) -> None:
         edit = QLineEdit(str(self._cfg.get(key, "")))
-        self._form.addRow(self._label(label, annotation), edit)
+        self._target.addRow(self._label(label, annotation), edit)
         _Field(self, key, label, edit, edit.setText, edit.text, annotation)
 
     def add_bool(self, key: str, label: str, default: bool = False,
                  annotation: str | None = None) -> None:
         check = QCheckBox(label)
         check.setChecked(bool(self._cfg.get(key, default)))
-        self._form.addRow("", check)
+        if annotation:
+            check.setToolTip(f"{label} {annotation}")
+        self._target.addRow("", check)
         _Field(self, key, label, check, check.setChecked, check.isChecked,
                annotation)
 
@@ -166,9 +243,78 @@ class _FormPage(QWidget):
         current = str(self._cfg.get(key, choices[0]))
         if current in choices:
             combo.setCurrentText(current)
-        self._form.addRow(self._label(label, annotation), combo)
+        self._target.addRow(self._label(label, annotation), combo)
         _Field(self, key, label, combo, combo.setCurrentText,
                combo.currentText, annotation)
+
+    def add_port(self, key: str, label: str,
+                 annotation: str | None = None) -> None:
+        """COM port picker: the ports actually present, plus the
+        configured one when it is not detected (a device that is simply
+        unplugged must not lose its setting), plus a Refresh button.
+
+        The value stored is the port NAME — the description is display
+        only.
+        """
+        current = str(self._cfg.get(key, ""))
+        row = QWidget()
+        layout = QHBoxLayout(row)
+        layout.setContentsMargins(0, 0, 0, 0)
+        combo = QComboBox()
+        combo.setMinimumWidth(160)
+        refresh = QPushButton("Refresh")
+        refresh.setObjectName("compact")
+        refresh.setToolTip("Re-scan the serial ports")
+        layout.addWidget(combo, stretch=1)
+        layout.addWidget(refresh)
+
+        def fill() -> None:
+            keep = str(combo.currentData() or current)
+            ports = list_serial_ports()
+            combo.blockSignals(True)
+            combo.clear()
+            for device, description in ports:
+                text = f"{device} — {description}" if description else device
+                combo.addItem(text, device)
+            if keep and keep not in [p for p, _ in ports]:
+                combo.insertItem(0, f"{keep} (not detected)", keep)
+            if not keep:
+                # Nothing configured: offer an explicit "unset" entry
+                # instead of preselecting an enumerated port — an Apply
+                # must never silently bind a device to a random COM port.
+                combo.insertItem(0, "(not set)", "")
+                combo.setCurrentIndex(0)
+            else:
+                index = combo.findData(keep)
+                combo.setCurrentIndex(index if index >= 0 else 0)
+            combo.blockSignals(False)
+
+        fill()
+        refresh.clicked.connect(fill)
+        self._target.addRow(self._label(label, annotation), combo)
+        _Field(self, key, label, combo,
+               lambda value: combo.setCurrentIndex(
+                   max(0, combo.findData(str(value)))),
+               lambda: combo.currentData() or "", annotation)
+
+    def add_baud(self, key: str, label: str,
+                 annotation: str | None = None) -> None:
+        """Baudrate picker over the standard ladder (the configured value
+        is inserted when it is not on it)."""
+        combo = QComboBox()
+        values = [int(v) for v in BAUDRATES]
+        current = int(self._cfg.get(key, BAUDRATES[0]) or BAUDRATES[0])
+        if current not in values:
+            values.append(current)
+            values.sort()
+        for value in values:
+            combo.addItem(str(value), value)
+        combo.setCurrentIndex(max(0, combo.findData(current)))
+        self._target.addRow(self._label(label, annotation), combo)
+        _Field(self, key, label, combo,
+               lambda value: combo.setCurrentIndex(
+                   max(0, combo.findData(int(value)))),
+               lambda: int(combo.currentData()), annotation)
 
     def add_dir(self, key: str, label: str, title: str = "Choose folder") -> None:
         row = QWidget()
@@ -181,7 +327,7 @@ class _FormPage(QWidget):
             lambda: self._browse_dir(edit, title))
         layout.addWidget(edit, stretch=1)
         layout.addWidget(browse)
-        self._form.addRow(label, row)
+        self._target.addRow(label, row)
         _Field(self, key, label, edit, edit.setText, edit.text)
 
     @staticmethod
@@ -191,10 +337,10 @@ class _FormPage(QWidget):
             edit.setText(chosen)
 
     def add_custom(self, widget: QWidget, label: str) -> None:
-        self._form.addRow(label, widget)
+        self._target.addRow(label, widget)
 
     def add_custom_row(self, widget: QWidget) -> None:
-        self._form.addRow(widget)
+        self._target.addRow(widget)
 
     # --- apply --------------------------------------------------------------
 
@@ -210,11 +356,12 @@ class GeneralPage(_FormPage):
         self._qapp = qapp
         self._debug_cfg = settings.section("debug")
 
+        self.add_group("Appearance")
         size = QSpinBox()
         size.setRange(8, 14)
         size.setValue(int(self._cfg.get("font_size", 12)))
         size.valueChanged.connect(self._on_font_size)
-        self._form.addRow("Font size (px)", size)
+        self._target.addRow("Font size (px)", size)
         self._font_size = size
 
         self.add_custom_row(QLabel("Theme: dark (fixed)"))
@@ -251,7 +398,7 @@ class GeneralPage(_FormPage):
         row.addWidget(self._accent_combo, stretch=1)
         row.addWidget(self._accent_edit, stretch=1)
         row.addWidget(self._accent_pick)
-        self._form.addRow("Accent", accent_row)
+        self._target.addRow("Accent", accent_row)
         current = str(self._cfg.get("accent", "#00BCBC"))
         matching = [i for i in range(self._accent_combo.count())
                     if self._accent_combo.itemData(i)
@@ -274,14 +421,15 @@ class GeneralPage(_FormPage):
         self._accent_pick.setEnabled(custom)
         self._last_valid_accent_idx = self._accent_combo.currentIndex()
 
+        self.add_group("Diagnostics")
         self._console = QCheckBox("Debug console (separate system window)")
         self._console.setChecked(bool(self._debug_cfg.get("console_enabled", True)))
         self._console.toggled.connect(self._on_console)
-        self._form.addRow("", self._console)
+        self._target.addRow("", self._console)
 
         self._verbose = QCheckBox("Verbose logging (applies on restart)")
         self._verbose.setChecked(bool(self._debug_cfg.get("verbose_logging", True)))
-        self._form.addRow("", self._verbose)
+        self._target.addRow("", self._verbose)
 
     # --- accent -------------------------------------------------------------
 
@@ -428,14 +576,18 @@ class TemperaturePage(QWidget):
         layout.addWidget(self._form_page)
 
         fp = self._form_page
-        fp.add_text("port", "Port", annotation=_RECONNECT)
-        fp.add_int("baudrate", "Baudrate", 1200, 115200, _RECONNECT)
+        fp.add_group("Connection")
+        fp.add_port("port", "Port", annotation=_RECONNECT)
+        fp.add_baud("baudrate", "Baudrate", annotation=_RECONNECT)
         fp.add_int("slave_address", "Modbus slave address", 1, 247,
                    _RECONNECT)
+        fp.add_group("Safety limits")
         fp.add_float("safety_lo_c", "Safety low (°C)", -100, 400, 1)
         fp.add_float("safety_hi_c", "Safety high (°C)", -100, 400, 1)
+        fp.add_hint("Setpoint writes are refused outside this range "
+                    "(a hardware-protection gate, not a display limit).")
 
-        presets = QGroupBox("Setpoint presets")
+        presets = QGroupBox("Presets")
         preset_layout = QVBoxLayout(presets)
         self._presets = QTableWidget(0, 2)
         self._presets.setHorizontalHeaderLabels(["Name", "°C"])
@@ -497,11 +649,16 @@ class TemperaturePage(QWidget):
 def _device_page(settings, section: str, fields: list, annotation: str) \
         -> _FormPage:
     """fields: (kind, key, label, *args) tuples; section names a DEVICE
-    (settings.device)."""
+    (settings.device). "group"/"hint" specs carry no key — they open a
+    titled box / add a note for the fields that follow."""
     page = _FormPage(settings, settings.device(section), annotation)
     for spec in fields:
         kind = spec[0]
-        if kind == "float":
+        if kind == "group":
+            page.add_group(spec[1])
+        elif kind == "hint":
+            page.add_hint(spec[1])
+        elif kind == "float":
             page.add_float(*spec[1:])
         elif kind == "int":
             page.add_int(*spec[1:])
@@ -513,11 +670,60 @@ def _device_page(settings, section: str, fields: list, annotation: str) \
             page.add_combo(*spec[1:])
         elif kind == "dir":
             page.add_dir(*spec[1:])
+        elif kind == "port":
+            page.add_port(*spec[1:])
+        elif kind == "baud":
+            page.add_baud(*spec[1:])
+        else:
+            raise ValueError(f"Unknown preference field kind: {kind!r}")
     return page
+
+
+# Shown while a change needs a driver rebuild (flip is pushed live).
+_AXIS_HINT = ("Manual moves only — these never affect the position "
+              "readout, autofocus or the grid scan. Flip X↔Y swaps the "
+              "two axes: the Stage Control buttons X+/Y+ then drive the "
+              "other physical axis.")
+
+
+class CameraPage(_FormPage):
+    """Camera device page: connection-level knobs only. Exposure / gain /
+    white balance are workspace-dependent and live in the right panels.
+
+    The image flip is pushed to a RUNNING camera on Apply — no reconnect:
+    the backend applies it while decoding, so every consumer (live view,
+    autofocus, flake detection, snapshots) sees the same orientation.
+    """
+
+    def __init__(self, settings, manager=None, parent=None):
+        super().__init__(settings, settings.device("camera"), parent=parent)
+        self._manager = manager
+        self.add_group("Live capture")
+        self.add_int("resolution", "Live resolution (0=4K, 1=1080p)", 0, 1,
+                     _NEXT_CONNECT)
+        self.add_group("Image orientation")
+        self.add_bool("flip", "Rotate 180° (undo the optics' inversion)",
+                      True)
+        self.add_hint(
+            "The bench optics present the specimen rotated 180°; this "
+            "restores the real-world orientation for the live view, "
+            "autofocus, flake detection and the saved snapshots. It is "
+            "INDEPENDENT of the stage axis inversion (Hardware → Focus / "
+            "Zolix XYR / SigmaKoki XYZ → Axis direction) — flipping the "
+            "camera never inverts a stage and never changes the scan "
+            "direction.")
+
+    def _apply(self) -> None:
+        before = bool(self._cfg.get("flip", True))
+        super()._apply()
+        after = bool(self._cfg.get("flip", True))
+        if after != before and self._manager is not None:
+            self._manager.submit_camera("set_property", "flip", after)
 
 
 _RECONNECT = "applies after reconnect"
 _RESTART = "applies after restart"
+_NEXT_CONNECT = "applies on the next connect"
 
 
 def _build_pages(settings, qapp, manager, autofocus_service, parent):
@@ -534,47 +740,79 @@ def _build_pages(settings, qapp, manager, autofocus_service, parent):
 
     # Workspace-dependent camera settings (exposure/gain/WB/auto-gain)
     # live in the right panels only — the device page keeps the
-    # connection-level knobs.
-    cam_fields = [
-        ("int", "resolution", "Live resolution (0=4K, 1=1080p)", 0, 1,
-         _RECONNECT),
-    ]
+    # connection-level knobs and the sensor orientation.
     pages.append(("Hardware", "Camera",
-                  _device_page(settings, "camera", cam_fields, "")))
+                  CameraPage(settings, manager, parent)))
+    # NOTE on the speed ranges: a QSpinBox CLAMPS its range on
+    # construction, so a range narrower than the stored value silently
+    # rewrites the setting on any Apply (um_per_pulse_r was lost to this
+    # before). Ranges here always include the shipped defaults.
     focus_fields = [
-        ("text", "port", "Port", _RECONNECT),
-        ("int", "baudrate", "Baudrate", 9600, 460800, _RECONNECT),
-        ("int", "max_speed", "Max speed (steps/s)", 50, 5000, _RESTART),
+        ("group", "Connection"),
+        ("port", "port", "Port", _RECONNECT),
+        ("baud", "baudrate", "Baudrate", _RECONNECT),
+        ("group", "Manual controls"),
         ("int", "min_speed", "Min speed (steps/s)", 10, 1000, _RESTART),
+        ("int", "max_speed", "Max speed (steps/s)", 50, 5000, _RESTART),
+        ("bool", "invert", "Invert jog direction (triggers, keys, buttons)"),
+        ("hint", "Applies to manual focus only — autofocus and its sweeps "
+                 "are unaffected."),
+        ("group", "Travel"),
         ("float", "um_per_step", "µm per step", 0.01, 10, 0.01),
         ("float", "backlash_um", "Backlash (µm, mechanism)", 0.0, 50, 0.1),
-        ("bool", "slim_on", "Soft limits on"),
+        ("group", "Soft limits"),
+        ("bool", "slim_on", "Soft limits on (firmware SLIM)"),
         ("int", "slim_min", "Soft limit min (steps)", -2000000, 2000000),
         ("int", "slim_max", "Soft limit max (steps)", -2000000, 2000000),
     ]
     pages.append(("Hardware", "Focus",
                   _device_page(settings, "focus", focus_fields, "")))
     zolix_fields = [
-        ("text", "port", "Port", _RECONNECT),
-        ("int", "baudrate", "Baudrate", 9600, 460800, _RECONNECT),
+        ("group", "Connection"),
+        ("port", "port", "Port", _RECONNECT),
+        ("baud", "baudrate", "Baudrate", _RECONNECT),
         ("int", "slave_address", "Modbus slave address", 1, 247, _RECONNECT),
-        ("float", "um_per_pulse_xy", "µm per pulse XY", 0.01, 10, 0.01),
-        ("float", "um_per_pulse_r", "µm per pulse R", 0.0001, 0.1, 0.0001),
+        ("group", "Manual controls"),
         ("int", "slow_speed_pps", "Slow speed (pps)", 10, 10000, _RESTART),
         ("int", "fast_speed_pps", "Fast speed (pps)", 10, 100000, _RESTART),
+        ("int", "slow_speed_r", "Slow R speed (pps)", 10, 100000, _RESTART),
+        ("int", "fast_speed_r", "Fast R speed (pps)", 10, 200000, _RESTART),
+        ("int", "single_step", "Single step XY (pulses)", 1, 100000),
+        ("int", "single_step_r", "Single step R (pulses)", 1, 100000),
+        ("group", "Axis direction"),
+        ("bool", "invert_x", "Invert X"),
+        ("bool", "invert_y", "Invert Y"),
+        ("bool", "invert_r", "Invert R"),
+        ("bool", "flip_xy", "Flip X↔Y (swap the two axes)"),
+        ("hint", _AXIS_HINT),
+        ("group", "Scale"),
+        ("float", "um_per_pulse_xy", "µm per pulse XY", 0.01, 10, 0.01),
+        ("float", "um_per_pulse_r", "µm per pulse R", 0.0001, 0.1, 0.0001),
+        ("group", "Options"),
         ("bool", "rotation_enabled", "Rotation enabled"),
     ]
     pages.append(("Hardware", "Zolix XYR",
                   _device_page(settings, "zolix", zolix_fields, "")))
     sigm_fields = [
-        ("text", "port", "Port", _RECONNECT),
-        ("int", "baudrate", "Baudrate", 9600, 460800, _RECONNECT),
+        ("group", "Connection"),
+        ("port", "port", "Port", _RECONNECT),
+        ("baud", "baudrate", "Baudrate", _RECONNECT),
+        ("group", "Manual controls"),
+        ("int", "slow_speed_hz", "Slow speed XY (Hz)", 25, 2000, _RESTART),
+        ("int", "fast_speed_hz", "Fast speed XY (Hz)", 25, 2000, _RESTART),
+        ("int", "slow_speed_z", "Slow Z speed (Hz)", 25, 2000, _RESTART),
+        ("int", "fast_speed_z", "Fast Z speed (Hz)", 25, 2000, _RESTART),
+        ("int", "single_step", "Single step XY (steps)", 1, 100000),
+        ("int", "single_step_z", "Single step Z (steps)", 1, 100000),
+        ("group", "Axis direction"),
+        ("bool", "invert_x", "Invert X"),
+        ("bool", "invert_y", "Invert Y"),
+        ("bool", "invert_z", "Invert Z"),
+        ("bool", "flip_xy", "Flip X↔Y (swap the two axes)"),
+        ("hint", _AXIS_HINT),
+        ("group", "Scale"),
         ("float", "um_per_step_xy", "µm per step XY", 0.01, 10, 0.01),
         ("float", "um_per_step_z", "µm per step Z", 0.01, 10, 0.01),
-        ("int", "slow_speed_hz", "Slow speed (Hz)", 25, 500, _RESTART),
-        ("int", "fast_speed_hz", "Fast speed (Hz)", 25, 500, _RESTART),
-        ("int", "slow_speed_z", "Slow Z speed (Hz)", 25, 500, _RESTART),
-        ("int", "fast_speed_z", "Fast Z speed (Hz)", 25, 500, _RESTART),
     ]
     pages.append(("Hardware", "SigmaKoki XYZ",
                   _device_page(settings, "sigmakoki", sigm_fields, "")))
@@ -611,7 +849,9 @@ class PreferencesDialog(QDialog):
         for parent, title, page in _build_pages(settings, qapp, manager,
                                                 autofocus_service, self):
             self._pages.append(page)
-            self._stack.addWidget(page)
+            # Every page scrolls: a long device page (or a group that
+            # gained fields) must not push the buttons off a 620 px dialog.
+            self._stack.addWidget(self._scroll_area(page))
             if parent is not None:
                 # NOTE: not setdefault — the default QTreeWidgetItem(...)
                 # would be constructed eagerly every iteration and each
@@ -643,6 +883,19 @@ class PreferencesDialog(QDialog):
             self._on_apply)
         buttons.rejected.connect(self.reject)
         root.addWidget(buttons)
+
+    @staticmethod
+    def _scroll_area(page: QWidget) -> QScrollArea:
+        """Wrap a page so tall content scrolls instead of stretching the
+        dialog (widgetResizable keeps the page as wide as the viewport —
+        without it the forms collapse to their minimum width)."""
+        area = QScrollArea()
+        area.setWidgetResizable(True)
+        area.setFrameShape(QFrame.Shape.NoFrame)
+        area.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        area.setWidget(page)
+        return area
 
     def _on_nav_changed(self, current: QTreeWidgetItem,
                         _previous) -> None:

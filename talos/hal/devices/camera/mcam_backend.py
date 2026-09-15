@@ -56,6 +56,8 @@ class _SMCAMINFO(ctypes.Structure):
 
 
 class McamCamera(Camera):
+    APPLIES_FLIP = True
+
     def __init__(self, config: dict[str, Any]):
         super().__init__(config)
         self._dll = None
@@ -164,6 +166,10 @@ class McamCamera(Camera):
         return self._decode(raw)
 
     def _decode(self, raw: np.ndarray) -> np.ndarray:
+        """Single frame egress for both the live fetch and the snapshot."""
+        return self.apply_flip(self._decode_frame(raw))
+
+    def _decode_frame(self, raw: np.ndarray) -> np.ndarray:
         """Decode the raw buffer. The processed image is typically 8-bit
         RGB (color processing on) at width×height; BGR16/Bayer variants
         are covered defensively."""
@@ -199,6 +205,8 @@ class McamCamera(Camera):
                 "exposure_us": None, "gain": None}
 
     def set_property(self, name: str, value: Any) -> None:
+        if self.try_set_flip(name, value):
+            return
         # The parameter setter export (MCammSet) exists in the DLL but its
         # prototype is not in the available headers — deferred; the MCam
         # defaults give full-quality color frames regardless.

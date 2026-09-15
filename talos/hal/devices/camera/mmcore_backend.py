@@ -23,6 +23,8 @@ _ADAPTERS = (("AxioCam", ("Zeiss AxioCam", "AxioCam")), ("Usb3CamHS", ("Camera",
 
 
 class MMCoreCamera(Camera):
+    APPLIES_FLIP = True
+
     def __init__(self, config: dict[str, Any]):
         super().__init__(config)
         self.adapter_dir = config.get("mmcore_adapter_dir") or ""
@@ -130,10 +132,10 @@ class MMCoreCamera(Camera):
         if img is None:
             return None
         if img.ndim == 2:
-            return cv2.cvtColor(img, cv2.COLOR_GRAY2RGB)
+            return self.apply_flip(cv2.cvtColor(img, cv2.COLOR_GRAY2RGB))
         if img.shape[2] == 4:  # RGBA -> RGB
-            return img[:, :, :3].copy()
-        return img.copy()
+            return self.apply_flip(img[:, :, :3].copy())
+        return self.apply_flip(img.copy())
 
     def get_properties(self) -> dict[str, Any]:
         props: dict[str, Any] = {"adapter": self._adapter,
@@ -151,6 +153,8 @@ class MMCoreCamera(Camera):
         return props
 
     def set_property(self, name: str, value: Any) -> None:
+        if self.try_set_flip(name, value):
+            return
         if self._mmc is None:
             raise DeviceConnectionError("Camera not connected")
         if name == "exposure_ms":

@@ -147,11 +147,12 @@ def test_float_fields_keep_their_precision(dialog):
     assert zolix_cfg["um_per_pulse_xy"] == pytest.approx(0.625)
 
 
-def test_camera_page_has_only_resolution(dialog):
+def test_camera_page_keeps_device_level_fields_only(dialog):
     # exposure/gain/WB/auto-gain are workspace-dependent → right panels
-    # only; the device page keeps the connection-level knobs.
+    # only; the device page keeps the resolution and the sensor
+    # orientation (the flip is a decode-time software rotation).
     camera_page = dialog._pages[3]
-    assert [f.path for f in camera_page._fields] == ["resolution"]
+    assert [f.path for f in camera_page._fields] == ["resolution", "flip"]
 
 
 def test_objectives_merged_page_present(dialog):

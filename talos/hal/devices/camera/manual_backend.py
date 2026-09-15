@@ -18,6 +18,8 @@ _IMAGE_EXTS = (".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp")
 
 
 class ManualCamera(Camera):
+    APPLIES_FLIP = True
+
     def __init__(self, config: dict[str, Any]):
         super().__init__(config)
         self.folder = Path(config.get("manual_folder", "."))
@@ -63,12 +65,15 @@ class ManualCamera(Camera):
         img = cv2.imread(str(path), cv2.IMREAD_COLOR)
         if img is None:
             return None
-        return cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+        return self.apply_flip(cv2.cvtColor(img, cv2.COLOR_BGR2RGB))
 
     def get_properties(self) -> dict[str, Any]:
-        return {"folder": str(self.folder), "fps": self.fps, "n_files": len(self._files)}
+        return {"folder": str(self.folder), "fps": self.fps,
+                "n_files": len(self._files), "flip": self.flip_enabled}
 
     def set_property(self, name: str, value: Any) -> None:
+        if self.try_set_flip(name, value):
+            return
         if name == "fps":
             self.fps = float(value)
         else:

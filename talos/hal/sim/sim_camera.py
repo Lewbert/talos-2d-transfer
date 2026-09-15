@@ -17,6 +17,8 @@ from talos.hal.base import Camera
 
 
 class SimCamera(Camera):
+    APPLIES_FLIP = True
+
     def __init__(self, config: dict[str, Any] | None = None):
         super().__init__(config or {})
         config = self.config
@@ -64,6 +66,12 @@ class SimCamera(Camera):
     # ------------------------------------------------------------------
 
     def _render(self) -> np.ndarray:
+        """Single frame egress: live fetch AND the snapshot render both come
+        through here, so the orientation flip lands before any scale-bar
+        burn (mirroring the SmartCam backend's contract)."""
+        return self.apply_flip(self._render_scene())
+
+    def _render_scene(self) -> np.ndarray:
         h, w = self.height, self.width
         # Textured background (substrate-like) with smooth illumination.
         x = np.linspace(0, 4 * np.pi, w)
@@ -104,9 +112,11 @@ class SimCamera(Camera):
         return self._last_frame_t
 
     def get_properties(self) -> dict[str, Any]:
-        return dict(self._props)
+        return {**self._props, "flip": self.flip_enabled}
 
     def set_property(self, name: str, value: Any) -> None:
+        if self.try_set_flip(name, value):
+            return
         if name not in self._props:
             raise KeyError(f"Unknown camera property: {name}")
         self._props[name] = value

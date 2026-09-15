@@ -39,6 +39,12 @@ _VALUE_MAP: dict[str, dict[str, tuple[str, float]]] = {
                           "manual": ("color_temperature", 1.0),
                           "sim": ("color_temperature", 1.0)},
     "color_mode": {"smartcam": ("color_mode", 1.0), "sim": ("color_mode", 1.0)},
+    # software-level, shared by EVERY backend (the 180° decode-time
+    # rotation) — a missing row raises KeyError on the first UI write
+    "flip": {"smartcam": ("flip", 1.0), "harvesters": ("flip", 1.0),
+             "mmcore": ("flip", 1.0), "mcam": ("flip", 1.0),
+             "directshow": ("flip", 1.0), "manual": ("flip", 1.0),
+             "sim": ("flip", 1.0)},
 }
 
 # native name -> (canonical name, transform to canonical units)
@@ -49,7 +55,7 @@ _TRANSFORM = {
 }
 
 _CANONICAL_KEYS = ("exposure_us", "gain", "white_balance", "color_temperature",
-                   "color_mode", "fps")
+                   "color_mode", "fps", "flip")
 
 _WB_NAMES = {0: "Off", 1: "Continuous", 2: "Once"}
 

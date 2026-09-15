@@ -17,6 +17,8 @@ from talos.hal.base import Camera, DeviceConnectionError
 
 
 class DirectShowCamera(Camera):
+    APPLIES_FLIP = True
+
     def __init__(self, config: dict[str, Any]):
         super().__init__(config)
         self.index = int(config.get("camera_index", 0))
@@ -59,7 +61,7 @@ class DirectShowCamera(Camera):
         ok, frame = self._cap.read()
         if not ok or frame is None:
             return None
-        return cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        return self.apply_flip(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
 
     def get_properties(self) -> dict[str, Any]:
         cap = self._cap
@@ -72,6 +74,8 @@ class DirectShowCamera(Camera):
         }
 
     def set_property(self, name: str, value: Any) -> None:
+        if self.try_set_flip(name, value):
+            return
         mapping = {
             "exposure": cv2.CAP_PROP_EXPOSURE,
             "gain": cv2.CAP_PROP_GAIN,

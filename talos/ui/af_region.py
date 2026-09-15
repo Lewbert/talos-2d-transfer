@@ -41,6 +41,20 @@ def sanitize_roi(norm) -> tuple[float, float, float, float] | None:
     return (round(x, 4), round(y, 4), round(w, 4), round(h, 4))
 
 
+def mirror_roi_norm(norm) -> tuple[float, float, float, float] | None:
+    """The same region after the frame is rotated 180° (x' = 1 − x − w).
+
+    Used when the camera flip changes: the region is stored in FRAME
+    coordinates, so without the mirror autofocus would keep measuring the
+    diagonally opposite corner of the specimen.
+    """
+    roi = sanitize_roi(norm)
+    if roi is None:
+        return None
+    x, y, w, h = roi
+    return sanitize_roi((1.0 - x - w, 1.0 - y - h, w, h))
+
+
 class AfRegionController(QObject):
     """The AF measurement region, persisted in ``autofocus.default_roi_norm``.
 

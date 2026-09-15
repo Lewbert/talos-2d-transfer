@@ -30,7 +30,7 @@ from talos.cv.scale_bar import burn_spec
 from talos.models import StagePosition
 from talos.objective_offsets import compute_offset_move
 from talos.ui.auto_gain import AutoGainController
-from talos.ui.af_region import AfRegionController
+from talos.ui.af_region import AfRegionController, mirror_roi_norm
 from talos.ui.calibration_context import CalibrationContext
 from talos.ui.camera_profiles import (
     nav_profile,
@@ -90,6 +90,9 @@ class MainWindow(QMainWindow):
         # the AF detail window and the live-view overlay all reflect it,
         # and autofocus itself reads the same persisted value.
         self._af_roi = AfRegionController(settings)
+        # The camera flip rotates every frame 180° — remember the value the
+        # ROI and the flake table were built against (see _sync_camera_flip).
+        self._camera_flip = bool(settings.device("camera").get("flip", True))
 
         # --- workspaces -------------------------------------------------
         self._tabs = QTabWidget()
@@ -456,6 +459,32 @@ class MainWindow(QMainWindow):
         strip = getattr(self, "_strip", None)
         if strip is not None:
             strip.reload_settings()
+        self._sync_camera_flip()
+
+    def _sync_camera_flip(self) -> None:
+        """React to a camera-flip change (Preferences → Hardware → Camera).
+
+        The flip is pushed to the running camera by the page itself; here
+        the frame-space state that was built against the OLD orientation is
+        carried over: the AF region is mirrored, and the detected-flake
+        table is dropped (its pixel centroids are stale, and
+        "go to flake" would command a mirrored physical move).
+        """
+        flip = bool(self._settings.device("camera").get("flip", True))
+        if flip == self._camera_flip:
+            return
+        self._camera_flip = flip
+        roi = self._af_roi.roi()
+        if roi is not None:
+            self._af_roi.set_roi(mirror_roi_norm(roi))
+        invalidate = getattr(self._sample_finding, "invalidate_detections",
+                             None)
+        if callable(invalidate):
+            invalidate()
+        self._on_log_message(
+            "warning",
+            "Camera flip changed — the flake table was cleared; re-check the "
+            "µm/px calibration if saved images are used for measurements")
 
     def _on_about(self) -> None:
         QMessageBox.about(

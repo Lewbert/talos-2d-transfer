@@ -123,7 +123,8 @@
         "capture_latency_ms": 15,
         "reopen_settle_s": 10.0
       },
-      "resolution": 1
+      "resolution": 1,
+      "flip": true
     }
   },
   "input": {

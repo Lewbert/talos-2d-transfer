@@ -29,6 +29,8 @@ logging.getLogger("genicam").setLevel(logging.WARNING)
 
 
 class HarvestersCamera(Camera):
+    APPLIES_FLIP = True
+
     def __init__(self, config: dict[str, Any]):
         super().__init__(config)
         self.cti_path = config.get("gentl_cti_path") or ""
@@ -108,7 +110,7 @@ class HarvestersCamera(Camera):
                 frame = convert_to_rgb(component.data, component.width,
                                        component.height, component.data_format)
                 self._last_format = str(component.data_format).split(".")[-1]
-                return frame
+                return self.apply_flip(frame)
         except Exception as exc:  # noqa: BLE001
             logger.debug("fetch failed: %s", exc)
             return None
@@ -139,6 +141,8 @@ class HarvestersCamera(Camera):
         return props
 
     def set_property(self, name: str, value: Any) -> None:
+        if self.try_set_flip(name, value):
+            return
         if self._node_map is None:
             raise DeviceConnectionError("Camera not connected")
         node_name = {

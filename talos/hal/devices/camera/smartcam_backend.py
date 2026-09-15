@@ -106,6 +106,8 @@ _EVENT_CB = ctypes.CFUNCTYPE(None, ctypes.c_int, ctypes.c_void_p)
 
 
 class SmartCamCamera(Camera):
+    APPLIES_FLIP = True
+
     def __init__(self, config: dict[str, Any]):
         super().__init__(config)
         self._dll = None
@@ -432,6 +434,13 @@ class SmartCamCamera(Camera):
         return self._latency_cache_s
 
     def _decode(self, raw: np.ndarray) -> np.ndarray | None:
+        """Single frame egress: live fetch AND the 4K snapshot both come
+        through here, so the orientation flip is applied once, before any
+        scale-bar burn (a flip after the burn would mirror the bar and its
+        label in every saved image)."""
+        return self.apply_flip(self._decode_frame(raw))
+
+    def _decode_frame(self, raw: np.ndarray) -> np.ndarray | None:
         if self._forced_format:
             return self._decode_format(raw, self._forced_format)
         w, h = self._width, self._height
@@ -459,6 +468,10 @@ class SmartCamCamera(Camera):
     # ------------------------------------------------------------------
 
     def set_property(self, name: str, value: Any) -> None:
+        # flip is a SOFTWARE property (the DLL has no such parameter) — it
+        # must never reach ApiCam_SetParameterValue.
+        if self.try_set_flip(name, value):
+            return
         if name not in PROPERTIES:
             raise KeyError(f"Unknown camera property: {name}")
         if not self.is_connected:
@@ -558,6 +571,8 @@ class SmartCamCamera(Camera):
             "format": self._forced_format or "nv12",
             "transfer_formats": TRANSFER_FORMATS,
             "dll": self._dll_path,
+            # software property — deliberately outside the readback cache
+            "flip": self.flip_enabled,
         }
         # The five parameter queries below each stall frame delivery
         # ~330 ms (hardware-measured), i.e. ~1.6 s of frozen live view per

@@ -239,6 +239,20 @@ class SampleFindingWorkspace(QWidget):
     def on_frame(self, frame: np.ndarray) -> None:
         self._last_frame = frame
 
+    def invalidate_detections(self) -> None:
+        """Drop the detected flakes — called when the camera flip changes.
+
+        The table holds pixel centroids from the previous frame
+        orientation: after a 180° rotation they point at the diagonally
+        opposite spot, and "Go to selected flake" would drive the stage to
+        a mirrored position.
+        """
+        if not self._flakes:
+            return
+        self._flakes = []
+        self._fill_table()
+        self._status.setText("Flakes cleared (camera orientation changed)")
+
     def _active_calibration(self) -> ObjectiveCalibration:
         if self._calibration is not None:
             return self._calibration.calibration()
