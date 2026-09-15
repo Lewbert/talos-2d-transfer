@@ -1,5 +1,5 @@
 {
-  "_version": 4,
+  "_version": 6,
   "selected_objective": 0,
   "objective_offsets_enabled": true,
   "display": {
@@ -23,7 +23,8 @@
     "verbose_logging": true
   },
   "origin": {
-    "xyr": {"x": 0, "y": 0, "r": 0},
+    "xyr": {"x_pulses": 0, "y_pulses": 0, "r_pulses": 0,
+            "x_um": 0.0, "y_um": 0.0, "r_deg": 0.0},
     "focus": 0
   },
   "devices": {
@@ -114,7 +115,6 @@
       "auto_gain_interval_ms": 500,
       "auto_gain_settle_s": 1.0,
       "auto_gain_stability": 8.0,
-      "display_fps": 20,
       "scan": {
         "exposure_us": 40000,
         "gain": 4.0,
@@ -186,10 +186,6 @@
     "sigma_steps": 0.0,
     "near_window_steps": 0.0,
     "coarse_direction": 0,
-    "preflight_check": true,
-    "preflight_luma_lo": 15.0,
-    "preflight_luma_hi": 245.0,
-    "preflight_min_score": 1.0,
     "coarse_speed_base_um_s": 100.0,
     "window_plus_um": 500.0,
     "window_minus_um": 500.0,
@@ -231,7 +227,6 @@
   ],
   "scan": {
     "overlap": 0.10,
-    "default_dir": "Documents\\TALOS_scans",
     "fov_x_um": 700.0,
     "fov_y_um": 390.0,
     "min_flake_area_um2": 30.0,
@@ -239,10 +234,8 @@
     "height_um": 1000.0
   },
   "ui": {
-    "theme": "dark",
     "accent": "#00BCBC",
     "font_size": 12,
-    "language": "en",
     "collapsed_sections": {"nav": [], "scan": []}
   }
 }

@@ -33,7 +33,6 @@ from PySide6.QtWidgets import (
 )
 
 from talos.hal.base import Axis
-from talos.hal.devices.sigmakoki import SPEED_LEVEL_TO_HZ
 from talos.ui.theme import DANGER, LED_OFF, TEXT_DIM
 from talos.ui.widgets.trigger_bar import TriggerBarWidget
 
@@ -134,16 +133,7 @@ def parse_sigmakoki(payload: dict) -> dict:
         except (TypeError, ValueError):
             return 0
 
-    def level(key: str) -> int:
-        try:
-            return int(status.get(key, 0))
-        except (TypeError, ValueError):
-            return 0
-
-    levels = {axis: level(f"{axis}spd") for axis in ("x", "y", "z")}
     return {"x": steps("X"), "y": steps("Y"), "z": steps("Z"),
-            "levels": levels,
-            "speed_hz": float(SPEED_LEVEL_TO_HZ.get(levels["z"], 0.0)),
             "limits": _limit_flags(payload)}
 
 
@@ -152,8 +142,6 @@ def parse_focus(payload: dict) -> dict:
     return {
         "pos": int(status.get("pos", 0)),
         "mode": str(status.get("mode", "—")),
-        "slim_bounds": payload.get("slim_bounds"),
-        "slim_on": bool(status.get("slim_on")),
         "blocked": str(status.get("blocked_dir", "0")),
     }
 
@@ -468,7 +456,6 @@ class HardwareStrip(QWidget):
         focus.setMinimumWidth(240)
         self._focus_pos = QLabel("—")
         self._focus_pos.setObjectName("readout")
-        self._focus_pos.setMinimumWidth(160)  # fits "123.4 µm · 123456 st"
         self._focus_pos.setAlignment(Qt.AlignmentFlag.AlignCenter)
         focus.add(self._focus_pos)
         # The same widget as the stages' state word — same slot, same
@@ -499,16 +486,16 @@ class HardwareStrip(QWidget):
             temp.add(field, stretch=1)
         layout.addWidget(temp, stretch=_SECTION_STRETCH)
 
-        layout.addStretch(0)
         self.setFixedHeight(56)
         self.setMinimumWidth(0)   # the sections compress; nothing clips
 
-    #: Below this width the four sections cannot show every indicator —
-    #: see _StageSection.set_compact. The number is the widest a
-    #: NON-compact stage panel needs: 12 margins + 57 enable + 8 + 59 state
-    #: word + 8 + 180 readout + 8 + 44 dots = 376, so 4×376 + 3×6 + 12 =
-    #: 1534 for the whole row. (It used to be 1150, which let the panels
-    #: overflow their own frames between 1150 and ~1500.)
+    #: Below this width the four sections cannot show every indicator — see
+    #: _StageSection.set_compact. 1540 = the widest a NON-compact stage panel
+    #: needs (12 margins + 57 enable + 8 + 59 state word + 8 + 180 readout +
+    #: 8 + 44 dots = 376) × 4 panels, plus 3 × 6 inter-panel spacing and the
+    #: row's 12 px margins = 1534, rounded up so the threshold errs on the
+    #: compact side. (It used to be 1150, which let the panels overflow their
+    #: own frames between 1150 and ~1500.)
     COMPACT_WIDTH = 1540
 
     def resizeEvent(self, event) -> None:  # noqa: N802
@@ -520,8 +507,14 @@ class HardwareStrip(QWidget):
         # panel at the 1024 px floor with room to spare: focus
         # 12+100+8+59+8+50, TEMP 12+3×72+2×8, stage 12+57+8+59+8+92 (the
         # state word's 59 is fixed and cannot give).
+        # The focus readout's 160 is measured, not guessed: in the #readout
+        # font the common worst case "123.4 µm · 123456 st" needs 140 px and
+        # the signed one 154 px, so the earlier 140 was 4-14 px short of what
+        # it claimed to fit (only a 5-digit µm AND step count exceeds 160,
+        # i.e. >24 mm of focus travel). The compact 100 is the floor where
+        # the trigger bar gives up its space instead.
         self._triggers.setMinimumWidth(50 if compact else 130)
-        self._focus_pos.setMinimumWidth(100 if compact else 140)
+        self._focus_pos.setMinimumWidth(100 if compact else 160)
         for field in (self._temp_pv, self._temp_sv, self._temp_out):
             field.setMinimumWidth(72 if compact else 90)
 

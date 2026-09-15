@@ -699,13 +699,16 @@ class MainWindow(QMainWindow):
         self._on_log_message("info", "Focus origin stored")
 
     def _restore_origins(self) -> None:
+        """The stored stage/focus origin. Legacy ``{"x","y","r"}`` keys are
+        renamed by the settings migration (config._normalize), so the reader
+        needs no fallback."""
         origin = self._settings.section("origin")
         xyr = origin.get("xyr") or {}
         if xyr:
             self._state.set_stage_origin(StagePosition(
-                x_pulses=int(xyr.get("x_pulses", xyr.get("x", 0))),
-                y_pulses=int(xyr.get("y_pulses", xyr.get("y", 0))),
-                r_pulses=int(xyr.get("r_pulses", xyr.get("r", 0))),
+                x_pulses=int(xyr.get("x_pulses", 0)),
+                y_pulses=int(xyr.get("y_pulses", 0)),
+                r_pulses=int(xyr.get("r_pulses", 0)),
                 x_um=float(xyr.get("x_um", 0.0)),
                 y_um=float(xyr.get("y_um", 0.0)),
                 r_deg=float(xyr.get("r_deg", 0.0))))
@@ -929,5 +932,9 @@ class MainWindow(QMainWindow):
         led = self._leds.get(key)
         if led is not None and "failed" in event:
             led.set_state(ERROR)
-        if "es" in event.lower() or "stop" in event.lower():
+        # Substring by design, but over the WORDS we mean (stop / estop /
+        # halt): the test used to be `"es" in event.lower() or ...`, so any
+        # future event containing "es" — reset, resume, message — would have
+        # started reporting itself for no reason.
+        if any(word in event.lower() for word in ("stop", "estop", "halt")):
             self._on_log_message("info", f"{key}: {event}")

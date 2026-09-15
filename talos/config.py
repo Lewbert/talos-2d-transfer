@@ -34,7 +34,11 @@ def load_defaults() -> dict:
             return json.load(fh)
     except (OSError, json.JSONDecodeError) as exc:
         logger.warning("Could not load bundled defaults: %s", exc)
-        return {"_version": 3}
+        # The CURRENT schema marker — nothing gates on it (the migrations are
+        # detection-based), but a stale number here was one of three
+        # disagreeing values (defaults said 4, this said 3, _normalize logged
+        # "v5"), and a test pinned the wrong one.
+        return {"_version": 6}
 
 
 # Keys superseded by schema v3 (autofocus is µm-based now; the focus
@@ -52,7 +56,7 @@ _DEAD_KEYS: dict[str, set[str]] = {
 
 def _normalize(data: dict) -> dict:
     """Detection-based migrations after the deep-merge (never version-
-    gated): drop dead keys, run the per-row legacy migrations (v4, v5),
+    gated): drop dead keys, run the per-row legacy migrations (v4-v6),
     then back-fill the objectives table from defaults LAST. Idempotent;
     user overrides survive."""
     dropped: list[str] = []
@@ -122,6 +126,20 @@ def _normalize(data: dict) -> dict:
             dropped.append(f"objectives[{i}].speed_multiplier "
                            "(superseded — af_speed_multiplier present)")
         del row["speed_multiplier"]
+    # v6: the stored stage origin moved from {"x","y","r"} to the pulse/µm
+    # key set the app writes. A legacy pair is RENAMED here so the reader no
+    # longer needs a fallback — main_window._restore_origins carried
+    # `xyr.get("x_pulses", xyr.get("x", 0))` as the migration.
+    origin = data.get("origin")
+    if isinstance(origin, dict):
+        xyr = origin.get("xyr")
+        if isinstance(xyr, dict):
+            for legacy, modern in (("x", "x_pulses"), ("y", "y_pulses"),
+                                   ("r", "r_pulses")):
+                if legacy in xyr and modern not in xyr:
+                    xyr[modern] = xyr[legacy]
+                    dropped.append(f"origin.xyr.{legacy} → {modern}")
+                xyr.pop(legacy, None)
     # Per-row backfill LAST: new columns (focus_manual_multiplier,
     # stage_speed_multiplier, px_um, …) land only on rows still missing
     # them, after the migrations have rewritten the legacy keys.
@@ -131,7 +149,8 @@ def _normalize(data: dict) -> dict:
                 rows[i].setdefault(key, copy.deepcopy(value))
     data["objectives"] = rows
     if dropped:
-        logger.info("Settings normalized to v5: %s", ", ".join(dropped))
+        logger.info("Settings normalized to the current schema: %s",
+                    ", ".join(dropped))
     return data
 
 

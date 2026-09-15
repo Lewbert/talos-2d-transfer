@@ -8,8 +8,9 @@ serializes). The strip parsers must read the REAL shapes.
 
 from dataclasses import asdict
 
+import pytest
+
 from talos.hal.base import Axis
-from talos.hal.devices.sigmakoki import SPEED_LEVEL_TO_HZ
 from talos.models import FocusStatus, StagePosition, StageStatus
 from talos.ui.widgets.hardware_strip import (
     format_focus_pos,
@@ -18,6 +19,17 @@ from talos.ui.widgets.hardware_strip import (
     parse_yudian,
     parse_zolix,
 )
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _qapp():
+    """The state-word and readout tests build QFont/QFontMetrics, which need
+    a QGuiApplication: running this file ALONE (no earlier test creating one)
+    did not fail the test — it killed the interpreter with a Windows access
+    violation, which reads like a code bug rather than a missing fixture."""
+    from PySide6.QtWidgets import QApplication
+
+    yield QApplication.instance() or QApplication([])
 
 
 def test_format_focus_pos():
@@ -56,7 +68,10 @@ def test_parse_zolix_idle_and_estop():
     assert parsed["estop"] is True
 
 
-def test_parse_sigmakoki_enum_keys_and_speed_levels():
+def test_parse_sigmakoki_enum_keys():
+    # the payload still carries the firmware's per-axis speed
+    # levels; nothing reads them (the strip shows positions and
+    # limits, the Stage Control panel has its own table).
     payload = {
         "device": "sigmakoki",
         "status": {"x": "100", "y": "200", "z": "300", "xspd": "0",
@@ -67,8 +82,6 @@ def test_parse_sigmakoki_enum_keys_and_speed_levels():
     assert parsed["x"] == 100
     assert parsed["y"] == 200
     assert parsed["z"] == 300
-    assert parsed["speed_hz"] == SPEED_LEVEL_TO_HZ[3]
-    assert parsed["levels"] == {"x": 0, "y": 2, "z": 3}
 
 
 def test_sigmakoki_moving_comes_from_the_position_not_the_level():
@@ -131,7 +144,6 @@ def test_parse_sigmakoki_falls_back_to_status_strings():
     parsed = parse_sigmakoki(payload)
     assert parsed["x"] == 42 and parsed["z"] == 44
     # speed level 0 maps to 25 Hz (the table has no "stopped" entry)
-    assert parsed["speed_hz"] == SPEED_LEVEL_TO_HZ[0]
 
 
 def test_temp_power_colour_ladder():
@@ -201,11 +213,9 @@ def test_parse_focus_and_yudian():
     focus = parse_focus({
         "device": "focus",
         "status": asdict(FocusStatus(pos=123, mode="IDLE", blocked_dir="0")),
-        "slim_bounds": (-1000, 2000),
     })
     assert focus["pos"] == 123
     assert focus["mode"] == "IDLE"
-    assert focus["slim_bounds"] == (-1000, 2000)
     assert focus["blocked"] == "0"
 
     yudian = parse_yudian(

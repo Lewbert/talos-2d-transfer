@@ -367,7 +367,6 @@ QScrollBar::handle:horizontal {{
 }}
 QScrollBar::add-line, QScrollBar::sub-line {{ width: 0; height: 0; }}
 QScrollBar::add-page, QScrollBar::sub-page {{ background: transparent; }}
-QLabel#h1 {{ font-size: 14px; font-weight: 700; }}
 QLabel#dim {{ color: {TEXT_DIM}; }}
 QLabel#ok {{ color: {OK}; }}
 QLabel#hint {{ color: {TEXT_DIM}; }}

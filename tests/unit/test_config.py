@@ -137,7 +137,9 @@ def test_load_applies_normalization(tmp_path):
     assert "jog_speed" not in settings.device("focus")
     assert "coarse_step" not in settings.section("autofocus")
     assert settings.section("autofocus")["quality_threshold"] == 0.5
-    assert settings.get("_version") == 4
+    # the schema marker: nothing gates on it, but it must match the
+    # bundled defaults (it used to disagree with them AND the code)
+    assert settings.get("_version") == 6
     assert len(settings.get("objectives")) == 5
 
 

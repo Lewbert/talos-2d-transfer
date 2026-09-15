@@ -105,6 +105,9 @@ class ZolixXYRStage(XYRStage):
         self.slave = int(config.get("slave_address", 1))
         self.timeout_s = float(config.get("timeout_s", 0.05))
         self.um_per_pulse_xy = float(config.get("um_per_pulse_xy", 0.625))
+        # DEGREES per pulse despite the key's name: r is a rotation, and
+        # every use below (r_deg = pulses × this, pulses = dr_deg ÷ this)
+        # is consistent with it. The key name is load-bearing in settings.
         self.um_per_pulse_r = float(config.get("um_per_pulse_r", 0.00125))
         self.slow_speed_pps = int(config.get("slow_speed_pps", 500))
         self.fast_speed_pps = int(config.get("fast_speed_pps", 2000))

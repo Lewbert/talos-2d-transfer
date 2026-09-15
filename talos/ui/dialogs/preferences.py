@@ -5,9 +5,11 @@ per-device Hardware pages (camera / focus / zolix XYR / sigmakoki XYZ /
 temperature). Workspace-dependent camera settings (exposure/gain/WB)
 live in the right panels only — not here.
 
-Connection parameters are annotated "applies after reconnect", speed
-parameters "applies after restart" (the ActionResolver caches speeds at
-construction). OK/Apply persist via the shared Settings instance.
+Connection parameters are annotated "reconnects on Apply" (the four serial
+devices are rebuilt on the spot; the CAMERA is not in that path, so its
+fields say "applies after an app restart"). Manual-control values are
+applied live through InputSystem.reload_settings. OK/Apply persist via the
+shared Settings instance.
 """
 
 from __future__ import annotations
@@ -498,8 +500,6 @@ class AutoFocusPage(QWidget):
     and the rough-scan speed base live in the right-panel AF group
     (per-objective multipliers apply at AF start)."""
 
-    _RECONNECT = "applies after restart"
-
     def __init__(self, settings, autofocus_service, parent=None):
         super().__init__(parent)
         self._settings = settings
@@ -795,7 +795,10 @@ def _build_pages(settings, qapp, manager, autofocus_service, parent):
         ("int", "slave_address", "Modbus slave address", 1, 247, _RECONNECT),
         ("group", "Scale — µm per pulse"),
         ("float", "um_per_pulse_xy", "µm per pulse XY", 0.01, 10, 0.01),
-        ("float", "um_per_pulse_r", "µm per pulse R", 0.0001, 0.1, 0.0001),
+        # the historical key name says µm, the value is DEGREES per
+        # pulse (0.00125° ≈ 4.5 arcsec) — the driver divides dr_deg
+        # by it, and the label has to say so
+        ("float", "um_per_pulse_r", "° per pulse R", 0.0001, 0.1, 0.0001),
         ("hint", _SCALE_HINT),
         ("group", "Manual control — jog speeds & steps"),
         ("int", "slow_speed_pps", "Slow speed (pps)", 10, 10000),

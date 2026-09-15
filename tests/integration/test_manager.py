@@ -19,9 +19,6 @@ class StubSettings:
     def section(self, key):
         return {}
 
-    def sim(self):  # attribute, not method — handled below
-        return False
-
 
 @pytest.fixture(scope="module")
 def qapp():
@@ -32,7 +29,6 @@ def test_each_proxy_gets_its_own_config(qapp):
     """Regression: a closure bug made every device use the LAST config
     section (all-on-COM5 on real hardware)."""
     settings = StubSettings()
-    settings.sim = False  # manager reads settings.sim? — reads its own flag
     manager = InstrumentManager(settings, sim=False)
     for key in DEVICE_KEYS:
         proxy = manager._proxies[key]
@@ -45,7 +41,6 @@ def test_focus_gets_the_focus_proxy(qapp):
     from talos.hal.proxies import FocusProxy
 
     settings = StubSettings()
-    settings.sim = False
     manager = InstrumentManager(settings, sim=False)
     assert isinstance(manager._proxies["focus"], FocusProxy)
     assert "autofocus" in manager._proxies["focus"]._special_methods
@@ -54,7 +49,6 @@ def test_focus_gets_the_focus_proxy(qapp):
 def test_manager_stop_all_budget_completes(qapp):
     """stop_all without proxies running must still emit within budget."""
     settings = StubSettings()
-    settings.sim = False
     manager = InstrumentManager(settings, sim=True)
     manager.stop_all()
     # In sim mode the proxies are not started; the budget timer fires.
@@ -76,7 +70,6 @@ def test_stop_acks_report_only_a_real_stop_all(qapp):
     from talos.hal.registry import MOTION_KEYS
 
     settings = StubSettings()
-    settings.sim = False
     manager = InstrumentManager(settings, sim=True)
     reports = []
     manager.sig_stop_all_done.connect(lambda: reports.append(True))

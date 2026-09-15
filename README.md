@@ -140,7 +140,8 @@ Two Preferences points worth knowing:
 | triggers (L/R) | focus, analog speed |
 | **LT + RT** (both) | **autofocus once** |
 | **LB + RB** (both) | **STOP ALL** — same as Esc, including the latch |
-| A / B / X / Y | temperature presets 1–4 |
+| X / Y | Zolix R (rotation), − / + — short press = one step, hold = continuous (RB = fast) |
+| A / B | SigmaKoki Z (transfer height), + / − — short press = one step, hold = continuous (LB = fast) |
 
 The two gestures are edge-triggered after a **0.2 s hold**, so a bump past a
 bumper cannot stop a running job by accident. While a gesture is held it owns
