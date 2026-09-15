@@ -721,8 +721,10 @@ class CameraPage(_FormPage):
             self._manager.submit_camera("set_property", "flip", after)
 
 
+# Annotations (*-suffixed labels + tooltips). Manual-control values are
+# applied live (InputSystem.reload_settings on Apply); only a connection
+# change and the live resolution need more than that.
 _RECONNECT = "applies after reconnect"
-_RESTART = "applies after restart"
 _NEXT_CONNECT = "applies on the next connect"
 
 
@@ -737,6 +739,7 @@ def _build_pages(settings, qapp, manager, autofocus_service, parent):
                   ObjectivesPage(settings, parent)))
     pages.append((None, "AutoFocus",
                   AutoFocusPage(settings, autofocus_service, parent)))
+    pages.append((None, "Input & Gamepad", InputPage(settings, parent)))
 
     # Workspace-dependent camera settings (exposure/gain/WB/auto-gain)
     # live in the right panels only — the device page keeps the
@@ -752,8 +755,8 @@ def _build_pages(settings, qapp, manager, autofocus_service, parent):
         ("port", "port", "Port", _RECONNECT),
         ("baud", "baudrate", "Baudrate", _RECONNECT),
         ("group", "Manual controls"),
-        ("int", "min_speed", "Min speed (steps/s)", 10, 1000, _RESTART),
-        ("int", "max_speed", "Max speed (steps/s)", 50, 5000, _RESTART),
+        ("int", "min_speed", "Min speed (steps/s)", 10, 1000),
+        ("int", "max_speed", "Max speed (steps/s)", 50, 5000),
         ("bool", "invert", "Invert jog direction (triggers, keys, buttons)"),
         ("hint", "Applies to manual focus only — autofocus and its sweeps "
                  "are unaffected."),
@@ -773,10 +776,10 @@ def _build_pages(settings, qapp, manager, autofocus_service, parent):
         ("baud", "baudrate", "Baudrate", _RECONNECT),
         ("int", "slave_address", "Modbus slave address", 1, 247, _RECONNECT),
         ("group", "Manual controls"),
-        ("int", "slow_speed_pps", "Slow speed (pps)", 10, 10000, _RESTART),
-        ("int", "fast_speed_pps", "Fast speed (pps)", 10, 100000, _RESTART),
-        ("int", "slow_speed_r", "Slow R speed (pps)", 10, 100000, _RESTART),
-        ("int", "fast_speed_r", "Fast R speed (pps)", 10, 200000, _RESTART),
+        ("int", "slow_speed_pps", "Slow speed (pps)", 10, 10000),
+        ("int", "fast_speed_pps", "Fast speed (pps)", 10, 100000),
+        ("int", "slow_speed_r", "Slow R speed (pps)", 10, 100000),
+        ("int", "fast_speed_r", "Fast R speed (pps)", 10, 200000),
         ("int", "single_step", "Single step XY (pulses)", 1, 100000),
         ("int", "single_step_r", "Single step R (pulses)", 1, 100000),
         ("group", "Axis direction"),
@@ -798,10 +801,10 @@ def _build_pages(settings, qapp, manager, autofocus_service, parent):
         ("port", "port", "Port", _RECONNECT),
         ("baud", "baudrate", "Baudrate", _RECONNECT),
         ("group", "Manual controls"),
-        ("int", "slow_speed_hz", "Slow speed XY (Hz)", 25, 2000, _RESTART),
-        ("int", "fast_speed_hz", "Fast speed XY (Hz)", 25, 2000, _RESTART),
-        ("int", "slow_speed_z", "Slow Z speed (Hz)", 25, 2000, _RESTART),
-        ("int", "fast_speed_z", "Fast Z speed (Hz)", 25, 2000, _RESTART),
+        ("int", "slow_speed_hz", "Slow speed XY (Hz)", 25, 2000),
+        ("int", "fast_speed_hz", "Fast speed XY (Hz)", 25, 2000),
+        ("int", "slow_speed_z", "Slow Z speed (Hz)", 25, 2000),
+        ("int", "fast_speed_z", "Fast Z speed (Hz)", 25, 2000),
         ("int", "single_step", "Single step XY (steps)", 1, 100000),
         ("int", "single_step_z", "Single step Z (steps)", 1, 100000),
         ("group", "Axis direction"),
@@ -819,6 +822,53 @@ def _build_pages(settings, qapp, manager, autofocus_service, parent):
     pages.append(("Hardware", "Temperature",
                   TemperaturePage(settings, parent)))
     return pages
+
+
+class InputPage(QWidget):
+    """Manual-input QoL: the input loop, and the gamepad's response curve
+    and per-stick inversion. Everything here applies to MANUAL motion
+    only — autofocus and the grid scan are unaffected."""
+
+    def __init__(self, settings, parent=None):
+        super().__init__(parent)
+        self._settings = settings
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+
+        page = _FormPage(settings, settings.section("input"), parent=self)
+        page.add_group("Keyboard & mouse")
+        page.add_int("long_press_threshold_ms",
+                     "Long-press threshold (ms)", 100, 1000)
+        page.add_hint("A shorter hold turns into a continuous jog sooner; "
+                      "a release below the threshold becomes a single step.")
+        page.add_int("loop_rate_hz", "Input loop rate (Hz)", 20, 120)
+        layout.addWidget(page)
+
+        gamepad = _FormPage(settings,
+                            settings.section("input").setdefault("gamepad", {}),
+                            parent=self)
+        gamepad.add_group("Gamepad")
+        gamepad.add_float("deadzone", "Stick deadzone", 0.0, 0.9, 0.05)
+        gamepad.add_float("gamma", "Stick response gamma", 1.0, 4.0, 0.1)
+        gamepad.add_float("trigger_threshold", "Trigger threshold",
+                          0.0, 1.0, 0.05)
+        gamepad.add_group("Stick direction")
+        gamepad.add_bool("invert_left_x", "Invert left stick X")
+        gamepad.add_bool("invert_left_y", "Invert left stick Y")
+        gamepad.add_bool("invert_right_x", "Invert right stick X")
+        gamepad.add_bool("invert_right_y", "Invert right stick Y")
+        gamepad.add_hint("The left stick jogs the transfer (SigmaKoki) "
+                         "stage, the right stick the XYR stage. Axis "
+                         "inversion for the keyboard, D-pad and on-screen "
+                         "buttons lives on each device's page "
+                         "(Hardware → … → Axis direction).")
+        layout.addWidget(gamepad)
+
+        self._pages = [page, gamepad]
+
+    def _apply(self) -> None:
+        for page in self._pages:
+            page._apply()
 
 
 class PreferencesDialog(QDialog):

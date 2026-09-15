@@ -66,6 +66,28 @@ class ActionResolver:
         # Set by resolve() from the gamepad combo gestures (see resolve).
         self._suppress_focus = False
         self._suppress_jog = False
+        self._load_settings()
+        self._dpad_stage = "sigmakoki"
+
+        # Continuous-motion tracking: key → source token.
+        self._continuous_keys: dict[str, str] = {}
+        self._continuous_speed: dict[str, float] = {}
+        self._continuous_stick: dict[str, bool] = {}
+        self._focus_active = False
+        self._focus_paused = False
+        self._stick_pause: set[str] = set()
+        self._last_stick_dir: dict[str, int] = {}
+        self._last_stick_fast: dict[str, bool] = {}
+        self._stick_dir_counter: dict[str, int] = {}
+        self._press_times: dict[str, float] = {}
+        self._last_single_step_time: dict[str, float] = {}
+
+    def _load_settings(self) -> None:
+        """(Re)read every settings-derived value. Called from __init__ and
+        from ``reload_settings`` — the jog speeds and the focus trigger
+        curve used to be cached for the process lifetime, so a Preferences
+        Apply only took effect after a restart."""
+        settings = self._settings
         z = settings.device("zolix")
         sk = settings.device("sigmakoki")
         fc = settings.device("focus")
@@ -83,21 +105,10 @@ class ActionResolver:
         self._focus_max = int(fc.get("max_speed", 2000))
         self._focus_gamma = float(fc.get("gamma", 2.2))
         self._focus_deadzone = float(fc.get("deadzone", 0.05))
-        self._focus_invert = bool(fc.get("invert", False))
-        self._dpad_stage = "sigmakoki"
 
-        # Continuous-motion tracking: key → source token.
-        self._continuous_keys: dict[str, str] = {}
-        self._continuous_speed: dict[str, float] = {}
-        self._continuous_stick: dict[str, bool] = {}
-        self._focus_active = False
-        self._focus_paused = False
-        self._stick_pause: set[str] = set()
-        self._last_stick_dir: dict[str, int] = {}
-        self._last_stick_fast: dict[str, bool] = {}
-        self._stick_dir_counter: dict[str, int] = {}
-        self._press_times: dict[str, float] = {}
-        self._last_single_step_time: dict[str, float] = {}
+    def reload_settings(self) -> None:
+        """Apply edited speeds / focus curve to the NEXT resolve tick."""
+        self._load_settings()
 
     @property
     def dpad_stage(self) -> str:
@@ -490,12 +501,17 @@ class ActionResolver:
         mult = self._objective_multiplier("focus")
         focus_min = self._focus_min * mult
         focus_max = self._focus_max * mult
+        # NOTE: no direction inversion here. `devices.focus.invert` is
+        # applied once, in InputSystem._dispatch, together with the stage
+        # axis maps — inverting in both places cancelled out for the
+        # gamepad only, so the triggers jogged the opposite way from the
+        # keyboard and the dialbox buttons.
         if self._focus_paused:
             if focus_trigger_to_speed(
                     gamepad.left_trigger, gamepad.right_trigger,
                     min_speed=focus_min, max_speed=focus_max,
-                    gamma=self._focus_gamma, deadzone=self._focus_deadzone,
-                    invert=self._focus_invert) == 0:
+                    gamma=self._focus_gamma,
+                    deadzone=self._focus_deadzone) == 0:
                 self._focus_paused = False
             return
         if "focus:z" in claimed:
@@ -503,8 +519,7 @@ class ActionResolver:
         speed = focus_trigger_to_speed(
             gamepad.left_trigger, gamepad.right_trigger,
             min_speed=focus_min, max_speed=focus_max,
-            gamma=self._focus_gamma, deadzone=self._focus_deadzone,
-            invert=self._focus_invert)
+            gamma=self._focus_gamma, deadzone=self._focus_deadzone)
         if speed == 0:
             if self._focus_active:
                 emit(("focus", "z", "continuous_stop", 0, 0.0, "gamepad_trigger"))

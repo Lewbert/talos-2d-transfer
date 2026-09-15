@@ -266,6 +266,12 @@ class HardwareStrip(QWidget):
         self._um_xy_sig = float(cfg_s.get("um_per_step_xy", 0.5))
         self._um_z_sig = float(cfg_s.get("um_per_step_z", 0.25))
         self._um_focus = float(self._settings.device("focus").get("um_per_step", 0.2))
+        # The trigger readout caches the focus curve + jog inversion too.
+        # getattr: reload_settings() also runs from __init__, BEFORE the
+        # trigger bar exists.
+        triggers = getattr(self, "_triggers", None)
+        if triggers is not None:
+            triggers.reload_settings()
 
     def trigger_bar(self) -> TriggerBarWidget:
         return self._triggers

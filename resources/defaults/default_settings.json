@@ -40,7 +40,11 @@
       "single_step_r": 80,
       "accel_pps2": 10000000,
       "stop_mode": "immediate",
-      "rotation_enabled": true
+      "rotation_enabled": true,
+      "invert_x": false,
+      "invert_y": false,
+      "invert_r": false,
+      "flip_xy": false
     },
     "sigmakoki": {
       "port": "COM6",
@@ -53,7 +57,11 @@
       "slow_speed_z": 99,
       "fast_speed_z": 500,
       "single_step": 3,
-      "single_step_z": 1
+      "single_step_z": 1,
+      "invert_x": false,
+      "invert_y": false,
+      "invert_z": false,
+      "flip_xy": false
     },
     "focus": {
       "port": "COM10",
@@ -71,7 +79,8 @@
       "slim_on": false,
       "slim_min": -2000000,
       "slim_max": 2000000,
-      "awoff_on_exit": false
+      "awoff_on_exit": false,
+      "invert": false
     },
     "yudian": {
       "port": "COM5",
@@ -133,8 +142,10 @@
     "gamepad": {
       "deadzone": 0.2,
       "gamma": 2.2,
-      "invert_x": false,
-      "invert_y": false,
+      "invert_left_x": false,
+      "invert_left_y": false,
+      "invert_right_x": false,
+      "invert_right_y": false,
       "trigger_threshold": 0.5
     }
   },

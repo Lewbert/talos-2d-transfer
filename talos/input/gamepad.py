@@ -97,6 +97,15 @@ def normalize_axis(value: int, deadzone: float, gamma: float) -> float:
     return magnitude if v > 0 else -magnitude
 
 
+def normalize_stick(value: int, deadzone: float, gamma: float,
+                    invert: bool = False) -> float:
+    """``normalize_axis`` plus this stick's ``invert_*`` setting — the
+    per-stick inversion is applied AFTER the deadzone/gamma shaping, so a
+    flipped stick keeps the same feel near the centre."""
+    out = normalize_axis(value, deadzone, gamma)
+    return -out if invert else out
+
+
 def map_button_event(event) -> tuple[str, dict] | None:
     """Pure mapping for discrete buttons (kept for tests/porting).
 
@@ -130,15 +139,32 @@ class GamepadController(QObject):
 
     def __init__(self, settings=None, poll_hz: int = 60, parent: QObject | None = None):
         super().__init__(parent)
-        cfg = (settings.section("input").get("gamepad", {}) if settings else {})
-        self._deadzone = float(cfg.get("deadzone", DEADZONE))
-        self._gamma = float(cfg.get("gamma", GAMMA))
+        self._settings = settings
+        self._load_settings()
         self._dll = None
         self._prev_buttons = 0
         self._was_connected = False
         self._timer = QTimer(self)
         self._timer.setInterval(1000 // poll_hz)
         self._timer.timeout.connect(self._poll)
+
+    def _load_settings(self) -> None:
+        """(Re)read the deadzone / gamma / per-stick inversion."""
+        cfg = (self._settings.section("input").get("gamepad", {})
+               if self._settings else {})
+        self._deadzone = float(cfg.get("deadzone", DEADZONE))
+        self._gamma = float(cfg.get("gamma", GAMMA))
+        self._invert = {
+            "left_x": bool(cfg.get("invert_left_x", False)),
+            "left_y": bool(cfg.get("invert_left_y", False)),
+            "right_x": bool(cfg.get("invert_right_x", False)),
+            "right_y": bool(cfg.get("invert_right_y", False)),
+        }
+
+    def reload_settings(self) -> None:
+        """Apply edited deadzone / gamma / stick inversion to the next poll
+        (the older ``invert_x``/``invert_y`` keys were never read at all)."""
+        self._load_settings()
 
     def start(self) -> bool:
         self._dll = _load_xinput()
@@ -170,6 +196,11 @@ class GamepadController(QObject):
         def bit(mask: int) -> bool:
             return bool(buttons & mask)
 
+        def axis(raw: int, name: str) -> float:
+            """Normalised stick value, with this stick's inversion applied."""
+            return normalize_stick(raw, self._deadzone, self._gamma,
+                                   self._invert[name])
+
         edges = {}
         for name, mask in (
             ("start", _XINPUT_GAMEPAD_START), ("back", _XINPUT_GAMEPAD_BACK),
@@ -187,10 +218,10 @@ class GamepadController(QObject):
 
         self.sig_state.emit(GamepadState(
             connected=True,
-            left_x=normalize_axis(pad.sThumbLX, self._deadzone, self._gamma),
-            left_y=normalize_axis(pad.sThumbLY, self._deadzone, self._gamma),
-            right_x=normalize_axis(pad.sThumbRX, self._deadzone, self._gamma),
-            right_y=normalize_axis(pad.sThumbRY, self._deadzone, self._gamma),
+            left_x=axis(pad.sThumbLX, "left_x"),
+            left_y=axis(pad.sThumbLY, "left_y"),
+            right_x=axis(pad.sThumbRX, "right_x"),
+            right_y=axis(pad.sThumbRY, "right_y"),
             left_trigger=pad.bLeftTrigger / 255.0,
             right_trigger=pad.bRightTrigger / 255.0,
             dpad_up=bit(_XINPUT_GAMEPAD_DPAD_UP),

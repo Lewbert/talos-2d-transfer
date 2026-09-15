@@ -17,6 +17,7 @@ from PySide6.QtCore import QObject, QTimer, Signal
 from talos.hal.base import Axis, AxisMask, Direction
 from talos.hal.devices.sigmakoki import hz_to_level
 from talos.input.action_resolver import ActionResolver
+from talos.input.axis_map import IDENTITY, axis_maps
 from talos.input.gamepad import GamepadController, GamepadState
 
 logger = logging.getLogger(__name__)
@@ -61,6 +62,9 @@ class InputSystem(QObject):
         self._combo_since: dict[str, float] = {}
         self._combo_fired: set[str] = set()
         self._resolver = ActionResolver(settings, state=state)
+        # Manual-control axis mapping (invert / flip X↔Y), refreshed by
+        # reload_settings() — see talos.input.axis_map for the scope.
+        self._axis_maps = axis_maps(settings)
         self.gamepad = GamepadController(settings)
         self.gamepad.sig_state.connect(self._on_state)
         # Seed a disconnected state so the tick loop never depends on a
@@ -69,7 +73,7 @@ class InputSystem(QObject):
         # the first gamepad poll (forever, with no gamepad plugged in).
         self._gamepad_state = GamepadState()
         self._tick_timer = QTimer(self)
-        self._tick_timer.setInterval(1000 // POLL_HZ)
+        self._tick_timer.setInterval(1000 // self._loop_rate_hz())
         self._tick_timer.timeout.connect(self._tick)
 
     # ------------------------------------------------------------------
@@ -79,6 +83,28 @@ class InputSystem(QObject):
         self.sig_log.emit("gamepad connected" if available
                           else "no gamepad — keyboard/mouse only")
         self._tick_timer.start()
+
+    def _loop_rate_hz(self) -> int:
+        """The settings' input loop rate (the ``input.loop_rate_hz`` key
+        shipped in the defaults but was never read — the loop always ran
+        at the POLL_HZ constant)."""
+        try:
+            rate = int(self._settings.section("input").get(
+                "loop_rate_hz", POLL_HZ) or POLL_HZ)
+        except (TypeError, ValueError):
+            rate = POLL_HZ
+        return max(10, min(rate, 240))
+
+    def reload_settings(self) -> None:
+        """Pick up edited manual-control settings without a restart: the
+        axis mapping (invert / flip X↔Y), the jog speeds, the focus
+        trigger curve, the gamepad curve and the loop rate — all of them
+        were construction-cached before, so a Preferences Apply needed an
+        app restart to take effect."""
+        self._axis_maps = axis_maps(self._settings)
+        self._resolver.reload_settings()
+        self.gamepad.reload_settings()
+        self._tick_timer.setInterval(1000 // self._loop_rate_hz())
 
     # --- keyboard feeding (from MainWindow) ------------------------------
 
@@ -281,6 +307,12 @@ class InputSystem(QObject):
     def _dispatch(self, command: tuple) -> bool:
         """Send one resolved command. Returns False when a gate refused it."""
         stage_id, axis, mode, direction, speed, source = command
+        # Manual-control axis mapping (invert / flip X↔Y) — applied here,
+        # at the one point every manual source goes through, so keyboard,
+        # gamepad and on-screen buttons can never disagree. Stops carry
+        # direction 0, so they follow the axis flip but are never negated.
+        axis, direction = self._axis_maps.get(stage_id, IDENTITY).apply(
+            axis, direction)
         if self._esc_latch and mode != "continuous_stop":
             # The latch suppresses motion until every source is released.
             # _tick returns early while latched, so this only matters for

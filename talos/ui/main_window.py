@@ -459,6 +459,9 @@ class MainWindow(QMainWindow):
         strip = getattr(self, "_strip", None)
         if strip is not None:
             strip.reload_settings()
+        if self._input is not None:
+            # axis inversion / flip X↔Y, jog speeds, focus trigger curve
+            self._input.reload_settings()
         self._sync_camera_flip()
 
     def _sync_camera_flip(self) -> None:

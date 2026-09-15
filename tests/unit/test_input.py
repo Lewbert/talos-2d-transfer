@@ -29,6 +29,35 @@ def test_normalize_axis_gamma_shapes_midrange():
     assert 0 < curved < linear
 
 
+def test_stick_inversion_is_applied_after_normalization():
+    """`input.gamepad.invert_left_x/y` + `invert_right_x/y` are live (the
+    older invert_x/invert_y keys were shipped but read by nothing)."""
+    from talos.input.gamepad import normalize_stick
+
+    assert normalize_stick(-32768, 0.2, 2.2) == pytest.approx(-1.0, abs=1e-3)
+    assert normalize_stick(-32768, 0.2, 2.2, invert=True) == \
+        pytest.approx(1.0, abs=1e-3)
+    assert normalize_stick(2000, 0.2, 2.2, invert=True) == 0.0  # deadzone
+    assert normalize_stick(16384, 0.0, 2.2, invert=True) == \
+        -normalize_stick(16384, 0.0, 2.2)
+
+
+def test_gamepad_reads_per_stick_inversion_settings(tmp_path):
+    from talos.config import Settings
+    from talos.input.gamepad import GamepadController
+
+    settings = Settings.load(tmp_path / "s.json")
+    settings.section("input")["gamepad"].update(
+        {"invert_left_y": True, "invert_right_x": True})
+    pad = GamepadController(settings)
+    assert pad._invert == {"left_x": False, "left_y": True,
+                           "right_x": True, "right_y": False}
+    # a Preferences Apply must reach the running controller
+    settings.section("input")["gamepad"]["invert_left_x"] = True
+    pad.reload_settings()
+    assert pad._invert["left_x"] is True
+
+
 def test_start_select_map_to_stop_all():
     for code in ("BTN_START", "BTN_SELECT"):
         command = map_button_event(event(code, 1))

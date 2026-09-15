@@ -43,6 +43,10 @@ def load_defaults() -> dict:
 _DEAD_KEYS: dict[str, set[str]] = {
     "devices.focus": {"jog_speed", "step_size"},
     "autofocus": {"coarse_step", "fine_step", "span_steps", "max_speed"},
+    # input.gamepad.invert_x/invert_y were shipped but read by NOTHING;
+    # they are replaced by the per-stick invert_left_*/invert_right_* keys
+    # (a single pair cannot express "invert only the Zolix stick").
+    "input.gamepad": {"invert_x", "invert_y"},
 }
 
 

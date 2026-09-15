@@ -16,18 +16,29 @@ from talos.ui.theme import LED_OFF, TEXT_DIM, WARN
 class TriggerBarWidget(QWidget):
     def __init__(self, settings, parent: QWidget | None = None):
         super().__init__(parent)
-        cfg = settings.device("focus")
-        self._min_speed = float(cfg.get("min_speed", 50))
-        self._max_speed = float(cfg.get("max_speed", 2000))
-        self._gamma = float(cfg.get("gamma", 2.2))
-        self._deadzone = float(cfg.get("deadzone", 0.05))
-        self._invert = bool(cfg.get("invert", False))
+        self._settings = settings
+        self._load_settings()
         self._lt = 0.0
         self._rt = 0.0
         self._connected = False
         self.setMinimumWidth(130)
         self.setFixedHeight(40)
         self.setToolTip("Focus jog: gamepad LT (down) / RT (up) triggers")
+
+    def _load_settings(self) -> None:
+        cfg = self._settings.device("focus")
+        self._min_speed = float(cfg.get("min_speed", 50))
+        self._max_speed = float(cfg.get("max_speed", 2000))
+        self._gamma = float(cfg.get("gamma", 2.2))
+        self._deadzone = float(cfg.get("deadzone", 0.05))
+        # The readout must follow the SAME inversion the dispatcher applies
+        # (talos.input.axis_map) — the bar used to be the only place the
+        # trigger direction was inverted.
+        self._invert = bool(cfg.get("invert", False))
+
+    def reload_settings(self) -> None:
+        self._load_settings()
+        self.update()
 
     def set_state(self, lt: float, rt: float) -> None:
         """Raw trigger values 0..1."""

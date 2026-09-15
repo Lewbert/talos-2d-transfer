@@ -94,16 +94,34 @@ def _nav_leaf_labels(dialog) -> list[str]:
     return labels
 
 
+def _page(dialog, label: str):
+    """Look a page up by its nav label (page ORDER is a UI decision)."""
+    return dialog._pages[_nav_leaf_labels(dialog).index(label)]
+
+
 def test_pages_exist(dialog):
     assert _nav_leaf_labels(dialog) == [
-        "General", "Objectives & Calibration", "AutoFocus", "Camera",
-        "Focus", "Zolix XYR", "SigmaKoki XYZ", "Temperature"]
-    assert dialog._stack.count() == 8
-    # the Hardware parent is a non-selectable group (after General,
-    # Objectives & Calibration, AutoFocus)
-    top = dialog._nav.topLevelItem(3)
+        "General", "Objectives & Calibration", "AutoFocus",
+        "Input & Gamepad", "Camera", "Focus", "Zolix XYR",
+        "SigmaKoki XYZ", "Temperature"]
+    assert dialog._stack.count() == 9
+    # the Hardware parent is a non-selectable group
+    top = dialog._nav.topLevelItem(4)
     assert top.text(0) == "Hardware"
     assert not (top.flags() & Qt.ItemFlag.ItemIsSelectable)
+
+
+def test_every_page_scrolls_and_applies(dialog):
+    """A page must (a) live inside a scroll area — a long device page used
+    to push the buttons off the dialog — and (b) implement _apply: the
+    dialog silently SKIPS a page without one, discarding every edit."""
+    from PySide6.QtWidgets import QScrollArea
+
+    for index, page in enumerate(dialog._pages):
+        assert isinstance(dialog._stack.widget(index), QScrollArea)
+        assert dialog._stack.widget(index).widget() is page
+        assert callable(getattr(page, "_apply", None)), \
+            f"page {type(page).__name__} has no _apply — its edits would be lost"
 
 
 def test_nav_selection_switches_pages(dialog):
@@ -114,8 +132,8 @@ def test_nav_selection_switches_pages(dialog):
 
 
 def test_apply_persists_edits(dialog):
-    settings = dialog._pages[3]._settings  # the camera page's settings
-    camera_page = dialog._pages[3]
+    camera_page = _page(dialog, "Camera")
+    settings = camera_page._settings
     # Flip the live resolution via the form field and apply.
     for field in camera_page._fields:
         if field.path == "resolution":
@@ -151,12 +169,12 @@ def test_camera_page_keeps_device_level_fields_only(dialog):
     # exposure/gain/WB/auto-gain are workspace-dependent → right panels
     # only; the device page keeps the resolution and the sensor
     # orientation (the flip is a decode-time software rotation).
-    camera_page = dialog._pages[3]
+    camera_page = _page(dialog, "Camera")
     assert [f.path for f in camera_page._fields] == ["resolution", "flip"]
 
 
 def test_objectives_merged_page_present(dialog):
-    page = dialog._pages[1]
+    page = _page(dialog, "Objectives & Calibration")
     assert page._offsets_check.isChecked() is True
     assert page._basic.columnCount() == 5
     assert page._basic.horizontalHeaderItem(0).text() == "Name"
@@ -173,35 +191,36 @@ def test_objectives_page_apply_persists_edits(dialog, qapp):
     # silently discarded and reset to 0.0 on the next open)
     from PySide6.QtWidgets import QTableWidgetItem
 
-    settings = dialog._pages[1]._settings
-    dialog._pages[1]._basic.setItem(0, 4, QTableWidgetItem("12.5"))
+    page = _page(dialog, "Objectives & Calibration")
+    settings = page._settings
+    page._basic.setItem(0, 4, QTableWidgetItem("12.5"))
     dialog._on_apply()
     assert settings.get("objectives")[0]["z_offset_um"] == 12.5
     # reopening shows the persisted value
     d2 = PreferencesDialog(StubManager(), settings, qapp, StubService())
-    assert d2._pages[1]._basic.item(0, 4).text() == "12.5"
+    assert _page(d2, "Objectives & Calibration")._basic.item(0, 4).text() == "12.5"
 
 
 def test_temperature_presets_editor_roundtrip(dialog):
     from PySide6.QtWidgets import QTableWidgetItem
 
-    page = dialog._pages[7]
+    page = _page(dialog, "Temperature")
     page._presets.setRowCount(1)
     page._presets.setItem(0, 0, QTableWidgetItem("Melt 200"))
     page._presets.setItem(0, 1, QTableWidgetItem("200.0"))
     dialog._on_apply()
-    assert dialog._pages[7]._settings.device("yudian")["presets"] == [
+    assert page._settings.device("yudian")["presets"] == [
         {"name": "Melt 200", "temp_c": 200.0}]
 
 
 def test_general_page_has_debug_toggles(dialog):
-    general = dialog._pages[0]
+    general = _page(dialog, "General")
     assert general._console.isChecked() is True
     assert general._verbose.isChecked() is True
 
 
 def test_accent_preset_selection_persists(dialog):
-    general = dialog._pages[0]
+    general = _page(dialog, "General")
     combo = general._accent_combo
     # the Wuling default is a preset and preselects; the old hexes are gone
     assert combo.currentData() == "#00BCBC"
@@ -213,11 +232,11 @@ def test_accent_preset_selection_persists(dialog):
            if combo.itemData(i) == "#e5484d"][0]
     combo.setCurrentIndex(idx)
     dialog._on_apply()
-    assert dialog._pages[0]._settings.section("ui")["accent"] == "#e5484d"
+    assert general._settings.section("ui")["accent"] == "#e5484d"
 
 
 def test_accent_combo_group_headers_non_selectable(dialog):
-    combo = dialog._pages[0]._accent_combo
+    combo = _page(dialog, "General")._accent_combo
     model = combo.model()
     # 2 group headers + 7 presets + Custom…
     assert model.rowCount() == 10
@@ -238,7 +257,7 @@ def test_accent_combo_group_headers_non_selectable(dialog):
 def test_accent_custom_hex_applies_live(dialog, qapp):
     from talos.ui import theme
 
-    general = dialog._pages[0]
+    general = _page(dialog, "General")
     general._accent_combo.setCurrentIndex(general._accent_combo.count() - 1)
     general._accent_edit.setText("#5f8a3c")
     general._apply_accent_from_edit()
