@@ -50,6 +50,14 @@ def parse_zolix(payload: dict) -> dict:
     }
 
 
+def _limit_flags(payload: dict) -> dict[str, bool] | None:
+    """The four X/Y limit switches, or None when the payload has none."""
+    limits = payload.get("limits")
+    if not isinstance(limits, dict) or not limits:
+        return None
+    return {key: bool(limits.get(key)) for key in ("x+", "x-", "y+", "y-")}
+
+
 def parse_sigmakoki(payload: dict) -> dict:
     """STATUS? carries POSITIONS as x/y/z and SPEED LEVELS as xspd/yspd/
     zspd.
@@ -83,7 +91,8 @@ def parse_sigmakoki(payload: dict) -> dict:
     levels = {axis: level(f"{axis}spd") for axis in ("x", "y", "z")}
     return {"x": steps("X"), "y": steps("Y"), "z": steps("Z"),
             "levels": levels,
-            "speed_hz": float(SPEED_LEVEL_TO_HZ.get(levels["z"], 0.0))}
+            "speed_hz": float(SPEED_LEVEL_TO_HZ.get(levels["z"], 0.0)),
+            "limits": _limit_flags(payload)}
 
 
 def parse_focus(payload: dict) -> dict:
@@ -153,17 +162,22 @@ class _Section(QFrame):
 
 
 class _StageSection(_Section):
-    """XYR/XYZ compact status: enable toggle, axis readout, MOV (a motion
-    command is in flight / the axis is turning) and — where the hardware
-    has them — limit dots and the E-STOP latch.
+    """XYR/XYZ compact status — the SAME layout and behaviour on both
+    stages: enable toggle, axis readout, four limit dots, E-STOP (XYR
+    only: the XYZ firmware has no such bit) and MOV.
 
-    Both stages behave identically: MOV lights for the same reason, the
-    readout uses the same fixed-width format, and every optional indicator
-    keeps its slot reserved so lighting up never re-flows the bar.
+    Both stages run ONE code path here; only the readout text differs
+    (XYR reports degrees on R, XYZ a third linear axis). The optional
+    indicators keep their slots reserved so lighting up never re-flows the
+    bar, and MOV means the same thing on both — the axis is turning.
     """
 
+    #: Both firmwares report the four X/Y limit switches (zolix from its
+    #: status registers, sigmakoki from LIMITS?); the dots are identical.
+    LIMIT_KEYS = ("x+", "x-", "y+", "y-")
+
     def __init__(self, title: str, device_key: str, tooltip: str,
-                 manager, settings, *, limits: bool, parent=None):
+                 manager, settings, *, estop: bool, parent=None):
         super().__init__(title, tooltip, parent)
         self._enable = QCheckBox("Enable")
         self._enable.setChecked(True)  # matches the manager's default gate
@@ -180,21 +194,19 @@ class _StageSection(_Section):
         self.add(self._pos, stretch=1)
 
         self._dots: dict[str, _MiniDot] = {}
-        if limits:
-            for key in ("x+", "x-", "y+", "y-"):
-                dot = _MiniDot(self)
-                dot.setToolTip(f"{device_key} limit {key}")
-                self._dots[key] = dot
-                self.add(dot)
-        # Reserved slots (fixed width, text toggled): showing MOV/E-STOP
-        # must not move the neighbouring sections around.
+        for key in self.LIMIT_KEYS:
+            dot = _MiniDot(self)
+            dot.setToolTip(f"{device_key} limit {key}")
+            self._dots[key] = dot
+            self.add(dot)
+        self._has_estop = bool(estop)
         self._estop = QLabel("")
         self._estop.setObjectName("strip_estop")
-        self._estop.setFixedWidth(46)
         self._estop.setToolTip("Emergency-stop bit is set on the controller")
-        if limits:
+        if self._has_estop:
             self.add(self._estop)
-
+            self._estop.hide()   # NO reserved slot: an E-STOP appearing must
+            # shove the neighbours — that is what makes it noticed.
         self._moving = QLabel("")
         self._moving.setObjectName("strip_mov")
         self._moving.setFixedWidth(30)
@@ -210,8 +222,10 @@ class _StageSection(_Section):
             return
         self._compact = compact
         for dot in self._dots.values():
-            dot.setVisible(not compact and bool(self._dots))
-        self._estop.setVisible(not compact and bool(self._dots))
+            dot.setVisible(not compact)
+        if self._has_estop:
+            # never un-hide an E-STOP that is not actually active
+            self._estop.setVisible(not compact and bool(self._estop.text()))
 
     def _is_moving(self, parsed: dict) -> bool:
         """zolix reports real per-axis moving bits; sigmakoki has none, so
@@ -225,17 +239,25 @@ class _StageSection(_Section):
         return moved
 
     def set_telem(self, parsed: dict) -> None:
+        # The values are padded to a FIXED field width: the readout keeps
+        # the compact "·" style while the text stops jittering horizontally
+        # as digits come and go (a monospace font alone does not fix that).
         if "r_deg" in parsed:  # zolix (its r_deg is the discriminator)
             self._pos.setText(
-                f"{parsed['x_um']:8.1f} {parsed['y_um']:8.1f} µm "
-                f"{parsed['r_deg']:6.2f}°")
-            for key, dot in self._dots.items():
-                dot.set_on(bool(parsed["limits"].get(key)))
-            self._estop.setText("E-STOP" if parsed.get("estop") else "")
+                f"{parsed['x_um']:6.1f} · {parsed['y_um']:6.1f} µm · "
+                f"{parsed['r_deg']:5.2f}°")
         else:  # sigmakoki (steps → µm done by the strip's caller)
             self._pos.setText(
-                f"{parsed['x_um']:8.1f} {parsed['y_um']:8.1f} "
-                f"{parsed['z_um']:7.1f} µm")
+                f"{parsed['x_um']:6.1f} · {parsed['y_um']:6.1f} · "
+                f"{parsed['z_um']:6.1f} µm")
+        # ONE code path for both stages from here down.
+        limits = parsed.get("limits") or {}
+        for key, dot in self._dots.items():
+            dot.set_on(bool(limits.get(key)))
+        if self._has_estop:
+            estop = bool(parsed.get("estop"))
+            self._estop.setText("E-STOP" if estop else "")
+            self._estop.setVisible(estop)
         self._moving.setText("MOV" if self._is_moving(parsed) else "")
 
 
@@ -257,18 +279,19 @@ class HardwareStrip(QWidget):
         layout.setContentsMargins(6, 3, 6, 3)
         layout.setSpacing(6)
 
-        self._xyr = _StageSection("XYR", "zolix", "Zolix XYR sample stage",
-                                  manager, settings, limits=True)
-        self._xyr.setMinimumWidth(200)  # equalized: the readouts'
+        self._xyr = _StageSection("XYR STAGE", "zolix",
+                                  "Zolix XYR sample stage",
+                                  manager, settings, estop=True)
+        self._xyr.setMinimumWidth(240)  # equalized: the readouts'
         layout.addWidget(self._xyr, stretch=1)  # min-widths would otherwise
-        self._xyz = _StageSection("XYZ", "sigmakoki",
+        self._xyz = _StageSection("XYZ STAGE", "sigmakoki",
                                   "SigmaKoki XYZ transfer stage",
-                                  manager, settings, limits=False)
-        self._xyz.setMinimumWidth(200)  # dominate the equal stretch
+                                  manager, settings, estop=False)
+        self._xyz.setMinimumWidth(240)  # dominate the equal stretch
         layout.addWidget(self._xyz, stretch=1)
 
         focus = _Section("FOCUS", "Focus stage (no limit sensor)")
-        focus.setMinimumWidth(200)
+        focus.setMinimumWidth(240)
         self._focus_pos = QLabel("—")
         self._focus_pos.setObjectName("readout")
         self._focus_pos.setMinimumWidth(140)  # fits "123.4 µm · 123456 st"
@@ -283,7 +306,7 @@ class HardwareStrip(QWidget):
         layout.addWidget(focus, stretch=1)
 
         temp = _Section("TEMP", "Yudian AI-828 temperature controller")
-        temp.setMinimumWidth(200)
+        temp.setMinimumWidth(240)
         self._temp_pv = QLabel("—")
         self._temp_pv.setObjectName("readout")
         self._temp_pv.setMinimumWidth(52)

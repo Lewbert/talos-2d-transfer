@@ -8,6 +8,7 @@
     "burn_scale_bar": false,
     "af_indicator": true,
     "crosshair": false,
+    "crosshair_ticks": false,
     "ruler": false,
     "scan_path": true
   },

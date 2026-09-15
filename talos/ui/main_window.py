@@ -160,6 +160,14 @@ class MainWindow(QMainWindow):
                 self._gamepad_indicator.set_dpad_stage)
             # LT+RT = autofocus once (the same path as the AF-S quick action).
             input_system.sig_af_requested.connect(self._on_quick_af)
+            # The input layer's own messages (gamepad gestures, enable
+            # toggles, cancelled holds) were emitted into the void: the
+            # operator pressed a gesture and NOTHING anywhere said whether
+            # it had been recognised.
+            input_system.sig_log.connect(
+                lambda message: self._log.panel.append("info", message))
+            input_system.sig_log.connect(
+                lambda message: self._on_log_message("info", message))
         manager.camera.sig_connected.connect(self._on_camera_connected)
         state.sig_mode_changed.connect(self._on_mode_changed)
         self._calibration.sig_changed.connect(
@@ -296,15 +304,45 @@ class MainWindow(QMainWindow):
         self._burn_action.setChecked(burn_on)
         self._burn_action.blockSignals(False)
 
+        # Crosshairs (checkable submenu) → Crosshair ticks. Solid and
+        # inverse-video (Minecraft-style): the line inverts whatever is
+        # under it, so it stays visible on any image. The child adds
+        # calibrated ticks ALONG the lines (a reticle) and is disabled
+        # with its parent — ticks without a crosshair make no sense.
+        cross_menu = menu.addMenu("Crosshairs")
+        self._crosshair_action = cross_menu.menuAction()
+        self._crosshair_action.setCheckable(True)
+        self._crosshair_action.setToolTip(
+            "Solid inverse-video crosshair through the frame centre")
+        self._crosshair_ticks_action = cross_menu.addAction("Crosshair ticks")
+        self._crosshair_ticks_action.setCheckable(True)
+        self._crosshair_ticks_action.setToolTip(
+            "Calibrated major/minor ticks along the crosshair lines")
+        self._crosshair_action.toggled.connect(self._on_crosshair_toggled)
+        self._crosshair_ticks_action.toggled.connect(
+            lambda on: self._on_display_toggle(
+                "crosshair_ticks",
+                lambda state: self._for_each_live_view(
+                    lambda v: v.set_crosshair_ticks_enabled(state)), on))
+
+        def _apply_crosshair(on: bool) -> None:
+            self._for_each_live_view(lambda v: v.set_crosshair_enabled(on))
+
+        cross_on = bool(display.get("crosshair", False))
+        ticks_on = bool(display.get("crosshair_ticks", False))
+        _apply_crosshair(cross_on)
+        self._crosshair_action.blockSignals(True)
+        self._crosshair_action.setChecked(cross_on)
+        self._crosshair_action.blockSignals(False)
+        self._crosshair_ticks_action.setEnabled(cross_on)
+        self._crosshair_ticks_action.blockSignals(True)
+        self._crosshair_ticks_action.setChecked(ticks_on and cross_on)
+        self._crosshair_ticks_action.blockSignals(False)
+
         specs = [
             ("af_indicator", "AF Indicator", True,
              lambda on: self._for_each_live_view(
                  lambda v: v.set_af_indicator_enabled(on))),
-            # Solid + inverse video (Minecraft-style): the line inverts
-            # whatever is under it, so it stays visible on any image.
-            ("crosshair", "Crosshairs (inverse video)", False,
-             lambda on: self._for_each_live_view(
-                 lambda v: v.set_crosshair_enabled(on))),
             # Calibrated major/minor ticks on all four frame edges, µm from
             # the frame centre; needs the objective calibration.
             ("ruler", "Tick ruler", False,
@@ -325,6 +363,22 @@ class MainWindow(QMainWindow):
             action.blockSignals(True)
             action.setChecked(initial)
             action.blockSignals(False)
+
+    def _on_crosshair_toggled(self, on: bool) -> None:
+        """Crosshairs on/off; the ticks child follows the parent (a reticle
+        without a crosshair makes no sense), exactly like the scale bar's
+        burn option."""
+        self._for_each_live_view(lambda v: v.set_crosshair_enabled(on))
+        self._settings.section("display")["crosshair"] = bool(on)
+        if not on:
+            self._settings.section("display")["crosshair_ticks"] = False
+            self._crosshair_ticks_action.blockSignals(True)
+            self._crosshair_ticks_action.setChecked(False)
+            self._crosshair_ticks_action.blockSignals(False)
+            self._for_each_live_view(
+                lambda v: v.set_crosshair_ticks_enabled(False))
+        self._settings.save()
+        self._crosshair_ticks_action.setEnabled(bool(on))
 
     def _on_scale_bar_toggled(self, on: bool) -> None:
         self._for_each_live_view(lambda v: v.set_scale_bar_enabled(on))
@@ -664,6 +718,10 @@ class MainWindow(QMainWindow):
     def _on_quick_af(self) -> None:
         if self._autofocus is None:
             return
+        if getattr(self._autofocus, "busy", False):
+            self._on_log_message("warning", "Autofocus already running")
+            return
+        self._on_log_message("info", "Autofocus requested")
         bounds = self._navigation.af_group.bounds_steps(
             self._manager.focus_position,
             float(self._settings.device("focus").get("um_per_step", 0.2)))

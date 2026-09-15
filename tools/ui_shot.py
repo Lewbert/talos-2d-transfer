@@ -85,6 +85,7 @@ def main() -> int:
     # is the synthetic 1920×1080 pattern, so the canonical 4K calibration
     # runs at ×2 — see set_live_calibration).
     window._for_each_live_view(lambda v: v.set_crosshair_enabled(True))
+    window._for_each_live_view(lambda v: v.set_crosshair_ticks_enabled(True))
     window._for_each_live_view(lambda v: v.set_ruler_enabled(True))
     flush(150)
     synthetic_frame(app)
@@ -93,6 +94,7 @@ def main() -> int:
     window.grab().save(str(path))
     print(f"saved {path}")
     window._for_each_live_view(lambda v: v.set_ruler_enabled(False))
+    window._for_each_live_view(lambda v: v.set_crosshair_ticks_enabled(False))
     window._for_each_live_view(lambda v: v.set_crosshair_enabled(False))
     flush(100)
 

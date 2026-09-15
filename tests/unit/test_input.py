@@ -489,6 +489,79 @@ def test_single_trigger_stays_a_focus_jog(tmp_path, monkeypatch):
     assert fired == []
 
 
+def test_fired_gesture_owns_the_triggers_until_they_are_released(
+        tmp_path, monkeypatch):
+    """Hardware symptom: LT+RT fired, the autofocus was requested, and
+    nothing appeared on screen.
+
+    Releasing LT and RT a few milliseconds apart leaves the residual
+    trigger commanding a focus jog. Any focus command aborts a running
+    (or merely ARMED) autofocus, so the run died inside its 350 ms arm
+    window: no sweep, no indicator. Suppression therefore has to outlive
+    the hold, until both triggers are actually released.
+    """
+    system, manager, GamepadState, clock, mod = _combo_system(tmp_path,
+                                                              monkeypatch)
+    submits: list[tuple] = []
+    manager.submit = lambda *a, **k: submits.append(a) or 1
+    fired = []
+    system.sig_af_requested.connect(lambda: fired.append(1))
+
+    gesture = GamepadState(connected=True, left_trigger=0.9, right_trigger=0.9)
+    gesture.edges = {}
+    system._on_state(gesture)               # arms
+    clock["t"] += mod.COMBO_HOLD_S + 0.01
+    system._on_state(gesture)               # fires
+    assert fired == [1]
+
+    # LT released first, RT still pulled — the classic release skew
+    half = GamepadState(connected=True, left_trigger=0.0, right_trigger=0.9)
+    half.edges = {}
+    system._gamepad_state = half
+    system._on_state(half)
+    system._tick()
+    assert [s for s in submits if s[0] == "focus"] == [], \
+        "the residual trigger jog would abort the autofocus it just started"
+
+    # both released → the latch clears and a single trigger jogs again
+    rest = GamepadState(connected=True)
+    rest.edges = {}
+    system._on_state(rest)
+    system._gamepad_state = rest
+    system._tick()
+    assert "af" not in system._combo_latch
+    one = GamepadState(connected=True, right_trigger=1.0)
+    one.edges = {}
+    system._on_state(one)
+    system._gamepad_state = one
+    system._tick()
+    assert [s for s in submits if s[0] == "focus"], \
+        "a deliberate single-trigger jog must still work"
+
+
+def test_stop_gesture_also_holds_its_inputs_until_release(tmp_path,
+                                                          monkeypatch):
+    system, manager, GamepadState, clock, mod = _combo_system(tmp_path,
+                                                              monkeypatch)
+    submits: list[tuple] = []
+    manager.submit = lambda *a, **k: submits.append(a) or 1
+    gesture = GamepadState(connected=True, button_left_shoulder=True,
+                           button_right_shoulder=True, left_x=1.0)
+    gesture.edges = {}
+    system._on_state(gesture)               # arms
+    clock["t"] += mod.COMBO_HOLD_S + 0.01
+    system._on_state(gesture)               # fires
+    assert manager.stops == 1
+    # RB released, LB still held: the stick must not resume jogging yet
+    half = GamepadState(connected=True, button_left_shoulder=True, left_x=1.0)
+    half.edges = {}
+    system._gamepad_state = half
+    system._on_state(half)
+    system._tick()
+    assert [s for s in submits if s[0] == "sigmakoki"] == []
+    assert "stop" in system._combo_latch
+
+
 def test_keyboard_works_without_gamepad_state_emission(tmp_path):
     """Regression: _tick bailed out until the gamepad controller emitted
     its first state — and it never emits without a gamepad connected, so

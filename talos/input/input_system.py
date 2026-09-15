@@ -29,6 +29,10 @@ RELEASE_CHURN_S = 0.05  # release+press gap below this = auto-repeat churn
 # inputs must pass this level for a trigger pair to count as a gesture.
 COMBO_HOLD_S = 0.20
 COMBO_TRIGGER_LEVEL = 0.5
+#: A fired gesture keeps owning its inputs until they fall below this —
+#: releasing LT/RT a few ms apart must not leave one of them jogging (see
+#: InputSystem._check_combos).
+COMBO_RELEASE_LEVEL = 0.05
 # Dead-man switch for on-screen holds: a hold whose release signal is lost
 # must not jog the axis forever. Longer than any plausible manual hold.
 MAX_UI_HOLD_S = 60.0
@@ -61,6 +65,9 @@ class InputSystem(QObject):
         # have already fired for the current press.
         self._combo_since: dict[str, float] = {}
         self._combo_fired: set[str] = set()
+        # Gestures that FIRED and whose inputs are not released yet — they
+        # keep owning those inputs (see _check_combos).
+        self._combo_latch: set[str] = set()
         self._resolver = ActionResolver(settings, state=state)
         # Manual-control axis mapping (invert / flip X↔Y), refreshed by
         # reload_settings() — see talos.input.axis_map for the scope.
@@ -210,28 +217,43 @@ class InputSystem(QObject):
     def _check_combos(self, state) -> None:
         """Two-finger gestures, held briefly so a brush cannot fire them.
 
-        LT+RT: autofocus once (the triggers' focus jog is suppressed while
-        both are held — see ActionResolver.resolve). LB+RB: STOP ALL, with
-        the Esc latch, so nothing restarts until everything is released.
+        LT+RT: autofocus once (the triggers' focus jog is suppressed — see
+        ActionResolver.resolve). LB+RB: STOP ALL, with the Esc latch, so
+        nothing restarts until everything is released.
+
+        A gesture OWNS its inputs until they are actually released, not
+        just while both are held: releasing LT and RT a few milliseconds
+        apart leaves the residual trigger commanding a focus jog, and any
+        focus command ABORTS the autofocus the gesture just asked for —
+        usually inside its 350 ms arm window, so the run never starts and
+        nothing appears on screen at all (hardware symptom).
         """
         now = time.monotonic()
-        both_triggers = (float(state.left_trigger) >= COMBO_TRIGGER_LEVEL
-                         and float(state.right_trigger) >= COMBO_TRIGGER_LEVEL)
-        both_bumpers = bool(state.button_left_shoulder
-                            and state.button_right_shoulder)
-        self._arm_combo("af", both_triggers, now, self._fire_af_combo)
-        self._arm_combo("stop", both_bumpers, now, self._fire_stop_combo)
+        lt = float(state.left_trigger)
+        rt = float(state.right_trigger)
+        lb = bool(state.button_left_shoulder)
+        rb = bool(state.button_right_shoulder)
+        both_triggers = lt >= COMBO_TRIGGER_LEVEL and rt >= COMBO_TRIGGER_LEVEL
+        both_bumpers = lb and rb
+        self._arm_combo("af", both_triggers,
+                        lt < COMBO_RELEASE_LEVEL and rt < COMBO_RELEASE_LEVEL,
+                        now, self._fire_af_combo)
+        self._arm_combo("stop", both_bumpers, not lb and not rb, now,
+                        self._fire_stop_combo)
 
-    def _arm_combo(self, name: str, active: bool, now: float, fire) -> None:
-        if not active:
+    def _arm_combo(self, name: str, active: bool, released: bool, now: float,
+                   fire) -> None:
+        if released:
             self._combo_since.pop(name, None)
             self._combo_fired.discard(name)
+            self._combo_latch.discard(name)
             return
-        if name in self._combo_fired:
+        if not active or name in self._combo_fired:
             return                      # one action per press
         since = self._combo_since.setdefault(name, now)
         if now - since >= COMBO_HOLD_S:
             self._combo_fired.add(name)
+            self._combo_latch.add(name)
             fire()
 
     def _fire_af_combo(self) -> None:
@@ -264,8 +286,9 @@ class InputSystem(QObject):
                 self._esc_latch = False
             self._prev_key_state = dict(self._key_state)
             return
-        # The combo gestures own their inputs while held (see _check_combos):
-        # no focus jog under LT+RT, no stick/D-pad jog under LB+RB.
+        # The combo gestures own their inputs while held AND until they are
+        # released (see _check_combos): no focus jog under LT+RT, no
+        # stick/D-pad jog under LB+RB.
         both_triggers = (gamepad.left_trigger >= COMBO_TRIGGER_LEVEL
                          and gamepad.right_trigger >= COMBO_TRIGGER_LEVEL)
         both_bumpers = bool(gamepad.button_left_shoulder
@@ -273,7 +296,8 @@ class InputSystem(QObject):
         self._resolver.resolve(
             self._key_state, self._prev_key_state, gamepad,
             on_command=self._dispatch, ui_state=self._ui_state,
-            suppress_focus=both_triggers, suppress_jog=both_bumpers)
+            suppress_focus=both_triggers or "af" in self._combo_latch,
+            suppress_jog=both_bumpers or "stop" in self._combo_latch)
         self._prev_key_state = dict(self._key_state)
 
     def _expire_stale_holds(self) -> None:

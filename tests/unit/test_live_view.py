@@ -130,6 +130,65 @@ def test_ruler_draws_ticks_along_the_frame_edges(qapp):
     assert _rendered(view).pixelColor(2, 2).red() == 90
 
 
+def _inverted_columns(img, y0: int, y1: int) -> list[int]:
+    """X positions holding an inverted (≈165) pixel in a horizontal band."""
+    hits = []
+    for x in range(img.width()):
+        column = [img.pixelColor(x, y).red() for y in range(y0, y1)]
+        if any(abs(v - 165) <= 3 for v in column):
+            hits.append(x)
+    return hits
+
+
+def test_ruler_does_not_label_the_centre(qapp):
+    """The crosshair marks the optical axis; a "0" numeral in the same few
+    pixels only fights with it."""
+    view = LiveViewWidget()
+    view.resize(640, 480)
+    view.show_frame(_grey_frame(90))
+    view._render_pending()
+    view.set_live_calibration(1.0)
+    view.set_ruler_enabled(True)          # crosshair deliberately OFF
+    img = _rendered(view)
+    # band just under the top ticks: label glyphs only
+    hits = _inverted_columns(img, 11, 22)
+    assert hits, "the ruler drew no labels at all"
+    centre = img.width() // 2
+    assert all(abs(x - centre) > 10 for x in hits), \
+        "a numeral is drawn on the optical axis"
+
+
+def test_crosshair_ticks_draw_a_calibrated_reticle(qapp):
+    view = LiveViewWidget()
+    view.resize(640, 480)
+    view.show_frame(_grey_frame(90))
+    view._render_pending()
+    view.set_live_calibration(1.0)
+    view.set_crosshair_enabled(True)
+    plain = _rendered(view)
+    view.set_crosshair_ticks_enabled(True)
+    ticked = _rendered(view)
+
+    cx, cy = ticked.width() // 2, ticked.height() // 2
+    # off the crossed lines: nothing in either image
+    assert plain.pixelColor(cx + 40, cy + 40).red() == 90
+    new = [(x, y) for x in range(ticked.width())
+           for y in (cy - 3, cy + 3)
+           if abs(ticked.pixelColor(x, y).red() - 165) <= 3
+           and plain.pixelColor(x, y).red() == 90]
+    assert new, "no ticks along the horizontal crosshair line"
+    assert all(abs(x - cx) > 4 for x, _ in new), "a tick sits on the cross"
+
+
+def test_crosshair_ticks_need_the_crosshair_and_a_calibration(qapp):
+    view = LiveViewWidget()
+    view.resize(640, 480)
+    view.show_frame(_grey_frame(90))
+    view._render_pending()
+    view.set_crosshair_ticks_enabled(True)     # no calibration, no crosshair
+    assert _rendered(view).pixelColor(200, 120).red() == 90
+
+
 def test_ruler_needs_calibration(qapp):
     view = LiveViewWidget()
     view.resize(640, 480)

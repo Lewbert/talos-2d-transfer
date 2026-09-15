@@ -98,6 +98,30 @@ def test_zolix_moving_still_uses_the_hardware_flags():
     assert section._is_moving({"moving": False}) is False
 
 
+def test_both_stages_report_the_same_limit_shape():
+    """The strip draws both stages through ONE code path, so the parsers
+    must hand it the same {'x+': bool, ...} shape — the XYZ dots used to be
+    forced off because nothing read its LIMITS? at all."""
+    zolix = parse_zolix({
+        "status": asdict(StageStatus(limit_x_pos=True, limit_y_neg=True)),
+        "position": asdict(StagePosition()),
+    })
+    sigmakoki = parse_sigmakoki({
+        "status": {"xspd": "0", "yspd": "0", "zspd": "0"},
+        "position": {Axis.X: 0, Axis.Y: 0, Axis.Z: 0},
+        "limits": {"x+": True, "x-": False, "y+": False, "y-": True,
+                   "z+": False, "z-": False},
+    })
+    for parsed in (zolix, sigmakoki):
+        assert parsed["limits"] == {"x+": True, "x-": False,
+                                    "y+": False, "y-": True}
+
+
+def test_sigmakoki_limits_are_absent_when_the_payload_has_none():
+    parsed = parse_sigmakoki({"status": {}, "position": {}})
+    assert parsed["limits"] is None      # the dots stay unlit, not stale
+
+
 def test_parse_sigmakoki_falls_back_to_status_strings():
     payload = {
         "device": "sigmakoki",

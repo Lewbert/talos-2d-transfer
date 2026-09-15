@@ -48,6 +48,10 @@ _COALESCE_KEYS: dict[str, dict[str, Callable[[tuple], tuple]]] = {
 # survive.
 _CONTINUOUS_MOTION = ("set_speed", "move", "move_continuous")
 
+#: Sample the limit switches (a second serial round trip) every Nth poll —
+#: ~0.5 s at the default 100 ms cadence.
+LIMITS_POLL_EVERY = 5
+
 
 class DeviceProxy(QObject):
     sig_connected = Signal(bool)
@@ -71,6 +75,10 @@ class DeviceProxy(QObject):
         self._draining = False
         self._poll_timer: QTimer | None = None
         self._poll_fail_streak = 0
+        # Limit switches (sigmakoki only) are sampled every Nth poll — see
+        # _poll. None until the first successful read.
+        self._limits_cache: dict | None = None
+        self._poll_count = 0
         # Subclass-provided job handlers (e.g. FocusProxy's blocking
         # autofocus run) dispatched by method name instead of the driver.
         self._special_methods: dict[str, Callable] = {}
@@ -306,6 +314,18 @@ class DeviceProxy(QObject):
         payload["pv"] = _optional("read_pv")
         payload["sv"] = _optional("read_sv")
         payload["output_percent"] = _optional("read_output_percent")
+        # Limit switches (the XYZ stage's LIMITS?): a SECOND round trip on
+        # a serial line that drops bytes under motion load, and a switch
+        # does not change between two 100 ms polls — sample every Nth poll
+        # and keep the last reading. Drivers whose limits ride along with
+        # the status registers (zolix) never expose get_limits.
+        self._poll_count += 1
+        if self._limits_cache is None or self._poll_count % LIMITS_POLL_EVERY == 0:
+            read = _optional("get_limits")
+            if read is not None:
+                self._limits_cache = dict(read)
+        if self._limits_cache:
+            payload["limits"] = dict(self._limits_cache)
         limits = _optional("get_soft_limits")
         if limits is not None:
             payload["slim_bounds"] = limits

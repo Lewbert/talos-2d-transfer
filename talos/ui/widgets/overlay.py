@@ -264,7 +264,11 @@ def draw_ruler_q(painter: QPainter, um_per_px: float, frame_shape: tuple,
         painter.restore()
         return
     # Labels: along the TOP edge (X offsets) and the LEFT edge (Y offsets).
+    # The CENTRE (0) is NOT labelled: the crosshair marks it, and a numeral
+    # there fights with the crosshair for the same few pixels.
     for offset in majors_x:
+        if offset == 0:
+            continue
         pos = int(round(cx + offset * scale))
         if pos < 4 or pos > w - 4:
             continue
@@ -275,6 +279,8 @@ def draw_ruler_q(painter: QPainter, um_per_px: float, frame_shape: tuple,
                          Qt.AlignmentFlag.AlignHCenter
                          | Qt.AlignmentFlag.AlignVCenter, text)
     for offset in majors_y:
+        if offset == 0:
+            continue
         pos = int(round(cy + offset * scale))
         if pos < 8 or pos > h - 8:
             continue
@@ -282,6 +288,55 @@ def draw_ruler_q(painter: QPainter, um_per_px: float, frame_shape: tuple,
                          Qt.AlignmentFlag.AlignLeft
                          | Qt.AlignmentFlag.AlignVCenter,
                          tick_label(offset * um_per_px))
+    painter.restore()
+
+
+def draw_crosshair_ticks_q(painter: QPainter, um_per_px: float,
+                           frame_shape: tuple, size: tuple, *,
+                           minor_px: int = 3, major_px: int = 6) -> None:
+    """Calibrated ticks ALONG the crosshair lines (a measuring reticle).
+
+    Same ladder as the ruler, so the reticle and the edge ticks agree about
+    what a division is; majors are longer than minors, and the centre is
+    left bare (the lines already cross there). Drawn on the frame pixmap
+    with the inverse-video composition, like the crosshair itself.
+    """
+    spec = ruler_spec(um_per_px, frame_shape)
+    if spec is None:
+        return
+    w, h = int(size[0]), int(size[1])
+    fw, fh = int(frame_shape[1]), int(frame_shape[0])
+    if fw <= 0 or fh <= 0:
+        return
+    scale = w / float(fw)
+    majors_x, minors_x = tick_offsets(spec, um_per_px, fw)
+    majors_y, minors_y = tick_offsets(spec, um_per_px, fh)
+    cx, cy = w / 2.0, h / 2.0
+    def _ticks(offsets: list[float], on_horizontal_line: bool,
+               half: float) -> None:
+        """xm offsets along a line; the tick is a short PERPENDICULAR
+        segment centred on it."""
+        for offset in offsets:
+            if offset == 0:
+                continue                      # the lines cross there
+            if on_horizontal_line:
+                pos = cx + offset * scale
+                if pos < 1 or pos > w - 1:
+                    continue
+                painter.drawLine(QPointF(pos, cy - half),
+                                 QPointF(pos, cy + half))
+            else:
+                pos = cy + offset * scale
+                if pos < 1 or pos > h - 1:
+                    continue
+                painter.drawLine(QPointF(cx - half, pos),
+                                 QPointF(cx + half, pos))
+
+    painter.save()
+    _ticks(minors_x, True, minor_px / 2.0)
+    _ticks(majors_x, True, major_px / 2.0)
+    _ticks(minors_y, False, minor_px / 2.0)
+    _ticks(majors_y, False, major_px / 2.0)
     painter.restore()
 
 

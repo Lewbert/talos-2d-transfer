@@ -67,6 +67,14 @@ class StubAutofocusService(QObject):
     sig_af_finished = Signal(object)
     sig_cal_finished = Signal(object)
 
+    def __init__(self):
+        super().__init__()
+        self.starts: list = []
+        self.busy = False
+
+    def start_af_s(self, roi_norm=None, bounds=None):
+        self.starts.append({"roi": roi_norm, "bounds": bounds})
+
     def abort(self):
         pass
 
@@ -156,6 +164,32 @@ def test_menu_bar_structure(window):
     assert "Stage Control" in win_actions
     assert "Log" in win_actions
     assert all(a.isCheckable() for a in windows.actions())
+
+
+def test_display_menu_crosshair_submenu(window):
+    """Display → Crosshairs → Crosshair ticks, mirroring the scale bar's
+    burn option: turning the parent off unchecks AND disables the child."""
+    display = [a.menu() for a in window.menuBar().actions()
+               if a.text() == "&Display"][0]
+    titles = [a.text() for a in display.actions()]
+    assert "Scale Bar" in titles and "Crosshairs" in titles
+    assert "Tick ruler" in titles and "Scan path" in titles
+    assert window._crosshair_action.isCheckable()
+    assert window._crosshair_ticks_action.text() == "Crosshair ticks"
+    assert window._crosshair_action.isChecked() is False
+    assert window._crosshair_ticks_action.isEnabled() is False
+
+    window._crosshair_action.setChecked(True)
+    assert window._crosshair_ticks_action.isEnabled() is True
+    assert window._navigation.live_view._crosshair_display is True
+    window._crosshair_ticks_action.setChecked(True)
+    assert window._navigation.live_view._crosshair_ticks is True
+
+    window._crosshair_action.setChecked(False)
+    assert window._crosshair_ticks_action.isChecked() is False
+    assert window._crosshair_ticks_action.isEnabled() is False
+    assert window._navigation.live_view._crosshair_ticks is False
+    assert window._settings.section("display")["crosshair_ticks"] is False
 
 
 def test_objective_combo_in_workspace_corner(window):
@@ -361,6 +395,70 @@ def test_enable_gate_reaches_every_checkbox(window):
     window._manager.set_enabled("zolix", True)
     assert strip_box.isChecked() is True
     assert window._manager.is_enabled("zolix") is True
+
+
+def test_gamepad_autofocus_request_reaches_the_service(window, qapp):
+    """LT+RT arrives as input_system.sig_af_requested and must run the same
+    path as the AF-S button — with on-screen feedback, since the operator
+    otherwise has no way to tell whether the gesture was recognised."""
+    calls = []
+    window._input = None                       # not used by this path
+    window._on_quick_af()
+    assert len(window._autofocus.starts) == 1
+    assert window._msg_label.text() == "Autofocus requested"
+
+    class FakeInput(QObject):
+        sig_af_requested = Signal()
+
+        def __init__(self):
+            super().__init__()
+            self.af_connected = None
+
+    fake = FakeInput()
+    fake.sig_af_requested.connect(window._on_quick_af)
+    fake.sig_af_requested.emit()
+    assert len(window._autofocus.starts) == 2
+
+    # a run already in flight is refused with a visible message
+    window._autofocus.busy = True
+    fake.sig_af_requested.emit()
+    assert len(window._autofocus.starts) == 2
+    assert "already running" in window._msg_label.text()
+
+
+def test_input_log_reaches_the_operator(qapp, tmp_path, monkeypatch):
+    """The input layer's messages (gestures, enable toggles, cancelled
+    holds) were emitted into the void: the operator pressed LT+RT and
+    nothing anywhere said whether it had been recognised."""
+    from PySide6.QtCore import QObject, Signal
+
+    class StubGamepad(QObject):
+        sig_connected = Signal(bool)
+        sig_state = Signal(object)
+
+    class StubInput(QObject):
+        sig_log = Signal(str)
+        sig_dpad_stage = Signal(str)
+        sig_af_requested = Signal()
+
+        def __init__(self):
+            super().__init__()
+            self.gamepad = StubGamepad()
+
+    QSettings.setDefaultFormat(QSettings.Format.IniFormat)
+    QSettings.setPath(QSettings.Format.IniFormat, QSettings.Scope.UserScope,
+                      str(tmp_path))
+    from talos.ui import calibration_context as cc_mod
+    monkeypatch.setattr(cc_mod, "get_calibration_db_path",
+                        lambda: tmp_path / "cal.db")
+
+    stub = StubInput()
+    window = MainWindow(StubManager(), FakeSettings(), AppState(),
+                        input_system=stub,
+                        autofocus_service=StubAutofocusService())
+    stub.sig_log.emit("gamepad LT+RT: autofocus once")
+    assert "LT+RT" in "".join(window._log.panel._lines)
+    assert window._msg_label.text() == "gamepad LT+RT: autofocus once"
 
 
 def test_scan_plan_preview_and_progress(window):

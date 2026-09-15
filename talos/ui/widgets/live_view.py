@@ -23,6 +23,7 @@ from talos.ui.theme import OK
 from talos.ui.widgets.overlay import (
     af_phase_color,
     draw_af_indicator,
+    draw_crosshair_ticks_q,
     draw_ruler_q,
     draw_scale_bar_q,
     draw_scan_plan_q,
@@ -117,6 +118,7 @@ class LiveViewWidget(QWidget):
         self._ruler_enabled = False
         self._um_per_px: float | None = None
         self._crosshair_display = False
+        self._crosshair_ticks = False
         self._af_indicator_enabled = False
         self._scan_plan: ScanPlanOverlay | None = None
         self._scan_path_enabled = True
@@ -162,6 +164,13 @@ class LiveViewWidget(QWidget):
     def set_ruler_enabled(self, on: bool) -> None:
         """The Display-menu tick ruler (calibrated, all four edges)."""
         self._ruler_enabled = bool(on)
+        self._refresh_pixmap()
+        self._overlay.update()
+
+    def set_crosshair_ticks_enabled(self, on: bool) -> None:
+        """Calibrated ticks along the crosshair lines (a reticle). Only
+        meaningful while the crosshair itself is shown."""
+        self._crosshair_ticks = bool(on)
         self._refresh_pixmap()
         self._overlay.update()
 
@@ -321,6 +330,10 @@ class LiveViewWidget(QWidget):
             cx, cy = pixmap.width() // 2, pixmap.height() // 2
             painter.drawLine(cx, 0, cx, pixmap.height() - 1)
             painter.drawLine(0, cy, pixmap.width() - 1, cy)
+        if crosshair and self._crosshair_ticks and self._live_um_per_px():
+            draw_crosshair_ticks_q(painter, self._live_um_per_px(),
+                                   self._last_shape,
+                                   (pixmap.width(), pixmap.height()))
         if ruler:
             draw_ruler_q(painter, self._live_um_per_px(), self._last_shape,
                          (pixmap.width(), pixmap.height()))
