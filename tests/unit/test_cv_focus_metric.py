@@ -8,9 +8,7 @@ from talos.cv.focus_metric import (
     bin2,
     brenner,
     brenner_k,
-    default_roi,
     laplacian_variance,
-    sharpness_profile,
     tenengrad,
 )
 from tests.testing.sim_images import defocus_blur, focus_stack, synthetic_flake_image
@@ -39,27 +37,6 @@ def test_metric_is_strictly_peak_shaped(sharp):
         assert a >= b * 0.99
 
 
-def test_roi_limits_computation():
-    frame = synthetic_flake_image(shape=(240, 320))
-    roi = default_roi(frame.shape)
-    assert roi == (80, 60, 160, 120)
-    full = laplacian_variance(frame)
-    cropped = laplacian_variance(frame, roi)
-    assert cropped >= 0 and full >= 0
-
-
-def test_focus_stack_peak_at_focus_position(sharp):
-    positions = np.arange(-400, 401, 100)
-    frames = focus_stack(positions, focus_pos=0,
-                         img_gen=lambda: sharp, k_per_step=0.02, base_sigma=0.4)
-    scores = sharpness_profile(positions, frames)
-    assert int(scores.argmax()) == 4  # position 0 is index 4
-    assert scores[4] > scores[0] and scores[4] > scores[-1]
-
-
-# ---------------------------------------------------------------------------
-# Low-frequency coarse metrics (adaptive strategy stage 1)
-# ---------------------------------------------------------------------------
 
 def test_low_freq_metrics_peak_shaped_under_defocus(sharp):
     sigmas = (0.0, 2.0, 4.0, 8.0, 16.0)
@@ -96,7 +73,8 @@ def test_bin2_halves_and_preserves_peak(sharp):
 
 def test_bin2_with_roi():
     frame = synthetic_flake_image(shape=(240, 320))
-    roi = default_roi(frame.shape)              # center half
+    roi = (frame.shape[1] // 4, frame.shape[0] // 4,
+           frame.shape[1] // 2, frame.shape[0] // 2)   # center half
     binned = bin2(frame, roi)
     assert binned.shape == (60, 80)             # (120//2, 160//2)
 

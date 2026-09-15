@@ -6,9 +6,9 @@ both renderers show IDENTICAL box/bar/margins.
 Layout rules (scientific accuracy first):
 - The bar length is the LARGEST 1/2/5×10^k ("good number") whose span
   covers at most ``max_fraction`` (1/4) of the image width —
-  ``nice_length_um_at_most``. (The historical ``nice_length_um`` is a
-  ≥-ladder and can overshoot to 2.5× the target — kept for its pinned
-  tests but no longer used by the scale bar.)
+  ``nice_length_um_at_most``. The historical ``nice_length_um`` (nearest
+  ladder value, up to 2.5× overshoot) was removed in the 2026-09-16 audit:
+  nothing called it, and only its own tests kept it alive.
 - The backing box has EQUAL spacing to the image's right and bottom
   edges; the label sits strictly UNDER the bar (no overlap); bar and
   label are centered horizontally in the box.
@@ -25,21 +25,6 @@ import numpy as np
 
 _LADDER = (1.0, 2.0, 5.0)
 
-
-def nice_length_um(um_per_px: float, view_width_px: int,
-                   target_fraction: float = 0.20) -> float:
-    """Smallest 1/2/5×10^k length whose pixel span covers at least
-    ``target_fraction`` of the view width (the historical ≥-ladder)."""
-    if um_per_px <= 0 or view_width_px <= 0:
-        return 0.0
-    target_um = um_per_px * view_width_px * target_fraction
-    exponent = math.floor(math.log10(target_um))
-    for k in range(exponent - 1, exponent + 2):
-        for step in _LADDER:
-            candidate = step * (10.0 ** k)
-            if candidate >= target_um:
-                return candidate
-    return target_um
 
 
 def nice_length_um_at_most(um_per_px: float, view_width_px: int,

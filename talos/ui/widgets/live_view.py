@@ -232,10 +232,6 @@ class LiveViewWidget(QWidget):
         self._roi_norm = roi_norm
         self._overlay.update()
 
-    def clear_roi(self) -> None:
-        self._roi_norm = None
-        self._overlay.update()
-
     def mousePressEvent(self, event) -> None:  # noqa: N802
         if self._selecting and event.button() == Qt.MouseButton.LeftButton:
             self._drag_start = event.position()

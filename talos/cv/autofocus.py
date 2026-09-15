@@ -48,7 +48,7 @@ from __future__ import annotations
 import logging
 import time
 from dataclasses import dataclass, field, replace
-from typing import Any, Callable
+from typing import Callable
 
 import numpy as np
 from PySide6.QtCore import QObject, Signal
@@ -71,6 +71,52 @@ PHASE_LANDING = 3
 
 _MODE_AF_S = "AF_S"
 _MODE_AF_REFINE = "AF_REFINE"
+
+
+def slim_enforced(focus) -> bool | None:
+    """Whether the FIRMWARE enforces the soft limits (SLIM).
+
+    True/False when the driver can report it, None when it cannot. It gates
+    every limit check on the controller and ships with the flag OFF, so
+    "the bounds read back" was never evidence that a sweep cannot run past
+    them.
+    """
+    getter = getattr(focus, "get_slim_state", None)
+    if getter is None:
+        return None
+    try:
+        return bool(getter())
+    except DeviceError:
+        return None
+
+
+def clamp_to_soft_limits(focus, lo: int, hi: int, margin: int,
+                         on_log=None) -> tuple[int, int] | None:
+    """Clamp the travel window [lo, hi] to the focus axis's soft limits,
+    ``margin`` steps inside them. None when the window collapses.
+
+    Shared by the autofocus preflight AND the backlash calibration: both
+    drive the axis toward the ends of its travel. The calibration used to
+    have no bound at all — it swept ``center ± 250`` steps with no limits
+    read and no SLIM check, while autofocus clamps and warns. A software
+    bound is free and stricter than none, and it is the ONLY bound when the
+    firmware flag is off.
+    """
+    try:
+        soft = focus.get_soft_limits()
+    except DeviceError:
+        soft = None
+        if on_log is not None:
+            on_log("soft limits unreadable — using the configured span only")
+    if slim_enforced(focus) is False and on_log is not None:
+        on_log("WARNING: firmware soft limits are OFF (SLIM=0) — the "
+               "bounds below are a software clamp only")
+    if soft is not None:
+        soft_lo, soft_hi = soft
+        if soft_lo is not None and soft_hi is not None:
+            lo = max(int(lo), int(soft_lo) + int(margin))
+            hi = min(int(hi), int(soft_hi) - int(margin))
+    return (lo, hi) if lo < hi else None
 
 
 def move_to_verified(focus, pos: int, speed: int,
@@ -355,7 +401,6 @@ class AutofocusResult:
     message: str = ""
     phase: str = ""               # where it stopped: preflight|coarse|fine|landing|done|motion
     peak_at_edge: bool = False
-    baseline_score: float = 0.0
     restore_on_fail: bool = True  # False: keep the axis where it stopped
                                   # (stage-2 failures — already near focus)
 
@@ -563,13 +608,7 @@ class _BaseAutofocusController(QObject):
 
     def _slim_enforced(self) -> bool | None:
         """True/False when the driver can report it, None when it cannot."""
-        getter = getattr(self._focus, "get_slim_state", None)
-        if getter is None:
-            return None
-        try:
-            return bool(getter())
-        except DeviceError:
-            return None
+        return slim_enforced(self._focus)
 
     def _preflight(self, center: int, cfg: AutofocusConfig) \
             -> tuple[int, int] | None:
@@ -578,21 +617,6 @@ class _BaseAutofocusController(QObject):
         the stage has not moved, so no restore is due), raises _AfExit on
         image sanity failures."""
         curve = self._curve
-        try:
-            lo, hi = self._focus.get_soft_limits()
-        except DeviceError:
-            lo, hi = None, None
-            self.sig_log.emit("soft limits unreadable — using config span only")
-        # Whether the FIRMWARE enforces those bounds is a separate
-        # question: it gates every limit check on SLIM and ships with the
-        # flag OFF, so "the bounds read back" was never evidence that a
-        # sweep could not run past them. Ask explicitly (None = the driver
-        # cannot say).
-        enforced = self._slim_enforced()
-        if enforced is False:
-            self.sig_log.emit(
-                "WARNING: firmware soft limits are OFF (SLIM=0) — the focus "
-                "bounds below are a software clamp only")
         margin = max(cfg.fine_step * 10, 1)
         override = getattr(self, "_bounds_override", None)
         if override is not None:
@@ -604,13 +628,11 @@ class _BaseAutofocusController(QObject):
                 else cfg.span_steps // 2
             window_lo = center - minus
             window_hi = center + plus
-        if lo is not None and hi is not None:
-            # ALWAYS clamp: a software bound is free and stricter than
-            # none, and it is the only bound when the firmware flag is off.
-            window_lo = max(window_lo, lo + margin)
-            window_hi = min(window_hi, hi - margin)
-        if window_lo >= window_hi:
+        window = clamp_to_soft_limits(self._focus, window_lo, window_hi,
+                                      margin, on_log=self.sig_log.emit)
+        if window is None:
             return None
+        window_lo, window_hi = window
 
         # ---- Image sanity: nothing to see → refuse to sweep --------------
         if cfg.preflight_check and self._frame_reader is not None:
@@ -745,8 +767,7 @@ class _BaseAutofocusController(QObject):
                 phase="landing"))
         result = AutofocusResult(final_pos, peak.score, curve,
                                  coarse_curve=getattr(self, "_low_curve", []),
-                                 success=True, message="ok", phase="done",
-                                 baseline_score=peak.score)
+                                 success=True, message="ok", phase="done")
         self.sig_done.emit(result)
         return result
 

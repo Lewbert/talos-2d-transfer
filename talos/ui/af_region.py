@@ -17,28 +17,23 @@ import logging
 
 from PySide6.QtCore import QObject, Signal
 
+from talos.cv import af_roi
+
 logger = logging.getLogger(__name__)
 
 #: The region "Reset ROI" restores: the centre 2/3 × 2/3 of the frame (the
 #: historical default — fewer pixels to score, away from the vignetted edge).
 DEFAULT_ROI_NORM = (0.1667, 0.1667, 0.6667, 0.6667)
 
-MIN_SIDE = 0.02          # a ROI smaller than 2 % of a side is not useful
+# The clamp rule lives in the CV layer so the autofocus service can apply the
+# SAME one to a stored ROI (it used to pass the settings value through
+# unsanitized and crash inside cv2 on a 1-pixel crop).
+MIN_SIDE = af_roi.MIN_SIDE
 
 
 def sanitize_roi(norm) -> tuple[float, float, float, float] | None:
     """Clamp an arbitrary (x, y, w, h) into the frame; None when unusable."""
-    if norm is None:
-        return None
-    try:
-        x, y, w, h = (float(v) for v in norm)
-    except (TypeError, ValueError):
-        return None
-    x = min(max(x, 0.0), 1.0 - MIN_SIDE)
-    y = min(max(y, 0.0), 1.0 - MIN_SIDE)
-    w = min(max(w, MIN_SIDE), 1.0 - x)
-    h = min(max(h, MIN_SIDE), 1.0 - y)
-    return (round(x, 4), round(y, 4), round(w, 4), round(h, 4))
+    return af_roi.sanitize_roi_norm(norm)
 
 
 def mirror_roi_norm(norm) -> tuple[float, float, float, float] | None:

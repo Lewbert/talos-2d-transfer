@@ -28,7 +28,8 @@ from PySide6.QtCore import QObject, Signal
 
 from talos.cv.af_math import parabolic_fit
 from talos.cv.af_roi import roi_for_resolution
-from talos.cv.autofocus import continuous_scan, move_to_verified
+from talos.cv.autofocus import (clamp_to_soft_limits, continuous_scan,
+                                move_to_verified)
 from talos.cv.focus_metric import METRICS
 
 logger = logging.getLogger(__name__)
@@ -36,7 +37,10 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class BacklashCalConfig:
-    sweep_steps: int = 150          # half-span of each sweep (±30 µm at 0.2 µm/step)
+    sweep_steps: int = 150          # half-span of each sweep (±30 µm at 0.2
+                                    # µm/step), CLAMPED to the focus soft
+                                    # limits at run() time — the approach
+                                    # legs need the same room again
     speed: int = 30                 # steps/s (6 µm/s): SLOW — sample density
                                     # for the measurement AND minimal motion
                                     # blur (0.24 µm at 40 ms exposure); the
@@ -94,6 +98,24 @@ class BacklashCalibrator(QObject):
         self._abort_reason = "aborted by user"
         deadline = time.monotonic() + cfg.timeout_s
         bottom, top = center - cfg.sweep_steps, center + cfg.sweep_steps
+        # Clamp the WHOLE travel — including the past-the-end approach legs —
+        # to the focus axis's soft limits: this sweep used to run
+        # center ± (sweep + settle) steps with no limits read and no SLIM
+        # check, i.e. with none of the protection every autofocus sweep gets.
+        margin = max(cfg.settle_steps, 1)
+        window = clamp_to_soft_limits(self._focus, bottom, top, margin,
+                                      on_log=self.sig_log.emit)
+        if window is None:
+            return BacklashResult(
+                message="sweep does not fit inside the focus soft limits — "
+                        "reduce sweep_steps or re-centre the axis")
+        bottom, top = window
+        sweep = top - bottom
+        if sweep < 2 * cfg.settle_steps:
+            return BacklashResult(
+                message=f"only {sweep} steps of travel inside the soft limits "
+                        f"— the sweep needs more than 2× the "
+                        f"{cfg.settle_steps}-step approach leg")
         up_curve: list[tuple[float, float]] = []
         down_curve: list[tuple[float, float]] = []
 

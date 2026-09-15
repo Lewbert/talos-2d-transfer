@@ -49,7 +49,6 @@ def system(tmp_path):
 # --- the pure map ---------------------------------------------------------
 
 def test_identity_map_changes_nothing():
-    assert IDENTITY.is_identity
     assert IDENTITY.apply("x", 1) == ("x", 1)
     assert IDENTITY.apply("r", -1) == ("r", -1)
 
@@ -84,9 +83,10 @@ def test_axis_map_for_reads_the_device_keys(tmp_path):
     maps = axis_maps(settings)
     assert maps["zolix"].invert == {"x": True, "y": False, "r": True}
     assert maps["zolix"].flip_xy is True
-    assert maps["sigmakoki"].is_identity
+    # an all-false invert dict IS the neutral map, by behaviour
+    assert maps["sigmakoki"].apply("x", 1) == IDENTITY.apply("x", 1)
     assert maps["focus"].invert == {"z": True}
-    assert axis_map_for(settings, "unknown").is_identity
+    assert axis_map_for(settings, "unknown") == IDENTITY
 
 
 # --- the dispatch choke point --------------------------------------------

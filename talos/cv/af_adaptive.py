@@ -69,14 +69,12 @@ from talos.cv.af_math import (
     probe_direction,
     probe_near_focus,
 )
-from talos.cv.af_roi import roi_for_resolution
 from talos.cv.autofocus import (
     _AfExit,
     _BaseAutofocusController,
     _MODE_AF_S,
     AutofocusConfig,
     AutofocusResult,
-    move_to_verified,
 )
 from talos.cv.focus_metric import METRICS, bin2
 from talos.hal.base import DeviceError, DeviceTimeoutError

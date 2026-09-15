@@ -54,9 +54,6 @@ class AxisMap:
             direction = -direction
         return axis, direction
 
-    @property
-    def is_identity(self) -> bool:
-        return not self.flip_xy and not any(self.invert.values())
 
 
 #: The neutral map (used for unknown devices).

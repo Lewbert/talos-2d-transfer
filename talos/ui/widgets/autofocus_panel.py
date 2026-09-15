@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from talos.cv.autofocus_service import planned_kwargs
 from talos.ui.widgets.overlay import PHASE_NAMES
 from talos.ui.widgets.sharpness_curve import SharpnessCurveWidget
 
@@ -74,8 +75,11 @@ class AutofocusPanel(QGroupBox):
         self._progress.setRange(0, 1000)
         root.addWidget(self._progress)
         self._curve = SharpnessCurveWidget()
-        self._curve.set_um_per_step(
-            float(settings.device("focus").get("um_per_step", 0.2)))
+        # µm per step is NOT cached here: _refresh_objective() reads it live
+        # (it is called at the end of __init__ and on every objective change),
+        # so a Preferences edit cannot leave this curve axis — and the "best
+        # N µm" line built from it — on the old scale while the strip uses
+        # the new one.
         root.addWidget(self._curve)
 
         # --- status lines ------------------------------------------------------
@@ -109,14 +113,18 @@ class AutofocusPanel(QGroupBox):
             "The whole frame is scored (Autofocus → AF ROI to crop it)")
 
     def _on_focus_once(self) -> None:
+        # No roi_norm argument: the service reads the same persisted region
+        # this panel displays (one source of truth). Ask the SERVICE first —
+        # it owns the busy rule — because a refused start used to wipe the
+        # curve and arm Abort, and that Abort then killed the job that was
+        # already running.
+        if not self._service.start_af_s():
+            return
         self._curve.clear()
         self._progress.setValue(0)
         # Enable Abort immediately: the run can be cancelled even during
         # the 350 ms arm window (_on_finished disables it on every path).
         self._abort.setEnabled(True)
-        # No roi_norm argument: the service reads the same persisted
-        # region this panel displays (one source of truth).
-        self._service.start_af_s()
 
     # ------------------------------------------------------------------
 
@@ -164,19 +172,28 @@ class AutofocusPanel(QGroupBox):
             self._result_label.setText(
                 f"backlash calibration {result.message}")
 
+    def refresh_from_settings(self) -> None:
+        """A Preferences Apply may have changed µm/step or the AF window
+        bounds — every other settings-derived readout in the app refreshes
+        on it (the strip, the input system, the calibration cache)."""
+        self._refresh_objective()
+
     def _refresh_objective(self) -> None:
         rows = self._settings.get("objectives") or []
         index = int(self._state.objective)
         if not rows:
             return
         row = rows[min(index, len(rows) - 1)]
-        # the search window = the editable max bounds × the AF speed
-        # multiplier (mirrors build_config — window_um is legacy data)
-        mult = row.get("af_speed_multiplier") or row.get("speed_multiplier") \
-            or 1.0
-        af_cfg = self._settings.section("autofocus")
-        minus_um = float(af_cfg.get("window_minus_um", 500.0)) * float(mult)
-        plus_um = float(af_cfg.get("window_plus_um", 500.0)) * float(mult)
+        # The PLANNER's window and speeds (planned_kwargs is the one
+        # settings→config mapping) — and µm_per_step is read HERE, not cached
+        # at construction: editing it in Preferences used to leave this panel
+        # showing positions on the old scale while the strip used the new one.
+        kwargs, _warnings = planned_kwargs(self._settings, row)
+        um_per_step = float(self._settings.device("focus").get(
+            "um_per_step", 0.2))
+        self._curve.set_um_per_step(um_per_step)
+        minus_um = kwargs["window_minus_steps"] * um_per_step
+        plus_um = kwargs["window_plus_steps"] * um_per_step
         backlash_um = float(self._settings.device("focus").get("backlash_um", 0.0))
         text = (f"objective: {row.get('name', '?')}  {row.get('mag', '?')}× "
                 f"NA {row.get('na', '?')}  DOF ~{row.get('dof_um', '?')} µm  "

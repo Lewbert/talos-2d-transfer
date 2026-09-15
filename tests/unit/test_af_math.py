@@ -953,3 +953,66 @@ def test_probe_classify_below_floor():
     assert not v.near and v.branch == "slope" and v.direction == 1
     v = _classify([4.0, 5.0, 4.0], [10.0, 10.0, 10.0], floor=10.0)
     assert not v.near and v.branch == "blind" and v.direction is None
+
+
+# ---------------------------------------------------------------------------
+# The driver's speed window, the 0 µm search window, and the µm→steps floor
+# ---------------------------------------------------------------------------
+
+def test_speeds_clamp_to_the_drivers_configured_window():
+    """Regression (2026-09-16): af_math carried its own 10/5000 constants
+    "mirroring" the driver, but the driver clamps to the CONFIGURED
+    clamp_speed_lo/hi — a lowered ceiling made the planner emit speeds the
+    driver rejects mid-sweep (CommandRejectedError → "internal error")."""
+    from talos.cv.af_math import driver_speed_clamp
+
+    assert driver_speed_clamp({}) == (10, 5000)
+    assert driver_speed_clamp({"clamp_speed_lo": 100,
+                               "clamp_speed_hi": 800}) == (100, 800)
+    # never WIDER than the firmware window, whatever the settings say
+    assert driver_speed_clamp({"clamp_speed_lo": 1,
+                               "clamp_speed_hi": 99_999}) == (10, 5000)
+    # a self-contradicting pair falls back instead of inverting the range
+    assert driver_speed_clamp({"clamp_speed_lo": 6000,
+                               "clamp_speed_hi": 5000}) == (10, 5000)
+    assert driver_speed_clamp({"clamp_speed_lo": "junk"}) == (10, 5000)
+
+    row = {"mag": 5, "na": 0.15, "coarse_step_um": 5.0, "fine_step_um": 1.0,
+           "af_speed_multiplier": 1.0}
+    cfg, warnings = build_config(row, 0.2, {"coarse_speed_base_um_s": 500.0},
+                                 focus_cfg={"clamp_speed_hi": 800})
+    assert cfg["coarse_speed"] == 800
+    assert cfg["fine_speed"] <= 800
+    assert cfg["hill_v_cap"] <= 800
+    assert any("800" in w for w in warnings)
+
+
+def test_a_zero_search_window_is_reported_not_silently_one_step():
+    """A 0 µm bound is not "unbounded": µm→steps floors a step size at 1, so
+    it became a ±1-step window and the run died claiming the ARM was outside
+    the window — a message that points at the wrong thing."""
+    row = {"mag": 5, "na": 0.15, "coarse_step_um": 5.0, "fine_step_um": 1.0}
+    cfg, warnings = build_config(row, 0.2, {"window_plus_um": 0.0,
+                                            "window_minus_um": 500.0})
+    assert cfg["window_plus_steps"] == 5      # one fine step (1 µm / 0.2)
+    assert any("0 µm" in w for w in warnings)
+
+
+def test_um_to_steps_floor_policy():
+    """floor=1 for a step SIZE (a commanded step must move), floor=0 for a
+    DELTA ("no motion" is a real answer — objective_offsets used to carry its
+    own copy of this conversion)."""
+    from talos.cv.af_math import um_to_steps
+
+    assert um_to_steps(0.0, 0.2) == 1          # step size
+    assert um_to_steps(0.0, 0.2, floor=0) == 0  # delta
+    assert um_to_steps(1.0, 0.2, floor=0) == 5
+    assert um_to_steps(-1.0, 0.2, floor=0) == -5
+    assert um_to_steps(0.0, 0.0, floor=0) == 0  # hand-edited µm/step
+    assert um_to_steps(2.0, 0.0) == 0           # ...no ZeroDivisionError
+
+    from talos.objective_offsets import offset_steps
+
+    assert offset_steps(0.0, 0.2) == 0
+    assert offset_steps(0.4, 0.2) == 2
+    assert offset_steps(1.0, 0.0) == 0

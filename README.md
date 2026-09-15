@@ -210,6 +210,7 @@ without an explicit confirmation flag):
 | `tools/af_bench*.py`, `tools/af_abort_bench.py`, `tools/autofocus_hardware.py` | autofocus benches (one per algorithm generation) |
 | `tools/smartcam_*.py`, `tools/camera_benchmark.py` | camera backend/decode studies |
 | `tools/ui_shot.py`, `tools/ui_scale_check.py` | UI screenshot rig + scale-bar pixel check |
+| `tools/camera_flip_check.py` | live view vs a saved snapshot, to confirm the flip orientation by eye |
 | `tools/validate_cv.py` | flake/edge CV on recorded images |
 | `tools/hardware_scan.py`, `tools/af_refocus.py` | standalone scan / refocus helpers |
 | `tools/make_qss_assets.py`, `tools/migrate_settings.py` | asset generation, first-run settings import |

@@ -204,8 +204,7 @@ def test_reconnect_aborts_an_inflight_run(rig):
 
 def _result(success=True, baseline=1000.0, message="ok"):
     return AutofocusResult(best_position=42, best_score=baseline,
-                           success=success, message=message, phase="done",
-                           baseline_score=baseline)
+                           success=success, message=message, phase="done")
 
 
 def test_af_s_launch_never_touches_the_camera(rig):
@@ -569,3 +568,35 @@ def test_calibration_refusal_does_not_strand_the_service():
     assert results and not results[0].success
     assert "disabled" in results[0].message
     assert service._state.mode == "MANUAL", "the mode must not stay AUTOFOCUS"
+
+
+def test_planned_kwargs_is_the_one_mapping_the_readouts_show():
+    """Regression (2026-09-16): the UI readouts re-derived the multiplier
+    with "af_speed_multiplier or speed_multiplier or 1.0" and a hardcoded
+    50 st/s fine floor, while build_config falls back to (na_min/na)² — a row
+    without an explicit multiplier was advertised as an unscaled
+    ±500 µm / 500 st/s search and actually ran ±70 µm / 70 st/s."""
+    from talos.cv.autofocus_service import planned_kwargs
+
+    settings = FakeSettings()
+    row = {"name": "custom 20x", "mag": 20, "na": 0.40, "dof_um": 4.0,
+           "coarse_step_um": 1.0, "fine_step_um": 0.2}
+    kwargs, _warnings = planned_kwargs(settings, row)
+    # (na_min/na)² = (0.15/0.40)² = 0.1406 — the numbers the run will use
+    assert 300 <= kwargs["window_plus_steps"] <= 400      # not 2500
+    assert 40 <= kwargs["coarse_speed"] <= 100            # not 500
+    assert kwargs["fine_speed"] >= kwargs["coarse_speed"]
+
+
+def test_default_roi_from_settings_is_sanitized():
+    """A hand-edited default_roi_norm used to reach the metric verbatim."""
+    settings = FakeSettings()
+    settings.data["autofocus"]["default_roi_norm"] = (0.9999, 0.9999,
+                                                     0.0001, 0.0001)
+    service = AutofocusService(FakeManager(), settings, FakeState(),
+                               LatestFrameSlot())
+    assert service._default_roi() == (0.98, 0.98, 0.02, 0.02)
+    settings.data["autofocus"]["default_roi_norm"] = None
+    assert service._default_roi() is None      # the shipped "whole frame"
+    settings.data["autofocus"]["default_roi_norm"] = [0.1, 0.1]
+    assert service._default_roi() is None

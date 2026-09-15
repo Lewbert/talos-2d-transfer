@@ -21,6 +21,7 @@ import time
 
 from PySide6.QtCore import QObject, QTimer, Signal
 
+from talos.cv import af_roi
 from talos.cv.af_math import build_config, um_to_steps
 from talos.cv.autofocus import (
     AutofocusConfig,
@@ -43,6 +44,37 @@ _ABORT_EXCLUSIONS = {
     ("focus", "autofocus"), ("focus", "backlash_calibrate"),
     ("focus", "stop"), ("camera", "set_property"),
 }
+
+
+def planned_kwargs(settings, row: dict) -> tuple[dict, list[str]]:
+    """``build_config`` wired the way the SERVICE calls it — the ONE place
+    the settings→config mapping lives.
+
+    The UI readouts show these numbers too. They used to re-derive them with
+    ``af_speed_multiplier or speed_multiplier or 1.0`` plus a hardcoded
+    fine-speed floor, so an objective row without an explicit multiplier was
+    advertised as an unscaled "search −500/+500 µm · coarse 500 st/s" while
+    the run actually used the (na_min/na)² fallback — ±53 µm and 53 st/s at
+    20×. One mapping, one set of numbers.
+
+    Inputs it folds in: the camera's CURRENT exposure (the blur budget is
+    computed against what the camera really has — the autofocus never
+    touches exposure/gain), the LOWEST-power objective's NA as the speed
+    reference (that objective gets exactly the global base speed), the
+    mechanism-level backlash (one value for every objective), and the focus
+    driver's speed window.
+    """
+    row = dict(row or {})
+    focus_cfg = settings.device("focus")
+    row["backlash_um"] = float(focus_cfg.get(
+        "backlash_um", row.get("backlash_um", 0.0)))
+    af_cfg = dict(settings.section("autofocus"))
+    af_cfg["af_exposure_us"] = float(settings.device("camera").get(
+        "exposure_us", af_cfg.get("af_exposure_us", 20000)))
+    rows = settings.get("objectives") or []
+    na_min = min((float(r["na"]) for r in rows if r.get("na")), default=None)
+    return build_config(row, float(focus_cfg.get("um_per_step", 0.2)), af_cfg,
+                        na_min=na_min, focus_cfg=focus_cfg)
 
 
 class AutofocusService(QObject):
@@ -171,35 +203,48 @@ class AutofocusService(QObject):
     # ------------------------------------------------------------------
     # AF-S
     # ------------------------------------------------------------------
-
     def _default_roi(self) -> tuple | None:
-        """Center 1280×720-equivalent crop when no user ROI is drawn —
-        metric computation on ~2× fewer pixels than the full 1080p frame."""
+        """The stored default region when no user ROI is drawn.
+
+        Sanitized with the SAME clamp the UI applies (``af_roi`` owns the
+        rule): a hand-edited value used to reach the metric verbatim, where a
+        1-pixel crop at the frame edge made cv2 raise inside the metric —
+        reported to the operator as "internal error". The shipped value is
+        ``null`` = the whole frame; the docstring here used to claim a centre
+        crop that was only ever the "Reset ROI" button's default.
+        """
         roi = self._af_cfg.get("default_roi_norm")
         if not isinstance(roi, (list, tuple)) or len(roi) != 4:
             return None
-        return tuple(float(v) for v in roi)
+        return af_roi.sanitize_roi_norm(roi)
 
     def start_af_s(self, roi_norm: tuple | None = None,
-                   bounds: tuple[int, int] | None = None) -> None:
+                   bounds: tuple[int, int] | None = None) -> bool:
         """One-shot focus-and-stop, armed at the current position.
         ``bounds`` (absolute stage steps) overrides the symmetric search
-        window — asymmetric scenario-specific AF."""
+        window — asymmetric scenario-specific AF.
+
+        Returns False when the run was REFUSED (already busy, or no focus
+        device): the caller must not reset its own progress UI for a run
+        that never started — the AF panel used to clear the displayed curve
+        and arm Abort, and that Abort then killed the job that WAS running.
+        """
         if self.busy:
             logger.warning("Autofocus: busy (%s) — ignoring start", self._job_kind)
-            return
+            return False
         if not self._focus_connected:
             logger.warning("Autofocus: focus stage not connected — refusing start")
             self.sig_af_finished.emit(AutofocusResult(
                 best_position=self._manager.focus_position, best_score=0.0,
                 message="focus stage not connected — autofocus unavailable",
                 phase="connect"))
-            return
+            return False
         self._roi_norm = roi_norm if roi_norm is not None else self._default_roi()
         cfg = self._make_config(mode="AF_S")
         self._launch("af_s", AutofocusRequest(
             center_steps=self._manager.focus_position, config=cfg,
             roi_norm=self._roi_norm, bounds=bounds))
+        return True
 
     # ------------------------------------------------------------------
     # Backlash calibration
@@ -266,23 +311,10 @@ class AutofocusService(QObject):
         the blur-budget warning is computed against the exposure the
         camera actually has."""
         row = self._objective_row()
-        # Backlash is a MECHANISM property of the focus axis — one value
-        # serves every objective (measured at the highest magnification,
-        # where the sharpness peak is narrowest).
-        row = dict(row)
-        row["backlash_um"] = float(self._focus_cfg.get(
-            "backlash_um", row.get("backlash_um", 0.0)))
         af_cfg = dict(self._af_cfg)
         af_cfg["af_exposure_us"] = float(self._settings.device("camera").get(
             "exposure_us", af_cfg.get("af_exposure_us", 20000)))
-        # the speed reference: the LOWEST-POWER objective's NA — its
-        # auto multiplier is 1.0 (the table's max speed = the global
-        # base); every other objective scales by (na_min/na)²
-        rows = self._settings.get("objectives") or []
-        na_min = min((float(r["na"]) for r in rows if r.get("na")),
-                     default=None)
-        kwargs, warnings = build_config(
-            row, self._um_per_step(), af_cfg, na_min=na_min)
+        kwargs, warnings = planned_kwargs(self._settings, row)
         for warning in warnings:
             self.sig_af_log.emit(f"config warning: {warning}")
         cfg = AutofocusConfig(

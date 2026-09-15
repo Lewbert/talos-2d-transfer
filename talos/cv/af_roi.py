@@ -12,6 +12,33 @@ No Qt — the widget layer converts QRectF to the plain tuples used here.
 
 from __future__ import annotations
 
+#: A ROI smaller than 2 % of a side is not useful.
+MIN_SIDE = 0.02
+
+
+def sanitize_roi_norm(norm) -> tuple[float, float, float, float] | None:
+    """Clamp an arbitrary normalized (x, y, w, h) into the frame; None when
+    unusable.
+
+    Lives here (not in the widget layer) because BOTH sides need it: the
+    rubber band's result and the value read back from settings at run time.
+    The autofocus used to pass the stored tuple through unsanitized, so a
+    hand-edited ``default_roi_norm`` of (0.9999, 0.9999, 0.0001, 0.0001)
+    produced a 1-pixel crop at the frame edge and cv2 raised inside the
+    metric — surfaced to the operator as "internal error".
+    """
+    if norm is None:
+        return None
+    try:
+        x, y, w, h = (float(v) for v in norm)
+    except (TypeError, ValueError):
+        return None
+    x = min(max(x, 0.0), 1.0 - MIN_SIDE)
+    y = min(max(y, 0.0), 1.0 - MIN_SIDE)
+    w = min(max(w, MIN_SIDE), 1.0 - x)
+    h = min(max(h, MIN_SIDE), 1.0 - y)
+    return (round(x, 4), round(y, 4), round(w, 4), round(h, 4))
+
 
 def fit_transform(widget_size: tuple[int, int], frame_shape: tuple) \
         -> tuple[float, float, float]:
@@ -82,15 +109,27 @@ def roi_for_resolution(roi_norm: tuple[float, float, float, float] | None,
                        frame_shape: tuple) -> tuple[int, int, int, int] | None:
     """Normalized ROI → pixel ROI for a frame of the given shape (used
     when the camera resolution changes: the selection follows the same
-    scene area)."""
+    scene area).
+
+    The result is guaranteed to be a NON-EMPTY slice of the frame: the old
+    version floored w/h at 1 pixel but let x run to the frame edge, so a
+    bad stored ROI produced an empty array and cv2 raised inside the metric.
+    """
     if roi_norm is None:
         return None
     xn, yn, wn, hn = roi_norm
     fw, fh = frame_shape[1], frame_shape[0]
-    x = int(round(xn * fw))
-    y = int(round(yn * fh))
-    w = max(1, int(round(wn * fw)))
-    h = max(1, int(round(hn * fh)))
+    if fw <= 0 or fh <= 0:
+        return None
+    x = max(0, min(int(round(xn * fw)), fw - 1))
+    y = max(0, min(int(round(yn * fh)), fh - 1))
+    w = max(1, min(int(round(wn * fw)), fw - x))
+    h = max(1, min(int(round(hn * fh)), fh - y))
+    # NOTE: the crop is guaranteed non-empty (a 1-pixel ROI is still a valid
+    # — if unhelpful — region; `is_degenerate` is the separate "too small to
+    # score reliably" judgement its callers apply, and it is much stricter:
+    # applying it here would silently replace a small user ROI with the
+    # whole frame).
     return (x, y, w, h)
 
 

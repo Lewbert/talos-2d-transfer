@@ -31,6 +31,8 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from talos.cv.autofocus_service import planned_kwargs
+
 _EXPOSURE_MIN, _EXPOSURE_MAX = 61.0, 1_000_000.0
 
 
@@ -669,18 +671,19 @@ class AfSettingsWidget(QWidget):
             return
         idx = int(getattr(self._state, "objective", 0))
         row = rows[min(idx, len(rows) - 1)]
-        # mirrors build_config: window = max bounds × mult, coarse speed
-        # = base × mult ÷ um_per_step (clamped to the driver range)
-        mult = float(row.get("af_speed_multiplier")
-                     or row.get("speed_multiplier") or 1.0)
+        # The PLANNER's numbers, not a re-derivation: the readout used to
+        # scale by "af_speed_multiplier or 1.0" while build_config falls back
+        # to (na_min/na)², and it hardcoded a 50 st/s fine floor — so a row
+        # without an explicit multiplier was advertised 9× faster and 9×
+        # wider than the run.
+        kwargs, _warnings = planned_kwargs(self._settings, row)
         um = float(self._settings.device("focus").get("um_per_step", 0.2))
-        minus_um = self._minus.value() * mult
-        plus_um = self._plus.value() * mult
-        coarse = int(min(5000, max(10, round(mult * self._base.value() / um))))
-        fine = max(50, coarse)
+        minus_um = kwargs["window_minus_steps"] * um
+        plus_um = kwargs["window_plus_steps"] * um
         self._readout.setText(
             f"{row.get('name', '?')}: search −{minus_um:.0f} / "
-            f"+{plus_um:.0f} µm · coarse {coarse} st/s · fine {fine} st/s")
+            f"+{plus_um:.0f} µm · coarse {kwargs['coarse_speed']} st/s · "
+            f"fine {kwargs['fine_speed']} st/s")
 
     def bounds_um(self) -> float:
         return self._bounds.value()

@@ -11,8 +11,7 @@ the raw delta steps and the display moves the same way.
 
 from __future__ import annotations
 
-_SPEED_LO = 10
-_SPEED_HI = 5000
+from talos.cv.af_math import driver_speed_clamp, um_to_steps
 
 
 def offset_delta_um(old_row: dict | None, new_row: dict | None) -> float:
@@ -23,18 +22,22 @@ def offset_delta_um(old_row: dict | None, new_row: dict | None) -> float:
 
 
 def offset_steps(delta_um: float, um_per_step: float) -> int:
-    """µm → steps; 0 when um_per_step is not positive."""
-    if um_per_step <= 0:
-        return 0
-    return int(round(delta_um / um_per_step))
+    """µm → steps for a DELTA (floor=0: zero means "no motion", and a
+    non-positive µm/step means the same). Uses the one conversion helper —
+    this used to be a second implementation with different edge behaviour."""
+    return um_to_steps(delta_um, um_per_step, floor=0)
 
 
 def offset_speed_steps_s(row: dict | None, focus_cfg: dict) -> int:
     """The switch-move speed: the focus max speed × the NEW objective's
-    manual-focus multiplier, clamped to the driver's range."""
-    max_speed = float((focus_cfg or {}).get("max_speed", 2000) or 2000)
+    manual-focus multiplier, clamped to the DRIVER's window (the same
+    helper the autofocus planner uses — this used to carry its own copy of
+    the 10/5000 constants, a third home for one rule)."""
+    focus_cfg = focus_cfg or {}
+    max_speed = float(focus_cfg.get("max_speed", 2000) or 2000)
     mult = float((row or {}).get("focus_manual_multiplier") or 1.0)
-    return int(max(_SPEED_LO, min(_SPEED_HI, round(max_speed * mult))))
+    lo, hi = driver_speed_clamp(focus_cfg)
+    return int(max(lo, min(hi, round(max_speed * mult))))
 
 
 def compute_offset_move(old_row: dict | None, new_row: dict | None,

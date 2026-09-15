@@ -97,3 +97,36 @@ def test_is_degenerate_thresholds():
     thin = (0, 0, 1920, 4)            # side < 8 px
     assert is_degenerate(thin, FRAME)
     assert is_degenerate((0, 0, 0, 0), FRAME)
+
+
+def test_roi_for_resolution_never_returns_an_empty_crop():
+    """Regression (2026-09-16): a stored ROI of (0.9999, 0.9999, 0.0001,
+    0.0001) gave x == frame width with a 1-pixel width, so the crop was
+    EMPTY and cv2 raised inside the focus metric — surfaced to the operator
+    as "internal error". The UI sanitized its own value; the autofocus read
+    the settings verbatim."""
+    from talos.cv.af_roi import roi_for_resolution
+
+    for norm in ((0.9999, 0.9999, 0.0001, 0.0001),
+                 (0.0, 0.0, 1.0, 1.0),
+                 (-0.5, -0.5, 3.0, 3.0)):
+        roi = roi_for_resolution(norm, (1080, 1920, 3))
+        assert roi is not None, norm
+        x, y, w, h = roi
+        assert w >= 1 and h >= 1
+        assert x + w <= 1920 and y + h <= 1080, norm
+    assert roi_for_resolution((0.1, 0.1, 0.2, 0.2), (0, 0, 3)) is None
+
+
+def test_sanitize_roi_norm_is_the_one_clamp_rule():
+    """The widget layer and the autofocus service must apply the SAME clamp
+    (af_roi owns it; af_region.sanitize_roi delegates)."""
+    from talos.cv.af_roi import MIN_SIDE, sanitize_roi_norm
+    from talos.ui.af_region import sanitize_roi
+
+    assert sanitize_roi_norm((0.9999, 0.9999, 0.0001, 0.0001)) == \
+        (0.98, 0.98, MIN_SIDE, MIN_SIDE)
+    assert sanitize_roi_norm(None) is None
+    assert sanitize_roi_norm(("junk",)) is None
+    assert sanitize_roi((0.2, 0.3, 0.4, 0.4)) == \
+        sanitize_roi_norm((0.2, 0.3, 0.4, 0.4))

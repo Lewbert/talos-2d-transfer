@@ -76,7 +76,7 @@ class AdaptiveAutofocusController(AdaptiveAutofocusControllerV2):
     the base-class arm restore is disabled by the `_restore_on_fail`
     policy (user policy; the stored-knowledge controllers keep it)."""
 
-    def __init__(self, focus, frame_reader, parent: QObject | None = None,
+    def __init__(self, focus, frame_reader, parent=None,
                  abort_check=None):
         # V1's frozen __init__ takes only (focus, frame_reader, parent) —
         # the base-class abort latch is set as an attribute afterwards.
@@ -347,8 +347,12 @@ class AdaptiveAutofocusController(AdaptiveAutofocusControllerV2):
                     f"[{window_lo}, {window_hi}] — re-arm or widen the window")
                 raise _AfExit(AutofocusResult(
                     start, 0.0, self._curve,
-                    message="search window is empty from the current "
-                            "position (arm outside the window)",
+                    # Name BOTH causes and the actual numbers: the old text
+                    # blamed the arm position, but a 0 µm window in the
+                    # settings produces the same dead end.
+                    message="search window is empty "
+                            f"([{window_lo}, {window_hi}] around the arm at "
+                            f"{start}) — widen the window or re-arm the axis",
                     phase="coarse"))
             guard, state = make_guard(first_pass=True)
             self.sig_log.emit(f"coarse: blind sweep from the arm toward "
@@ -493,8 +497,6 @@ class AdaptiveAutofocusController(AdaptiveAutofocusControllerV2):
             pos = max(window_lo, min(window_hi, pos))
             peak = PeakInfo(pos=float(pos), score=s_max, at_edge=False)
             peak.curvature_stop = True
-            if trusted:
-                peak.trusted_vertex = True
             self.sig_log.emit(
                 f"coarse peak {pos:.1f} (score {s_max:.0f}, "
                 f"{'trusted vertex' if trusted else 'stop position'})")

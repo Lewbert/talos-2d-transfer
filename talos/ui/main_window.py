@@ -555,6 +555,11 @@ class MainWindow(QMainWindow):
         strip = getattr(self, "_strip", None)
         if strip is not None:
             strip.reload_settings()
+        # The AF detail window's panel shows µm-per-step and the planned
+        # window: both are settings-derived, and it caches neither.
+        panel = getattr(getattr(self, "_focus_window", None), "panel", None)
+        if panel is not None:
+            panel.refresh_from_settings()
         if self._input is not None:
             # axis inversion / flip X↔Y, jog speeds, focus trigger curve
             self._input.reload_settings()

@@ -73,7 +73,10 @@ class StubAutofocusService(QObject):
         self.busy = False
 
     def start_af_s(self, roi_norm=None, bounds=None):
+        if self.busy:
+            return False
         self.starts.append({"roi": roi_norm, "bounds": bounds})
+        return True
 
     def abort(self):
         pass
@@ -873,3 +876,30 @@ def test_on_screen_hold_buttons_use_the_configured_threshold(window, qapp):
     assert buttons["x"]._long_press_ms() == 700
     window._settings.section("input")["long_press_threshold_ms"] = 300
     assert buttons["x"]._long_press_ms() == 300
+
+
+def test_af_panel_reads_um_per_step_live(window, qapp):
+    """Regression (2026-09-16): the AF panel cached µm/step at construction
+    while the strip and the settings readout re-read it — after editing it in
+    Preferences the same focus position was shown in µm on two scales."""
+    panel = window._focus_window.panel
+    window._settings.device("focus")["um_per_step"] = 0.5
+    window._on_settings_applied()
+    assert panel._curve.um_per_step == 0.5
+
+
+def test_focus_once_refused_keeps_the_curve_and_abort(window, qapp):
+    """Regression (2026-09-16): "Focus once" cleared the displayed curve and
+    armed Abort BEFORE the service could refuse (busy) — the Abort then killed
+    the job that was already running."""
+    panel = window._focus_window.panel
+    panel._curve.add_point(10.0, 5.0)
+    window._autofocus.busy = True
+    panel._on_focus_once()
+    assert panel._curve._points, "a refused start must not wipe the curve"
+    assert panel._abort.isEnabled() is False
+    # ...and an accepted start still clears the curve and arms Abort
+    window._autofocus.busy = False
+    panel._on_focus_once()
+    assert panel._curve._points == []
+    assert panel._abort.isEnabled() is True

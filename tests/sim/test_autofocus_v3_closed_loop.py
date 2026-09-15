@@ -631,14 +631,17 @@ def test_v3_dry_run_failure_stays_at_current_position(qapp):
 
 
 def test_v3_refine_near_stays_in_the_refine_window(qapp):
-    """AF_REFINE with a small drift: the probe says near (plateau) →
-    stage 2 directly, no coarse pass."""
+    """A small drift: the PROBE says near (plateau) → stage 2 directly, no
+    coarse pass.
+
+    NOTE: ``mode`` is inert in v3 — only the classic/V1 controllers honour
+    AF_REFINE — so this case must not pass one (it used to label itself
+    "AF_REFINE", which read as if the mode selected the route)."""
     def case():
         focus, slot, producer = gaussian_rig(truth=0.0)
         arm_rig_at((focus, slot, producer), 40)
         with running(producer):
-            cfg = make_cfg3(mode="AF_REFINE", fine_window_steps=60,
-                            probe_step_steps=100)
+            cfg = make_cfg3(fine_window_steps=60, probe_step_steps=100)
             ctrl = AdaptiveAutofocusController(focus, slot)
             phases: list[int] = []
             ctrl.sig_progress.connect(
@@ -651,14 +654,15 @@ def test_v3_refine_near_stays_in_the_refine_window(qapp):
 
 
 def test_v3_refine_far_runs_the_full_pipeline(qapp):
-    """AF_REFINE with heavy drift: the full pipeline (v2 rig — the
-    derivative thresholds at 0 through the refine window geometry)."""
+    """Heavy drift: the full pipeline (v2 rig — the derivative thresholds at
+    0 through the refine window geometry). ``mode`` is inert in v3 (see the
+    test above)."""
     def case():
         focus, slot, producer = make_rig(truth=0.0)
         arm_rig_at((focus, slot, producer), 300)
         with running(producer):
             result = run_adaptive3(focus, slot, center=300,
-                                   mode="AF_REFINE", span_steps=800,
+                                   span_steps=800,
                                    fine_window_steps=60,
                                    probe_curv_in=0.0, probe_curv_out=0.0,
                                    coarse_curv_stop=0.0,

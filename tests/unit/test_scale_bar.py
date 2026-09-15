@@ -8,20 +8,11 @@ from talos.cv.scale_bar import (
     burn_spec,
     draw_scale_bar_cv,
     format_length_um,
-    nice_length_um,
     nice_length_um_at_most,
     scale_bar_layout,
     scale_bar_px,
 )
 
-
-def test_nice_length_ladder():
-    # 0.5 µm/px over 1920 px → 192 µm visible at 20% → ladder ≥ 192 → 200
-    assert nice_length_um(0.5, 1920) == 200.0
-    # 1 µm/px → 384 µm target → 500
-    assert nice_length_um(1.0, 1920) == 500.0
-    # 0.1 µm/px → 38.4 µm target → 50
-    assert nice_length_um(0.1, 1920) == 50.0
 
 
 def test_nice_length_at_most_never_exceeds_the_fraction():

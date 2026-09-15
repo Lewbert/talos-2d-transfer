@@ -14,8 +14,32 @@ from dataclasses import dataclass
 
 import numpy as np
 
-# Driver speed clamp (steps/s) — mirrors FocusStageDriver._set_move_speed.
+# The firmware's absolute speed window (steps/s). FocusStageDriver clamps to
+# [max(clamp_speed_lo, _SPEED_LO), min(clamp_speed_hi, _SPEED_HI)], so these
+# are the widest bounds any planner may assume.
 _SPEED_LO, _SPEED_HI = 10, 5000
+
+
+def driver_speed_clamp(focus_cfg: dict | None = None) -> tuple[int, int]:
+    """The (lo, hi) steps/s the focus DRIVER will accept, from the same
+    settings keys it reads.
+
+    Planning a speed outside this window does not get clamped by anyone
+    downstream — the driver raises CommandRejectedError mid-sweep, which the
+    autofocus reports as "internal error". The planner therefore clamps to
+    the driver's window rather than to a constant that merely matches the
+    shipped defaults (lowering ``devices.focus.clamp_speed_hi`` used to make
+    the two disagree).
+    """
+    cfg = focus_cfg or {}
+    try:
+        lo = max(int(cfg.get("clamp_speed_lo", _SPEED_LO)), _SPEED_LO)
+        hi = min(int(cfg.get("clamp_speed_hi", _SPEED_HI)), _SPEED_HI)
+    except (TypeError, ValueError):
+        return _SPEED_LO, _SPEED_HI
+    if hi < lo:            # a hand-edited, self-contradicting pair
+        return _SPEED_LO, _SPEED_HI
+    return lo, hi
 
 
 # ---------------------------------------------------------------------------
@@ -350,21 +374,40 @@ def hill_v_min(fine_step_steps: int, exposure_s: float,
 # µm → steps config conversion
 # ---------------------------------------------------------------------------
 
-def um_to_steps(um: float, um_per_step: float) -> int:
-    """µm → whole steps; never below 1 step (the position quantum)."""
-    return max(1, int(round(um / um_per_step)))
+def um_to_steps(um: float, um_per_step: float, *, floor: int = 1) -> int:
+    """µm → whole steps, rounded. ``floor`` is the smallest magnitude the
+    caller will accept:
+
+    - ``floor=1`` (default) for a step SIZE — a commanded step must move;
+    - ``floor=0`` for a DELTA — "no motion" is a real answer, which is why
+      ``objective_offsets`` used to carry its own copy of this conversion.
+
+    A non-positive ``um_per_step`` (hand-edited settings) returns 0 instead
+    of raising: the span then collapses and the autofocus reports an empty
+    search window rather than dying with a ZeroDivisionError.
+    """
+    if um_per_step <= 0:
+        return 0
+    steps = int(round(um / um_per_step))
+    if floor <= 0 or abs(steps) >= floor:
+        return steps
+    return floor if steps >= 0 else -floor
 
 
-def _clamp_speed(steps_per_s: float) -> tuple[int, str | None]:
-    if steps_per_s < _SPEED_LO:
-        return _SPEED_LO, "speed clamped to driver floor 10 steps/s"
-    if steps_per_s > _SPEED_HI:
-        return _SPEED_HI, "speed clamped to driver ceiling 5000 steps/s"
+def _clamp_speed(steps_per_s: float,
+                 clamp: tuple[int, int] = (_SPEED_LO, _SPEED_HI)) \
+        -> tuple[int, str | None]:
+    lo, hi = clamp
+    if steps_per_s < lo:
+        return lo, f"speed clamped to the driver floor {lo} steps/s"
+    if steps_per_s > hi:
+        return hi, f"speed clamped to the driver ceiling {hi} steps/s"
     return int(round(steps_per_s)), None
 
 
 def build_config(objective_row: dict, um_per_step: float, af_cfg: dict,
-                 na_min: float | None = None) -> tuple[dict, list[str]]:
+                 na_min: float | None = None, focus_cfg: dict | None = None) \
+        -> tuple[dict, list[str]]:
     """Convert a user-facing objective row (µm units) into step-based
     AutofocusConfig kwargs, with sanity warnings.
 
@@ -420,6 +463,18 @@ def build_config(objective_row: dict, um_per_step: float, af_cfg: dict,
     # preflight clamp.
     plus_um = float(af_cfg.get("window_plus_um", 500.0))
     minus_um = float(af_cfg.get("window_minus_um", 500.0))
+    if plus_um <= 0 or minus_um <= 0:
+        # A 0 µm bound is not "unbounded": µm→steps floors a step size at 1,
+        # so it used to become a ±1-step window and the run died claiming
+        # "the arm is outside the window" — a message that points at the
+        # wrong thing entirely. Keep the search alive with one fine step and
+        # say what happened.
+        warnings.append(
+            f"search window is 0 µm on the "
+            f"{'plus' if plus_um <= 0 else 'minus'} side — using one fine "
+            f"step ({fine_step_um} µm); set the window in Autofocus settings")
+        plus_um = max(plus_um, fine_step_um)
+        minus_um = max(minus_um, fine_step_um)
     span_um = (plus_um + minus_um) * mult
 
     coarse_step = um_to_steps(coarse_step_um, um_per_step)
@@ -428,12 +483,16 @@ def build_config(objective_row: dict, um_per_step: float, af_cfg: dict,
     window_plus_steps = um_to_steps(plus_um * mult, um_per_step)
     window_minus_steps = um_to_steps(minus_um * mult, um_per_step)
     eff_coarse_um_s = mult * base_coarse_um_s
-    coarse_speed, warn = _clamp_speed(eff_coarse_um_s / um_per_step)
+    # The DRIVER's window, not a constant (see driver_speed_clamp): every
+    # speed below must land inside it or the sweep dies on CommandRejected.
+    speed_lo, speed_hi = driver_speed_clamp(focus_cfg)
+    coarse_speed, warn = _clamp_speed(eff_coarse_um_s / um_per_step,
+                                      (speed_lo, speed_hi))
     if warn:
         warnings.append(f"coarse speed: {warn}")
     max_speed = coarse_speed
     landing_speed = int(af_cfg.get("landing_speed", 50))
-    landing_speed = max(_SPEED_LO, min(_SPEED_HI, landing_speed))
+    landing_speed = max(speed_lo, min(speed_hi, landing_speed))
     # Classic step-and-shoot transit at full speed: the moves themselves
     # are blur-free (only stationary frames are scored), so the fine
     # sweep travels as fast as the coarse scan.
@@ -443,11 +502,12 @@ def build_config(objective_row: dict, um_per_step: float, af_cfg: dict,
     # near-peak zone is where the blur budget matters).
     hill_v_cap = coarse_speed
     exposure_s = float(af_cfg.get("af_exposure_us", 20000)) / 1e6
-    if exposure_s > 0 and fine_step / (3.0 * exposure_s) < _SPEED_LO:
-        warnings.append(f"hill v_min below the firmware {_SPEED_LO} sps floor — "
+    if exposure_s > 0 and fine_step / (3.0 * exposure_s) < speed_lo:
+        warnings.append(f"hill v_min below the driver's {speed_lo} sps floor — "
                         f"near-peak blur budget exceeded (warning)")
-    hill_v_min_steps_s = hill_v_min(fine_step, exposure_s)
-    hill_v_min_steps_s = int(min(hill_v_min_steps_s, max(hill_v_cap, _SPEED_LO)))
+    hill_v_min_steps_s = hill_v_min(fine_step, exposure_s, floor_sps=speed_lo)
+    hill_v_min_steps_s = int(min(hill_v_min_steps_s,
+                                 max(hill_v_cap, speed_lo)))
     backlash_steps = um_to_steps(backlash_um, um_per_step) if backlash_um > 0 else 0
     overshoot_margin_steps = um_to_steps(
         float(af_cfg.get("overshoot_margin_um", 3.0)), um_per_step)

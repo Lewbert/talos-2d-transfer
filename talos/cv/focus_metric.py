@@ -97,17 +97,3 @@ METRICS = {
     "brenner_k": brenner_k,
     "abs_diff": abs_diff,
 }
-
-
-def default_roi(shape: tuple[int, ...]) -> tuple[int, int, int, int]:
-    """Center 50% crop — excludes edges and speeds up computation."""
-    h, w = shape[:2]
-    return (w // 4, h // 4, w // 2, h // 2)
-
-
-def sharpness_profile(positions: np.ndarray, frames: list[np.ndarray],
-                      metric=laplacian_variance,
-                      roi: tuple[int, int, int, int] | None = None) -> np.ndarray:
-    """Metric curve over a focus stack (one value per frame)."""
-    roi = roi if roi is not None else default_roi(frames[0].shape)
-    return np.array([metric(frame, roi) for frame in frames], dtype=float)
