@@ -165,12 +165,12 @@ class MainWindow(QMainWindow):
             lambda mode: self._mode_badge.setText(mode.upper()))
         self._calibration.sig_changed.connect(
             lambda calib: self._for_each_live_view(
-                lambda v: v.set_scale_bar_calibration(
+                lambda v: v.set_live_calibration(
                     self._calibration.um_per_px())))
         # The context emits in its own __init__ (before this connect) —
         # push the initial calibration once manually.
         self._for_each_live_view(
-            lambda v: v.set_scale_bar_calibration(
+            lambda v: v.set_live_calibration(
                 self._calibration.um_per_px()))
         if autofocus_service is not None:
             autofocus_service.sig_af_progress.connect(self._on_af_progress)
@@ -301,9 +301,16 @@ class MainWindow(QMainWindow):
             ("af_indicator", "AF Indicator", True,
              lambda on: self._for_each_live_view(
                  lambda v: v.set_af_indicator_enabled(on))),
-            ("crosshair", "Crosshairs", False,
+            # Solid + inverse video (Minecraft-style): the line inverts
+            # whatever is under it, so it stays visible on any image.
+            ("crosshair", "Crosshairs (inverse video)", False,
              lambda on: self._for_each_live_view(
                  lambda v: v.set_crosshair_enabled(on))),
+            # Calibrated major/minor ticks on all four frame edges, µm from
+            # the frame centre; needs the objective calibration.
+            ("ruler", "Tick ruler", False,
+             lambda on: self._for_each_live_view(
+                 lambda v: v.set_ruler_enabled(on))),
         ]
         for key, label, default, apply in specs:
             action = menu.addAction(label)

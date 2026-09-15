@@ -7,7 +7,8 @@
     "scale_bar": true,
     "burn_scale_bar": false,
     "af_indicator": true,
-    "crosshair": false
+    "crosshair": false,
+    "ruler": false
   },
   "capture": {
     "dir": "",

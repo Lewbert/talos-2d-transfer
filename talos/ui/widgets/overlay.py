@@ -1,7 +1,8 @@
 """Live-view overlay drawing: the AF-status indicator (top-right), the
-scale bar (bottom-right, frame-accurate via the letterbox transform) and
-the display crosshair. Pure QPainter helpers shared by both workspaces'
-live views; the color mapping follows the AF phase contract:
+scale bar (bottom-right, frame-accurate via the letterbox transform), the
+calibrated tick ruler and the display crosshair. Pure QPainter helpers
+shared by both workspaces' live views; the color mapping follows the AF
+phase contract:
 
     red   = stage 1 (coarse family: coarse scan/pass, probe)
     orange = stage 2 (fine family: fine sweep, hill climb, lock-on)
@@ -17,6 +18,7 @@ from PySide6.QtCore import QRectF, Qt
 from PySide6.QtGui import QColor, QPainter, QPen
 
 from talos.cv.af_roi import fit_transform
+from talos.cv.ruler import ruler_spec, tick_label, tick_offsets
 from talos.cv.scale_bar import scale_bar_layout
 from talos.ui import theme
 from talos.ui.theme import DANGER, OK, TEXT, TEXT_DIM, WARN
@@ -140,13 +142,90 @@ def draw_scale_bar_q(painter: QPainter, um_per_px: float,
     painter.restore()
 
 
-def draw_crosshair(painter: QPainter, widget_rect: QRectF) -> None:
+def draw_ruler_q(painter: QPainter, um_per_px: float, frame_shape: tuple,
+                 size: tuple, *, tick_minor_px: int = 4,
+                 tick_major_px: int = 9, label_min_px: int = 54) -> None:
+    """Calibrated ticks along all four edges of the FRAME.
+
+    Drawn in the painter's coordinates over the frame rect — the live view
+    calls this on the frame PIXMAP (where the frame fills the pixmap, so
+    frame pixels scale by ``size / frame``), which is also what makes the
+    inverse-video effect possible: the ticks invert the image underneath
+    instead of relying on a colour that may match it.
+
+    Major ticks are longer and labelled with their µm offset from the
+    frame centre (0 = the optical axis, where the crosshair sits); the
+    labels are dropped when the majors get too close together to read.
+    """
+    spec = ruler_spec(um_per_px, frame_shape)
+    if spec is None:
+        return
+    w, h = int(size[0]), int(size[1])
+    fh, fw = int(frame_shape[0]), int(frame_shape[1])
+    if fw <= 0 or fh <= 0 or w <= 0 or h <= 0:
+        return
+    scale = w / float(fw)
+    majors_x, minors_x = tick_offsets(spec, um_per_px, fw)
+    majors_y, minors_y = tick_offsets(spec, um_per_px, fh)
+    cx, cy = w / 2.0, h / 2.0
+
     painter.save()
-    # module read (not a value import): live accent changes must reach it
-    painter.setPen(QPen(QColor(theme.ACCENT).darker(160), 1,
-                        Qt.PenStyle.DashLine))
-    cx = widget_rect.center().x()
-    cy = widget_rect.center().y()
-    painter.drawLine(cx, widget_rect.top(), cx, widget_rect.bottom())
-    painter.drawLine(widget_rect.left(), cy, widget_rect.right(), cy)
+    font = painter.font()
+    font.setPixelSize(10)
+    painter.setFont(font)
+    show_labels = spec.major_um / um_per_px * scale >= label_min_px
+
+    def _ticks(offsets: list[float], centre: float, length: int,
+               horizontal: bool, from_start: bool) -> None:
+        painter.setPen(QPen(painter.pen().color(), 1))
+        for offset in offsets:
+            pos = int(round(centre + offset * scale))
+            if pos < 0 or pos >= (w if horizontal else h):
+                continue
+            if horizontal:
+                painter.drawLine(pos, 0 if from_start else h,
+                                 pos, length if from_start else h - length)
+            else:
+                painter.drawLine(0 if from_start else w, pos,
+                                 length if from_start else w - length, pos)
+
+    _ticks(minors_x, cx, tick_minor_px, True, True)
+    _ticks(minors_x, cx, tick_minor_px, True, False)
+    _ticks(minors_y, cy, tick_minor_px, False, True)
+    _ticks(minors_y, cy, tick_minor_px, False, False)
+    _ticks(majors_x, cx, tick_major_px, True, True)
+    _ticks(majors_x, cx, tick_major_px, True, False)
+    _ticks(majors_y, cy, tick_major_px, False, True)
+    _ticks(majors_y, cy, tick_major_px, False, False)
+
+    if not show_labels:
+        painter.restore()
+        return
+    # Labels: along the TOP edge (X offsets) and the LEFT edge (Y offsets).
+    for offset in majors_x:
+        pos = int(round(cx + offset * scale))
+        if pos < 4 or pos > w - 4:
+            continue
+        text = tick_label(offset * um_per_px)
+        width = painter.fontMetrics().horizontalAdvance(text)
+        painter.drawText(QRectF(pos - width / 2.0 - 2, tick_major_px + 1,
+                                width + 4, 12),
+                         Qt.AlignmentFlag.AlignHCenter
+                         | Qt.AlignmentFlag.AlignVCenter, text)
+    for offset in majors_y:
+        pos = int(round(cy + offset * scale))
+        if pos < 8 or pos > h - 8:
+            continue
+        painter.drawText(QRectF(tick_major_px + 3, pos - 6, 60, 12),
+                         Qt.AlignmentFlag.AlignLeft
+                         | Qt.AlignmentFlag.AlignVCenter,
+                         tick_label(offset * um_per_px))
     painter.restore()
+
+
+# NOTE: the DISPLAY crosshair is not drawn here — it is painted into the
+# frame pixmap with an inverse-video composition (LiveViewWidget._compose):
+# the overlay surface is a translucent child repainted on every frame, so
+# a Difference-mode pen there would blend against its own previous output
+# instead of the image. The ROI-arming crosshair (a mode affordance that
+# must show before the first frame) still lives in live_view.

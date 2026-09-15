@@ -21,7 +21,7 @@ from talos.ui.theme import OK
 from talos.ui.widgets.overlay import (
     af_phase_color,
     draw_af_indicator,
-    draw_crosshair,
+    draw_ruler_q,
     draw_scale_bar_q,
 )
 
@@ -75,6 +75,9 @@ class LiveViewWidget(QWidget):
         self._overlay.raise_()
         self._pending: np.ndarray | None = None
         self._last_shape: tuple | None = None
+        # The CLEAN frame pixmap (no baked overlays) — _compose() copies it
+        # and paints the inverse-video overlays on the copy.
+        self._frame_pixmap: QPixmap | None = None
         # ROI state (normalized to the frame, so resolution changes keep it)
         self._roi_norm: tuple | None = None
         self._selecting = False
@@ -83,6 +86,7 @@ class LiveViewWidget(QWidget):
         self._crosshair = False
         # Display-menu overlays
         self._scale_bar_enabled = False
+        self._ruler_enabled = False
         self._um_per_px: float | None = None
         self._crosshair_display = False
         self._af_indicator_enabled = False
@@ -108,15 +112,27 @@ class LiveViewWidget(QWidget):
         self._scale_bar_enabled = bool(on)
         self._overlay.update()
 
-    def set_scale_bar_calibration(self, um_per_px: float | None) -> None:
-        """µm/px for the scale bar; None hides it (uncalibrated)."""
+    def set_live_calibration(self, um_per_px: float | None) -> None:
+        """µm/px for the scale bar AND the tick ruler; None hides both
+        (uncalibrated)."""
         self._um_per_px = um_per_px
         self._overlay.update()
+        self._refresh_pixmap()   # the ruler lives on the frame pixmap
 
     def set_crosshair_enabled(self, on: bool) -> None:
-        """The Display-menu crosshair (separate from the ROI-selection
-        crosshair shown while arming a rubber band)."""
+        """The Display-menu crosshair: solid, inverse-video, baked into the
+        frame pixmap (separate from the ROI-selection crosshair, which is a
+        dashed cyan affordance on the overlay)."""
         self._crosshair_display = bool(on)
+        # Repaint immediately: the crosshair must appear/disappear even
+        # while the live view is paused (no new frame to trigger it).
+        self._refresh_pixmap()
+        self._overlay.update()
+
+    def set_ruler_enabled(self, on: bool) -> None:
+        """The Display-menu tick ruler (calibrated, all four edges)."""
+        self._ruler_enabled = bool(on)
+        self._refresh_pixmap()
         self._overlay.update()
 
     def set_af_indicator_enabled(self, on: bool) -> None:
@@ -208,6 +224,13 @@ class LiveViewWidget(QWidget):
 
     # ------------------------------------------------------------------
 
+    def _live_um_per_px(self) -> float | None:
+        """Calibration in LIVE-frame pixels. The stored value is canonical
+        per 4K-sensor pixel; a 1080p frame covers 2× the µm per pixel."""
+        if self._um_per_px is None or self._last_shape is None:
+            return None
+        return self._um_per_px * (SENSOR_WIDTH_PX / self._last_shape[1])
+
     def _render_pending(self) -> None:
         if self._pending is None:
             return
@@ -221,7 +244,48 @@ class LiveViewWidget(QWidget):
         image = QImage(frame.data, w, h, 3 * w, QImage.Format.Format_RGB888)
         scaled = image.scaled(self._label.size(), Qt.AspectRatioMode.KeepAspectRatio,
                               Qt.TransformationMode.SmoothTransformation)
-        self._label.setPixmap(QPixmap.fromImage(scaled))
+        self._frame_pixmap = QPixmap.fromImage(scaled)
+        self._label.setPixmap(self._compose())
+
+    def _refresh_pixmap(self) -> None:
+        """Re-bake the baked overlays into the label's pixmap. No-op before
+        the first frame — a null pixmap would wipe the "No camera" text."""
+        if self._frame_pixmap is not None:
+            self._label.setPixmap(self._compose())
+
+    def _compose(self) -> QPixmap:
+        """The frame plus the INVERSE-VIDEO overlays (crosshair, ruler).
+
+        Painted on the frame pixmap, not on the overlay surface: that
+        surface is a translucent child repainted with every frame, so a
+        Difference-mode pen there would blend against its own previous
+        output (flicker) and against an unspecified destination. On the
+        pixmap, Difference-against-white IS the Minecraft-style inversion
+        of the image underneath — and the lines are clipped to the frame
+        instead of running across the letterbox bars.
+        """
+        base = self._frame_pixmap
+        if base is None:
+            return QPixmap()
+        crosshair = self._crosshair_display and not self._selecting
+        ruler = (self._ruler_enabled and self._last_shape is not None
+                 and self._live_um_per_px())
+        if not crosshair and not ruler:
+            return base
+        pixmap = QPixmap(base)          # detach: never paint the cache
+        painter = QPainter(pixmap)
+        painter.setCompositionMode(
+            QPainter.CompositionMode.CompositionMode_Difference)
+        painter.setPen(QPen(QColor(255, 255, 255), 1))
+        if crosshair:
+            cx, cy = pixmap.width() // 2, pixmap.height() // 2
+            painter.drawLine(cx, 0, cx, pixmap.height() - 1)
+            painter.drawLine(0, cy, pixmap.width() - 1, cy)
+        if ruler:
+            draw_ruler_q(painter, self._live_um_per_px(), self._last_shape,
+                         (pixmap.width(), pixmap.height()))
+        painter.end()
+        return pixmap
 
     def paintEvent(self, event) -> None:  # noqa: N802
         self._render_pending()
@@ -236,7 +300,10 @@ class LiveViewWidget(QWidget):
 
     def _draw_overlays(self, painter: QPainter, rect: QRectF) -> None:
         """Called from the overlay surface's paintEvent (topmost layer)."""
-        if self._crosshair or self._crosshair_display:
+        if self._crosshair:
+            # The ROI-ARMING crosshair only: a mode affordance, drawn on
+            # the overlay so it is visible before the first frame arrives.
+            # The Display-menu crosshair is inverse-video on the pixmap.
             painter.setPen(_CROSSHAIR_PEN)
             cx, cy = self.width() / 2, self.height() / 2
             painter.drawLine(int(cx), 0, int(cx), self.height())
@@ -247,15 +314,11 @@ class LiveViewWidget(QWidget):
             painter.setPen(_ROI_PEN)
             painter.setBrush(Qt.BrushStyle.NoBrush)
             painter.drawRect(self._drag_rect)
-        if self._scale_bar_enabled and self._um_per_px \
-                and self._last_shape is not None:
+        live_um_per_px = self._live_um_per_px()
+        if self._scale_bar_enabled and live_um_per_px is not None:
             # the length choice lives in the shared spec now (same ladder
             # as the snapshot burn); the ×letterbox-scale mapping inside
-            # keeps the drawn bar accurate at ANY window size. The
-            # calibration is canonical per 4K-sensor pixel — a 1080p
-            # live frame covers 2× the µm per pixel.
-            live_um_per_px = self._um_per_px * (
-                SENSOR_WIDTH_PX / self._last_shape[1])
+            # keeps the drawn bar accurate at ANY window size.
             draw_scale_bar_q(painter, live_um_per_px, self._last_shape,
                              (self.width(), self.height()))
         if self._af_indicator_enabled and self._last_shape is not None:

@@ -88,7 +88,7 @@ def check_live_view(out_dir: Path) -> list[str]:
     app.manager.camera.set_frame_slot(app.frame_slot)
     flush(600)
     view = window._navigation.live_view
-    view.set_scale_bar_calibration(CANON)  # canonical 4K value
+    view.set_live_calibration(CANON)  # canonical 4K value
     view.set_scale_bar_enabled(True)
     # the sim camera streams its own 1280x960 frames — the grab uses the
     # live view's ACTUAL frame shape (the draw path does the same)
