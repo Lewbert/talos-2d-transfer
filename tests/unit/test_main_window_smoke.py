@@ -363,6 +363,36 @@ def test_enable_gate_reaches_every_checkbox(window):
     assert window._manager.is_enabled("zolix") is True
 
 
+def test_scan_plan_preview_and_progress(window):
+    """The Sample Finding live view previews the configured grid and
+    highlights the row the scan is on (the indicator is a schematic, so
+    only its geometry and the row maths matter)."""
+    scan = window._sample_finding
+    plan = scan.live_view._scan_plan
+    assert plan is not None
+    width = scan._grid_w.value()
+    height = scan._grid_h.value()
+    from talos.cv.scan import grid_shape
+    cols, rows = grid_shape(scan._scan_params(),
+                            (scan._fov_x.value(), scan._fov_y.value()))
+    assert (plan.cols, plan.rows) == (cols, rows)
+    assert f"{width:.0f}" in plan.detail
+    assert plan.active_row == -1                    # preview, not running
+
+    scan._on_scan_progress(1, cols * rows)          # first waypoint
+    assert scan.live_view._scan_plan.active_row == 0
+    assert scan.live_view._scan_plan.active_col == 0
+    scan._on_scan_progress(cols + 2, cols * rows)   # second row
+    assert scan.live_view._scan_plan.active_row == 1
+    assert scan.live_view._scan_plan.active_col == 1
+
+    # editing the grid re-derives the preview
+    scan._grid_w.setValue(width * 2)
+    scan._refresh_scan_plan()
+    assert scan.live_view._scan_plan.active_row == -1
+    assert scan.live_view._scan_plan.cols >= cols
+
+
 def test_settings_applied_refreshes_every_cached_consumer(window):
     """Preferences Apply must push the new values into everything that
     caches settings-derived state: the calibration context, the strip's

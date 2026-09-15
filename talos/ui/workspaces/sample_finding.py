@@ -35,11 +35,11 @@ from PySide6.QtWidgets import (
 
 from talos.cv.calibration import SENSOR_WIDTH_PX
 from talos.cv.flakes import ClassicFlakeDetector, FlakeConfig, flake_to_stage
-from talos.cv.scan import GridScanner
+from talos.cv.scan import GridScanner, grid_shape
 from talos.models import ObjectiveCalibration, ScanParams, StagePosition
 from talos.ui.widgets.collapsible import CollapsibleGroup
 from talos.ui.widgets.control_groups import CameraGroup
-from talos.ui.widgets.live_view import LiveViewWidget
+from talos.ui.widgets.live_view import LiveViewWidget, ScanPlanOverlay
 
 _SCAN_KEYS = ("fov_x_um", "fov_y_um", "min_flake_area_um2",
               "width_um", "height_um")
@@ -193,6 +193,10 @@ class SampleFindingWorkspace(QWidget):
         splitter.setSizes([1080, 320])
         layout.addWidget(splitter)
 
+        # The scan-path indicator starts as a PREVIEW of the configured
+        # grid and becomes the live progress display during a run.
+        self._refresh_scan_plan()
+
     def _build_scan_group(self) -> QGroupBox:
         params = QGroupBox("Scan & Detection")
         form = QFormLayout(params)
@@ -227,12 +231,43 @@ class SampleFindingWorkspace(QWidget):
         }
         for box in self._scan_fields.values():
             box.editingFinished.connect(self._persist_scan)
+            box.valueChanged.connect(self._refresh_scan_plan)
         return params
 
     def _persist_scan(self) -> None:
         save_scan_params(
             self._settings,
             {key: box.value() for key, box in self._scan_fields.items()})
+
+    # --- scan-path indicator ---------------------------------------------
+
+    def _scan_params(self) -> ScanParams:
+        return ScanParams(x0_um=0.0, y0_um=0.0,
+                          width_um=self._grid_w.value(),
+                          height_um=self._grid_h.value(),
+                          overlap=self._overlap.value())
+
+    def _refresh_scan_plan(self) -> None:
+        """Preview the serpentine path from the CURRENT field values.
+
+        Same maths as the run (cv.scan.grid_shape), so the preview can
+        never promise a grid the scan would not walk.
+        """
+        fov = (self._fov_x.value(), self._fov_y.value())
+        cols, rows = grid_shape(self._scan_params(), fov)
+        self.live_view.set_scan_plan(ScanPlanOverlay(
+            cols=cols, rows=rows,
+            detail=f"{cols} × {rows} grid · {self._grid_w.value():.0f} × "
+                   f"{self._grid_h.value():.0f} µm"))
+
+    def _on_scan_progress(self, done: int, total: int) -> None:
+        """Live row/column highlight (queued from the scan worker)."""
+        plan = self.live_view._scan_plan
+        if plan is None or plan.cols <= 0:
+            return
+        index = max(0, min(int(done) - 1, max(0, int(total) - 1)))
+        self.live_view.set_scan_plan(replace(
+            plan, active_row=index // plan.cols, active_col=index % plan.cols))
 
     # ------------------------------------------------------------------
 
@@ -432,11 +467,11 @@ class SampleFindingWorkspace(QWidget):
         # and a private device was invisible to STOP ALL.
         adapter = ManagerStageAdapter(self._manager, stage_cfg,
                                       abort_check=self._scan_abort.is_set)
-        params = ScanParams(x0_um=0.0, y0_um=0.0,
-                            width_um=self._grid_w.value(),
-                            height_um=self._grid_h.value(),
-                            overlap=self._overlap.value())
+        params = self._scan_params()
         scanner = GridScanner(adapter, camera=None)
+        # Live row/column highlight: a queued connection from the worker
+        # thread (the slot runs on the GUI thread).
+        scanner.sig_progress.connect(self._on_scan_progress)
         self._scanner = scanner
         out_dir = get_scan_dir() / time.strftime("scan_%Y%m%d_%H%M%S")
         try:
@@ -455,6 +490,8 @@ class SampleFindingWorkspace(QWidget):
             self._state.set_mode("MANUAL")
         if self._job == "scan":
             self._set_job(None)
+        # back to a preview (no active row) once the run is over
+        self._refresh_scan_plan()
         aborted = self._scan_abort.is_set()
         if result is not None:
             what = "Scan aborted" if aborted else "Scan done"

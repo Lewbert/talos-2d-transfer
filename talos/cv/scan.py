@@ -45,6 +45,25 @@ class Waypoint:
     y_um: float
 
 
+def plan_steps(params, fov_um: tuple[float, float]) -> tuple[float, float]:
+    """The grid pitch: FOV × (1 − overlap), per axis."""
+    return (max(fov_um[0] * (1.0 - params.overlap), 1e-3),
+            max(fov_um[1] * (1.0 - params.overlap), 1e-3))
+
+
+def grid_shape(params, fov_um: tuple[float, float]) -> tuple[int, int]:
+    """The plan's (cols, rows).
+
+    Exposed for the UI: the Sample Finding workspace previews the scan
+    path from the field values WITHOUT a stage, and the preview must be
+    the plan ``GridScanner.plan`` would actually walk (a preview that
+    disagrees with the run is worse than none).
+    """
+    step_x, step_y = plan_steps(params, fov_um)
+    return (max(1, math.ceil(params.width_um / step_x)),
+            max(1, math.ceil(params.height_um / step_y)))
+
+
 @dataclass
 class ScanResult:
     frames: list[Path] = field(default_factory=list)
@@ -84,10 +103,8 @@ class GridScanner(QObject):
 
     def plan(self, params: ScanParams, fov_um: tuple[float, float]) -> list[Waypoint]:
         """Serpentine waypoint grid: step = FOV × (1 − overlap)."""
-        step_x = max(fov_um[0] * (1.0 - params.overlap), 1e-3)
-        step_y = max(fov_um[1] * (1.0 - params.overlap), 1e-3)
-        nx = max(1, math.ceil(params.width_um / step_x))
-        ny = max(1, math.ceil(params.height_um / step_y))
+        step_x, step_y = plan_steps(params, fov_um)
+        nx, ny = grid_shape(params, fov_um)
         waypoints: list[Waypoint] = []
         for row in range(ny):
             serpentine = params.serpentine and row % 2 == 1

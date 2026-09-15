@@ -8,7 +8,8 @@
     "burn_scale_bar": false,
     "af_indicator": true,
     "crosshair": false,
-    "ruler": false
+    "ruler": false,
+    "scan_path": true
   },
   "capture": {
     "dir": "",

@@ -10,6 +10,8 @@ crosshair, AF-status indicator (top-right).
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 import numpy as np
 from PySide6.QtCore import QRectF, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QImage, QPainter, QPen, QPixmap
@@ -23,7 +25,33 @@ from talos.ui.widgets.overlay import (
     draw_af_indicator,
     draw_ruler_q,
     draw_scale_bar_q,
+    draw_scan_plan_q,
 )
+
+
+@dataclass(frozen=True)
+class ScanPlanOverlay:
+    """The grid-scan path shown near the top of the live view.
+
+    A schematic (one arrow per row, serpentine order) — see
+    draw_scan_plan_q for why it is not registered to the image.
+    """
+
+    cols: int
+    rows: int
+    detail: str = ""              # "8 × 5 grid · 700 × 390 µm"
+    active_row: int = -1          # -1 = preview, nothing running
+    active_col: int = -1
+    serpentine: bool = True
+
+    def status_text(self) -> str:
+        if self.active_row < 0:
+            return f"{self.cols * self.rows} waypoints · ready"
+        forward = not (self.serpentine and self.active_row % 2 == 1)
+        arrow = "→" if forward else "←"
+        col = self.active_col if self.active_col >= 0 else 0
+        return (f"Row {self.active_row + 1}/{self.rows} "
+                f"· col {col + 1}/{self.cols} {arrow}")
 
 # The AF region is drawn in the CROSSHAIR's style (thin dashed cyan) and
 # completely unfilled, so it never hides the image it is measuring; the
@@ -90,6 +118,8 @@ class LiveViewWidget(QWidget):
         self._um_per_px: float | None = None
         self._crosshair_display = False
         self._af_indicator_enabled = False
+        self._scan_plan: ScanPlanOverlay | None = None
+        self._scan_path_enabled = True
         self._af_phase: int | None = None
         self._af_label = ""
         self._af_success = False
@@ -137,6 +167,16 @@ class LiveViewWidget(QWidget):
 
     def set_af_indicator_enabled(self, on: bool) -> None:
         self._af_indicator_enabled = bool(on)
+        self._overlay.update()
+
+    def set_scan_path_enabled(self, on: bool) -> None:
+        """Display-menu toggle for the grid-scan path indicator."""
+        self._scan_path_enabled = bool(on)
+        self._overlay.update()
+
+    def set_scan_plan(self, plan: ScanPlanOverlay | None) -> None:
+        """Show (or clear) the scan-path indicator. ``None`` hides it."""
+        self._scan_plan = plan
         self._overlay.update()
 
     def set_af_phase(self, phase: int, label: str) -> None:
@@ -314,6 +354,10 @@ class LiveViewWidget(QWidget):
             painter.setPen(_ROI_PEN)
             painter.setBrush(Qt.BrushStyle.NoBrush)
             painter.drawRect(self._drag_rect)
+        if self._scan_path_enabled and self._scan_plan is not None \
+                and self._last_shape is not None:
+            draw_scan_plan_q(painter, self._scan_plan, self._last_shape,
+                             (self.width(), self.height()))
         live_um_per_px = self._live_um_per_px()
         if self._scale_bar_enabled and live_um_per_px is not None:
             # the length choice lives in the shared spec now (same ladder

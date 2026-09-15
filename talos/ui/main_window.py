@@ -310,6 +310,10 @@ class MainWindow(QMainWindow):
             ("ruler", "Tick ruler", False,
              lambda on: self._for_each_live_view(
                  lambda v: v.set_ruler_enabled(on))),
+            # The serpentine scan-path panel (Sample Finding workspace).
+            ("scan_path", "Scan path", True,
+             lambda on: self._for_each_live_view(
+                 lambda v: v.set_scan_path_enabled(on))),
         ]
         for key, label, default, apply in specs:
             action = menu.addAction(label)
