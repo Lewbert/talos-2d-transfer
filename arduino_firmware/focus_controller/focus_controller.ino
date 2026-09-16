@@ -6,7 +6,7 @@
 //
 // Non-blocking micros()-based pulse engine, line-based ASCII protocol at
 // 115200 8N1, hardware watchdog + serial inactivity stop. See
-// docs/protocol.md for the command reference and config.h for wiring/pins.
+// docs/hardware/focus/protocol.md for the command reference and config.h for wiring/pins.
 // ============================================================================
 #include <avr/wdt.h>
 

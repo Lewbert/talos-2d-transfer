@@ -1,8 +1,16 @@
 # Zeiss Axiocam 208 color — TALOS camera documentation
 
-Status (2026-09-06): **fully operational** — 1080p color live ~15–19 fps
-(ZEN parity 20.2), 4K live mode, full-res-ish snapshots, exposure/gain/WB
-all settable and hardware-verified.
+Applies to the **Axiocam 208 / 208 color** family: every fact below was
+established against a 208 color on a real bench, and the API details are
+family-specific rather than universal.
+
+Status: **fully operational** — 1080p color live ~15–19 fps (ZEN parity 20.2),
+4K live mode, full-res-ish snapshots, exposure/gain/WB all settable and
+hardware-verified.
+
+Companion documents: [SMARTCAM_API.md](SMARTCAM_API.md) for the DLL
+interoperability notes, [DESIGN.md](DESIGN.md) for where this camera sits in the
+bench, and [ARCHITECTURE.md](ARCHITECTURE.md) for the acquisition loop.
 
 ## How it works
 
@@ -30,14 +38,14 @@ all settable and hardware-verified.
 
 | Capability | Verified result |
 |---|---|
-| Live color | purple wafer / orange copper correct (vision-checked vs ZEN snapshot) |
+| Live color | purple wafer / orange copper correct (checked against a ZEN reference frame) |
 | 1080p fps | ~15–19 fps mean (ZEN: 20.2) |
 | 4K live (Resolution=0) | works, decoded through the same pipeline |
 | Exposure | 0.061–1000 ms, monotonic luma sweep, fps tracks 1/exposure |
 | Gain | 1–22x, monotonic sweep |
 | WB | AWB off/auto/once + color temperature 1500–10000K (R/B direction verified) |
 | Snapshot | sequence-acquisition still works |
-| Parameter dump | 52 params enumerated (`smartcam_param_dump.json` in benchmark dir) |
+| Parameter dump | 52 params enumerated — reproduce with `tools/smartcam_probe.py` |
 
 ## Facts learned after the first ladder (2026-09-14, bench)
 
@@ -79,8 +87,8 @@ all settable and hardware-verified.
 - `tools/smartcam_probe.py` — live parameter dump (names/types/ranges/enums).
 - `tools/smartcam_live.py --step baseline|exposure|color|exposure_sweep|gain_sweep|wb|fullres`
   — the verification ladder.
-- `tools/smartcam_decode_study.py` — offline raw-buffer decode gallery vs
-  `ZEN-snap.czi` ground truth.
+- `tools/smartcam_decode_study.py` — offline raw-buffer decode gallery,
+  scored against a ZEN reference capture of the same field.
 - `tools/camera_benchmark.py --backend smartcam` — fps/capability report.
 
 ## Known limitations / open items
@@ -89,9 +97,9 @@ all settable and hardware-verified.
   during the sprint) is **not reachable** in the current firmware state —
   index 2 now returns a 1080p frame. 4K (3840×2160) live is the real
   maximum and works. Side note, not blocking.
-- Color rendering matches ZEN within ~7–9/10 (vision-scored); the residual
-  is brightness/contrast from bench illumination — tune exposure/gain in
-  the UI.
+- Color rendering matches ZEN within ~7–9/10 (scored against ZEN reference
+  frames); the residual is brightness/contrast from bench illumination —
+  tune exposure/gain in the UI.
 - MJPEG transfer (TransferFormat=1) is supported by the camera but not yet
   wired in the decode path (would need cv2.imdecode); YUV (NV12-style) is
   the default and works.

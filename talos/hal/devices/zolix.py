@@ -12,7 +12,7 @@ github.com/Lewbert/transfer-stage-control):
 - The rotation axis is wired to the ZC300 Z channel (logical "r").
 
 ⚠️ Absolute moves (0x0064) and homing (0x0069) were implemented from the
-register map but never exercised on hardware by the reference project —
+register map but never exercised on hardware by the precursor project —
 validate with tools/smoke_test.py before relying on them. Fixed-length
 moves (0x0065) are the hardware-validated opcode.
 """

@@ -241,7 +241,7 @@ def temp_power_color(pv: float | None, sv: float | None,
                      out: float | None) -> str | None:
     """Heat-status colour for the PWR readout.
 
-    The ramp is the reference project's temperature panel verbatim (its PV
+    The ramp is the precursor project's temperature panel (its PV
     colour ladder): full power red → orange → amber, then — once the heater
     is idling — green when settled on the setpoint, light green when close,
     blue otherwise. None = no colour (uncalibrated/no reading).
@@ -583,6 +583,6 @@ class HardwareStrip(QWidget):
                 self._temp_sv.setText(f"SV: {parsed['sv']:.1f} °C")
             if parsed["out"] is not None:
                 self._temp_out.setText(f"PWR: {parsed['out']:.0f}%")
-            # Heat-status colour (the reference project's ladder).
+            # Heat-status colour (the precursor project's ladder).
             self._temp_out.set_colour(
                 temp_power_color(parsed["pv"], parsed["sv"], parsed["out"]))

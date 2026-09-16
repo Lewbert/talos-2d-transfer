@@ -10,6 +10,12 @@ against real hardware on this bench; the numbers that matter are also encoded
 as constants in `talos/hal/devices/camera/smartcam_params.py`, which is what the
 backend actually uses.
 
+**Scope**: the Axiocam 208 / 208 color family, on the DLL versions that shipped
+with the ZEN/Labscope releases current at the time of writing. Treat an ordinal
+or a range as a hypothesis to verify on your own camera, not as a spec — see
+[CAMERA_208.md](CAMERA_208.md) for the behavioural summary and
+[DESIGN.md](DESIGN.md) for where this fits in the bench.
+
 ## Calling convention & signatures
 
 All exports are **Cdecl**. Primitives are passed by value and mutable values
@@ -63,7 +69,7 @@ All exports are **Cdecl**. Primitives are passed by value and mutable values
 0 Boolean · 1 Integer · 2 Double · 3 String · 4 Enum · 5 IndexAndBoolean ·
 6 IndexAndInteger · 7 IndexAndDouble · 8 IndexAndString
 
-## ParameterKey IDs (0-based ordinals — cross-checked against ZEN's own log lines:
+## ParameterKey IDs (0-based ordinals), cross-checked against ZEN's own log lines
 
 `WhiteBalance ID is 52`, `LedWavelength ID is 72`)
 
@@ -136,7 +142,7 @@ All exports are **Cdecl**. Primitives are passed by value and mutable values
   then ONE interleaved chroma plane (w·h/2 bytes, half-res pairs). HARDWARE-VERIFIED
   pair order is **(V, U)** — first byte of each pair is the red axis, second the blue
   axis. Decoding as U-first (standard NV12) yields a cold blue cast; V-first matches
-  ZEN's colors (per-channel correlation 0.84/0.98 vs ZEN-snap.czi). ZEN:
+  ZEN's colors (per-channel correlation 0.84/0.98 vs a ZEN reference frame). ZEN:
   Yuv420SPToYuv420P → IPP YUV420ToRGB24. (Our old decode treated it as planar I420 —
   chroma was garbage; that is why the stream looked gray.)
 
@@ -151,7 +157,7 @@ Actual header size = `ApiInformation.ImageHeaderSize` (via GetLibraryInformation
 The sequence/continuous buffers used by ZEN's live+snap paths carry NO header
 (raw NV12 at offset 0).
 
-## Offline findings (2026-09-06, saved buffers vs ZEN-snap.czi)
+## Offline findings (saved buffers vs a ZEN reference capture)
 
 - The camera's NV12 stream CONTAINS the full color scene — but captured with
   hardware AWB OFF (cold blue cast; copper stage reads blue).

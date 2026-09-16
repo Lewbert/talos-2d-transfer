@@ -1,0 +1,25 @@
+cff-version: 1.2.0
+message: "If you use TALOS in academic work, please cite it as below."
+title: "TALOS: Transfer and Alignment Laboratory Operating System"
+abstract: >-
+  Integrated hardware control, computer vision and automation for 2D-material
+  transfer and stacking benches: one desktop application driving a motorised XYR
+  sample stage, a transfer stage, a motorised focus axis, a hot stage and a
+  microscope camera, with autofocus, flake detection, grid scanning and a
+  hardware abstraction layer that makes the application adaptable to different
+  instruments.
+type: software
+authors:
+  - name: "Lewbert"
+    email: "lewbert@connect.hku.hk"
+repository-code: "https://github.com/Lewbert/talos-2d-transfer"
+license: GPL-3.0-only
+version: 0.1.0
+keywords:
+  - 2D materials
+  - transfer
+  - stacking
+  - microscope control
+  - autofocus
+  - laboratory automation
+  - instrumentation

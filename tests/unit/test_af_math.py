@@ -613,7 +613,7 @@ def test_peak_is_complete():
 # Probe v3 (derivative-hybrid) — audit-verified Gaussian fixtures
 #
 # Model: S = A·exp(−d²/2σ²), σ = 10, A = 100. The pinned values are the
-# audit's table (plan project-talos-cheerful-stearns.md §1).
+# analytic expectations of that model (see docs/AUTOFOCUS.md).
 # ---------------------------------------------------------------------------
 
 def _gauss(d, sigma=10.0, a=100.0):

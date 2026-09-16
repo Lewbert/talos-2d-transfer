@@ -2,7 +2,10 @@
 
 Written for someone about to change this code. The README covers what the app
 does; this covers how it is put together, which rules are load-bearing, and
-which failures the existing design already paid for.
+which failures the existing design already paid for. The *why* behind it — the
+bench, the hardware protocols, and where the build diverged from its plan — is
+[DESIGN.md](DESIGN.md); the tooling and test story is
+[DEVELOPMENT.md](DEVELOPMENT.md).
 
 ## Layers
 
@@ -44,8 +47,9 @@ Dependencies point downwards only: UI → input → manager → proxies → driv
 3. **Bound slots, not bare lambdas, for cross-thread signals.** A lambda with
    no receiver executes in the *emitting* thread.
 4. **The device queue is touched from two threads** (`enqueue`/`enqueue_stop`
-   from the GUI, `_drain` from the worker). This is currently unsynchronised in
-   the original design and is a known weakness — see "Known weaknesses".
+   from the GUI, `_drain` from the worker), so every critical section of it is
+   guarded by `_queue_lock`. The lock is never held across a driver call: a
+   blocking serial transaction must not stall the GUI's enqueue path.
 5. **A blocking autofocus job owns the focus worker** for its duration, so
    anything queued behind it (a jog, a stop) waits. Abort therefore does not go
    through the queue: `FocusProxy.request_abort()` sets a flag that the
@@ -205,7 +209,7 @@ overshoot-and-return landing take up the backlash. Older generations
 (`cv/af_c.py`, `cv/af_adaptive.py` V1/V2, and the classic flow in
 `cv/autofocus.py`) are kept as stored knowledge and are still exercised by the
 closed-loop sim suites. Design history and the hardware measurements behind the
-constants: [AUTOFOCUS.md](AUTOFOCUS.md) and [PLAN.md](PLAN.md).
+constants: [AUTOFOCUS.md](AUTOFOCUS.md) and [DESIGN.md](DESIGN.md).
 
 ## Settings
 
@@ -275,10 +279,6 @@ because the simulations run in real time.
 
 ## Known weaknesses (worth fixing deliberately)
 
-- `DeviceProxy._queue` is mutated from the GUI and worker threads without a
-  lock. The window is small but real: a command appended between the worker's
-  sorted-rebuild and its reassignment is lost (its job never completes, so a
-  busy gate can stick).
 - The live view receives whole frames as queued signal payloads; pulling from
   the existing `LatestFrameSlot` would bound the backlog during GUI stalls.
 - The autofocus job blocks the focus worker's queue, so a jog submitted during

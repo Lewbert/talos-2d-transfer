@@ -1,4 +1,4 @@
-"""Reference-style stage panel (ported from transfer-stage-control's
+"""Stage panel in the precursor style (ported from transfer-stage-control's
 gui/stage_panel.py + axis_control_buttons.py).
 
 Per stage: enable checkbox, axis table (steps | converted | limit

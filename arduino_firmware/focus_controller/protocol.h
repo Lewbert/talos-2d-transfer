@@ -1,7 +1,7 @@
 // ============================================================================
 // Protocol - non-blocking serial parser, command dispatcher, replies/events
 // ============================================================================
-// Line-based ASCII protocol at SERIAL_BAUD 8N1. See docs/protocol.md.
+// Line-based ASCII protocol at SERIAL_BAUD 8N1. See docs/hardware/focus/protocol.md.
 // All replies are single lines <= MAX_CMD_LEN chars, never printed from
 // inside the step engine (pulse timing must stay jitter-free).
 #ifndef FOCUS_PROTOCOL_H

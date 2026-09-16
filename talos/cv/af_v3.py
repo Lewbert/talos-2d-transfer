@@ -1,5 +1,4 @@
-"""Derivative-hybrid adaptive v3 (audit-revised — see
-docs/PLAN.md handoff #11 / the plan project-talos-cheerful-stearns.md).
+"""Derivative-hybrid adaptive v3 (see docs/AUTOFOCUS.md).
 
 The sharpness-vs-defocus curve is near-Gaussian (S = A·exp(−d²/2σ²),
 σ ≈ DOF/3): its second derivative is strongly negative near the peak,

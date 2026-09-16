@@ -6,6 +6,9 @@ never blocks: stepping is a non-blocking `micros()` pulse engine and the
 serial parser processes at most 8 chars per loop pass.
 
 Firmware: `arduino_firmware/focus_controller` (Arduino Uno/Nano, CRD5103PB driver).
+Host-side driver: `talos/hal/devices/focus.py`. How the autofocus algorithm uses
+this axis: [AUTOFOCUS.md](../../AUTOFOCUS.md); the bench it belongs to:
+[DESIGN.md](../../DESIGN.md).
 
 Line discipline: bytes outside the command alphabet `[A-Za-z0-9?:,+-]` (e.g.
 USB re-enumeration noise) are discarded and act as a framing break, and a

@@ -38,3 +38,8 @@ htmlcov/
 tools/smartcam_decomp_primitives/
 tools/smartcam_decomp/
 docs/bench/
+
+# Local development journal (handoff notes + the pre-build plan). Kept on disk,
+# never published: docs/DESIGN.md and docs/DEVELOPMENT.md are the public
+# distillation of it.
+docs/journal/

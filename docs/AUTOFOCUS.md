@@ -1,13 +1,19 @@
 # Autofocus — Agile + Accurate on an Open-Loop Focus Axis
 
+Companion documents: [DESIGN.md](DESIGN.md) for the bench and the design decisions,
+[ARCHITECTURE.md](ARCHITECTURE.md) for the threading and the job model, and
+[hardware/focus/protocol.md](hardware/focus/protocol.md) for the firmware this
+algorithm talks to.
+
 ## Physics of the axis
 
 - Arduino + CRD5103PB stepper, **open-loop** (no encoder). The firmware's
   position counter counts COMMANDED steps; the load (what the camera
   sees) lags the counter by the mechanism backlash B in the current
   direction after each reversal: `load = counter − dir×B`.
-- 0.36°/step 5-phase stepper directly driving the Olympus BXFM fine-focus
-  knob, 200 µm/rot → **0.2 µm/step** (`devices.focus.um_per_step`).
+- 0.36°/step 5-phase stepper directly driving the fine-focus knob,
+  200 µm/rot → **0.2 µm/step** (`devices.focus.um_per_step`). Firmware and
+  wire protocol: [hardware/focus/protocol.md](hardware/focus/protocol.md).
 - Positions reset on reconnect/ZERO — everything is session-relative.
   This is WHY the autofocus range limit is **relative to the arm
   position** (commanded travel this run), not an absolute bookkeeping
@@ -15,10 +21,10 @@
   lost-step drift; a relative window is exactly what the axis physically
   executes. Firmware soft limits (SLIM) remain as a backstop.
 
-## Per-objective optics (user-editable, global)
+## Per-objective optics (operator-editable, global)
 
-The objectives table lives in `settings → objectives` (toolbar
-**Objectives…**, or **Edit objectives…** in the Focus window) and is
+The objectives table lives in `settings → objectives`, edited in
+**Preferences → Objectives & Calibration**, and is
 GLOBAL: name, optics, the speed multipliers, and the manual px→µm
 calibration. The selected objective (top-bar combo) persists across
 restarts. Saving the dialog syncs the registry one-way into the
@@ -142,7 +148,7 @@ cancel exactly in C. The verdict:
   genuinely spread — S_c ≥ 0.5× the best side, the worst side ≥ 0.4×
   S_c, the best ≥ 1.2× the worst, AND the best clears
   `probe_cluster_min_score` ABSOLUTELY (0 = the branch disabled; a
-  per-field knob the user tunes to their peak's magnitude — ratio
+  per-field knob tuned to the peak's magnitude — ratio
   gates cannot tell a flat far tail from a plateau shoulder,
   sim-found). Stage 2 enters directly, anchored at the BEST probe
   point (the `_probe_anchor` hook). Hardware-found: the multi-peak
@@ -208,9 +214,9 @@ dependency).
 THE ARM sweeping the DEFAULT direction (`coarse_direction`: 0 = +1
 away from the sample — the safe default; ±1 forces it) with the early
 direction check armed — the drop test + the 2σ trigger reverse the
-pass toward the peak side from its OWN early samples (the user's
-conclusion: the 3-point probe is not trustworthy for the direction on
-structured fields; the pass decides). Strictly better than the v2
+pass toward the peak side from its OWN early samples (the conclusion
+from the bench: the 3-point probe is not trustworthy for the direction
+on structured fields; the pass decides). Strictly better than the v2
 nearest-edge walk (frozen in V2): the peak region sits near the arm,
 so the pass reaches structure in ~100s of steps instead of ~2500, and
 the walk-away/early-stop/curvature rungs stop at the first structure
@@ -241,7 +247,7 @@ and the re-measure around the anchor failed on the flat shoulder
 On a near/cluster verdict the stage-2 window becomes max(fw,
 near_window_steps), scaling the distrust tolerance with it.
 build_config computes max(fw, 1.5σ) from the DOF model or the measured
-`sigma_steps`; overrides win. The user's 5× settings carry 170.
+`sigma_steps`; overrides win. The bench's 5× settings carry 170.
 
 **Hardware tuning state (2026-09-08)**: the Step-0 gate measured
 σ = 107.8-113.6 steps with R² = 0.995. With the σ-corrected thresholds
@@ -253,16 +259,20 @@ inherited stage-2 fit-distrust/end-max chain fails on the flat zones.
 `sigma_steps` stays UNSET in the shipped settings → the stop stays
 dead at 5× (the DOF/3 threshold is unreachable) and v3 runs the v2
 pipeline + the probe classification. The delivery gaps (300-580 ms
-every ~20-40 s on the marginal USB3 extension cable) were FIXED by the
-user's wiring separation — `tools/cam_gap_diag.py` verifies (1
+every ~20-40 s on a marginal USB3 extension cable) were fixed by
+separating the wiring — `tools/cam_gap_diag.py` verifies (1
 connect-time gap per 3 min after the fix). Current hardware numbers:
 the cluster entry fires in the wild (5.84 s direct stage 2),
 repeatability 8 steps = 1.6 µm; the deep-defocus family (±200/±400/
-+600) remains fail-safe. **The tuning resumes: set sigma_steps ≈ 110
-and re-run tools/af_bench3 on a single-plane field, one edit at a
-time, vision-verified.**
++600) remains fail-safe.
 
-**Failure semantics (v3, the user's policy)**: failures and stops end
+**Known tuning state.** With `sigma_steps ≈ 110` set, the curvature
+stop becomes reachable and the derivative branch can be validated on a
+single-plane field with `tools/af_bench3`, one edit at a time. Until
+that is done, the shipped configuration is exactly the one described
+above: the v2 pipeline plus probe classification.
+
+**Failure semantics (v3)**: failures and stops end
 at the CURRENT position — no arm restore on ANY failure path. The base
 controller's `_restore_on_fail` policy attribute is set False by v3
 (the stored-knowledge controllers keep the arm restore); aborts never
@@ -277,7 +287,7 @@ dictates — the mode no longer branches inside the controller:
 0. **Probe** — three points at [center−δ, center, center+δ] (δ =
    `probe_step_steps` or 3×coarse_step, TRAP moves at the staging speed),
    measured CENTER-FIRST with a return to center (the monotonic ordering
-   broke the near-focus logic when armed at the peak — user-reverted).
+   broke the near-focus logic when armed at the peak — reverted on the bench).
    Each point is scored with BOTH metrics: the
    SHARP metric decides **near-focus** (the center is a clear local
    maximum ≥ `probe_peak_ratio` above the weaker side → skip straight to
@@ -313,7 +323,7 @@ up to `stage2_retries` times around the CURRENT position (stage 2 is
 already near focus by definition): never a return to the arm position,
 never a stage-1 fallback. After the retries the run stops AT the
 current position — the failure result carries `restore_on_fail=False`,
-so the axis stays where the last attempt stopped (the user's policy:
+so the axis stays where the last attempt stopped (the policy here:
 an AF that is near focus must not run away or undo itself).
 
 The Focus window plots both metric series: sharp (blue) and low-freq
@@ -383,7 +393,7 @@ interpolation history.
   auto multiplier = (na_min/na)² where na_min = the LOWEST-POWER
   objective's NA from the table (passed by the callers) — that
   objective gets exactly the base speed (the table's max); explicit
-  per-row multipliers win (user-modifiable). The multiplier flows into
+  per-row multipliers win (operator-modifiable). The multiplier flows into
   the stage-2 fine window through the coarse sampling spacing
   (speed/fps); the TOTAL search span stays the per-objective user
   window — the args own the bounds. Unit tests pin the whole model
@@ -395,12 +405,12 @@ interpolation history.
   app's only autofocus mode — AF-C was unwired from the app; its state
   machine (`talos/cv/af_c.py`), the controller-level AF_REFINE mode and
   their tests stay as stored knowledge.
-- **Measure area**: full frame, or a user-drawn ROI (rubber band on the
+- **Measure area**: full frame, or an operator-drawn ROI (rubber band on the
   live view, letterbox-correct mapping, resolution-safe normalization).
   ROI selects WHICH plane the metric sees when the field contains
   features at several depths.
-- **Focus window**: the autofocus panel lives in its own window, toggled
-  from the toolbar (**Focus**). Esc/close hides it (the global STOP ALL
+- **Focus window**: the autofocus panel lives in its own window,
+  **Windows → AF Detail**. Esc/close hides it (the global STOP ALL
   shortcut stays on the main window). It plots the sharp curve (blue)
   and the low-freq series (amber), each with its own score
   normalization.
@@ -461,8 +471,8 @@ python tools/autofocus_hardware.py --objective 2            # µm table row
 python tools/autofocus_hardware.py --objective 0 --defocus 200 --mode AF_REFINE
 python tools/autofocus_hardware.py --calibrate-backlash --store --objective 0
 
-# v2 hardware bench (vision pre-flight + probe/near-focus/salvage
-# protocol; snapshots + curve CSVs into docs/bench/)
+# v2 hardware bench (pre-flight + probe/near-focus/salvage protocol;
+# snapshots + curve CSVs written to the bench output directory)
 python tools/af_bench2.py --preflight-only                  # capture + exit
 python tools/af_bench2.py                                   # full protocol
 python tools/af_bench2.py --runs 3 --skip-salvage --skip-preflight

@@ -1,12 +1,12 @@
 """Manual-control axis mapping: per-axis inversion + the X↔Y axis swap.
 
-Some operators prefer an inverted jog (the reference project exposes the
+Some operators prefer an inverted jog (the precursor project exposes the
 same knobs as "Invert Axes" + "Flip X/Y" checkboxes per stage). The mapping
 is applied in ``InputSystem._dispatch`` — the single choke point every
 manual source funnels through: keyboard, gamepad sticks / D-pad /
 triggers, on-screen hold buttons and single clicks, the dialbox.
 
-Order matters and follows the reference project
+Order matters and follows the precursor project
 (``transfer-stage-control/stage_control/instruments.py``): flip the AXIS
 IDENTITY first, then invert the direction of the (possibly swapped) axis,
 so ``invert_z`` + ``flip_xy`` behaves as the reference does.

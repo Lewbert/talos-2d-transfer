@@ -621,8 +621,7 @@ def build_config(objective_row: dict, um_per_step: float, af_cfg: dict,
 # its second derivative is strongly negative near the peak, positive past
 # the inflection — the signal the v3 probe and coarse stop exploit. All
 # quantities here are pure math on score samples; the numbers pinned by
-# the unit tests are the audit-verified table (plan
-# project-talos-cheerful-stearns.md §1).
+# the unit tests come from the Gaussian fixtures in tests/unit/test_af_math.py.
 # ---------------------------------------------------------------------------
 
 @dataclass
