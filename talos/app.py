@@ -166,6 +166,13 @@ class TALOSApplication:
             # the devices they command.
             self.input.stop()
         self.autofocus.shutdown()
+        # Then the window's own threads (the detection worker, a scan).
+        # Not every shutdown path closes the window — this is called after
+        # qapp.exec() returns, and Qt aborts the process if a running
+        # QThread is destroyed with it.
+        stop = getattr(self.window, "stop_workers", None)
+        if callable(stop):
+            stop()
         self.manager.shutdown()
         logger.info("TALOS exited cleanly")
         # Close the debug-console tailer on BOTH exit paths — otherwise

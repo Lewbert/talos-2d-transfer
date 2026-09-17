@@ -267,6 +267,34 @@ class _FormPage(QWidget):
         _Field(self, key, label, combo, combo.setCurrentText,
                combo.currentText, annotation)
 
+    def add_choice(self, key: str, label: str, choices: list,
+                   annotation: str | None = None) -> None:
+        """A combo whose ITEMS carry values: ``[(value, label), …]``.
+
+        ``add_combo`` stores the display text, which is right when the
+        text IS the setting (a port name, a mode word) and wrong when it
+        is a number with a readable label — a string where the schema has
+        an int is a difference that only shows up later.
+        """
+        combo = QComboBox()
+        current = self._cfg.get(key)
+        for index, (value, text) in enumerate(choices):
+            combo.addItem(text, value)
+            if value == current:
+                combo.setCurrentIndex(index)
+        self._target.addRow(self._label(label, annotation), combo)
+
+        def write(value):
+            index = combo.findData(value)
+            if index >= 0:
+                combo.setCurrentIndex(index)
+
+        def read():
+            data = combo.currentData()
+            return type(current)(data) if current is not None else data
+
+        _Field(self, key, label, combo, write, read, annotation)
+
     def add_port(self, key: str, label: str,
                  annotation: str | None = None) -> None:
         """COM port picker: the ports actually present, plus the
@@ -843,7 +871,59 @@ def _build_pages(settings, qapp, manager, autofocus_service, parent):
                   _device_page(settings, "sigmakoki", sigm_fields, "")))
     pages.append(("Hardware", "Temperature",
                   TemperaturePage(settings, parent)))
+
+    pages.append((None, "Scan", _scan_page(settings, parent)))
     return pages
+
+
+#: What the Sample Finding tab deliberately does NOT carry. The panel has
+#: the four things worth changing while looking down the eyepieces (area,
+#: origin, direction, path); everything here is set once.
+_SCAN_HINT = (
+    "The scan panel keeps the area, the origin, the directions and the "
+    "path order — the settings worth changing at the microscope. These "
+    "are the ones you set once."
+)
+
+
+def _scan_page(settings, parent) -> QWidget:
+    """The scan's out-of-the-way settings.
+
+    Built with ``_FormPage`` directly rather than ``_device_page``: the
+    scan is not a device, so its keys live in the ``scan`` section, not
+    under ``devices``.
+    """
+    page = _FormPage(settings, settings.section("scan"), None)
+    page.add_group("Output")
+    # The folder itself is NOT here: the scan panel owns it, with the same
+    # field + browse + open row the Capture group uses. Two editors for one
+    # path is two places for it to disagree with itself.
+    page.add_bool("export_mosaic", "Write mosaic.png", True)
+    page.add_bool("export_candidates", "Write candidates.csv", True)
+    page.add_bool("export_overview", "Write overview.png", True)
+    page.add_hint("Raw frames and manifest.csv are always written.")
+
+    page.add_group("Motion")
+    # One speed, not a slow/fast pair: the scan runs the controller in
+    # fixed-steps mode and lets it generate its own ramp, so a second
+    # speed would buy nothing. It is the scan's own number — the manual
+    # jog speeds on the Zolix page do not apply to it.
+    page.add_int("speed_pps", "Scan speed (pps)", 10, 20000)
+    page.add_int("settle_ms", "Settle after each move (ms)", 0, 5000)
+    page.add_float("backlash_um", "Backlash take-up (µm, 0 = off)", 0.0,
+                   100.0, 0.5)
+    page.add_choice("backlash_approach", "Finish every move from",
+                    [(1, "the positive side"), (-1, "the negative side")])
+    page.add_hint("Backlash makes every move finish from the same side; "
+                  "off is right unless the mosaic shows rows offset from "
+                  "each other.")
+
+    page.add_group("Overlap")
+    page.add_float("overlap", "Tile overlap (fraction)", 0.0, 0.9, 0.05)
+    page.add_hint("More overlap means more tiles and a longer run. The "
+                  "panel's map shows the tile count as you change it.")
+    page.add_hint(_SCAN_HINT)
+    return page
 
 
 class InputPage(QWidget):

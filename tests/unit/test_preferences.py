@@ -103,8 +103,8 @@ def test_pages_exist(dialog):
     assert _nav_leaf_labels(dialog) == [
         "General", "Objectives & Calibration", "AutoFocus",
         "Input & Gamepad", "Camera", "Focus", "Zolix XYR",
-        "SigmaKoki XYZ", "Temperature"]
-    assert dialog._stack.count() == 9
+        "SigmaKoki XYZ", "Temperature", "Scan"]
+    assert dialog._stack.count() == 10
     # the Hardware parent is a non-selectable group
     top = dialog._nav.topLevelItem(4)
     assert top.text(0) == "Hardware"
@@ -310,3 +310,50 @@ def test_button_text_luminance_rule():
     assert "color: #17181d;" not in theme.build_qss(accent="#e5484d")
     # the Wuling default: dark text
     assert "color: #17181d;" in theme.build_qss(accent="#00BCBC")
+
+
+def test_the_scan_page_owns_what_the_panel_does_not(dialog):
+    """The panel carries the four settings worth changing at the
+    microscope; the page carries the ones set once. Between them they must
+    cover the section — a key in neither is a value nothing can change."""
+    import dataclasses
+
+    from talos.scan_settings import SCAN_KEYS
+    from talos.ui.dialogs.preferences import _scan_page
+
+    settings = _page(dialog, "Camera")._settings
+    page = _scan_page(settings, dialog)
+    owned = {field.path.split(".")[-1] for field in page._fields}
+    panel = {"dir", "width_um", "height_um", "origin", "x_dir", "y_dir",
+             "path", "serpentine", "start_axis", "return_to_start"}
+    assert set(SCAN_KEYS) | {"dir"} == owned | panel, (
+        "the panel and the page must not leave a scan key unreachable")
+    assert not (owned & panel), "a setting with two editors can drift"
+
+
+def test_the_scan_page_writes_numbers_not_labels(dialog):
+    """The approach side is stored as 1 or -1; a combo that stored its own
+    label would put the string "the positive side" in the settings file."""
+    from talos.ui.dialogs.preferences import _scan_page
+
+    page = _scan_page(_page(dialog, "Camera")._settings, dialog)
+    page._apply()
+    stored = _page(dialog, "Camera")._settings.section("scan")[
+        "backlash_approach"]
+    assert stored in (1, -1)
+    assert isinstance(stored, int)
+
+
+def test_the_scan_page_round_trips_the_real_section(dialog):
+    """A value typed on the page must survive its own apply/read cycle."""
+    from talos.scan_settings import load_scan_settings
+    from talos.ui.dialogs.preferences import _scan_page
+
+    settings = _page(dialog, "Camera")._settings
+    settings.section("scan")["speed_pps"] = 250
+    settings.section("scan")["overlap"] = 0.25
+    page = _scan_page(settings, dialog)
+    page._apply()
+    saved = load_scan_settings(settings)
+    assert saved["speed_pps"] == 250
+    assert saved["overlap"] == pytest.approx(0.25)

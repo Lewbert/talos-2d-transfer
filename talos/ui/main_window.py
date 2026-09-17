@@ -42,7 +42,6 @@ from talos.ui.camera_profiles import (
 from talos.ui.theme import DANGER, WARN
 from talos.ui.widgets.overlay import PHASE_NAMES
 from talos.ui.widgets.focus_window import FocusWindow
-from talos.ui.widgets.scan_window import ScanWindow
 from talos.ui.widgets.gamepad_indicator import GamepadIndicator
 from talos.ui.widgets.hardware_strip import HardwareStrip
 from talos.ui.widgets.log_window import LogWindow
@@ -137,10 +136,10 @@ class MainWindow(QMainWindow):
         manager.camera.sig_frame.connect(self._sample_finding.on_frame)
         manager.camera.sig_frame.connect(
             self._sample_finding.live_view.show_frame)
-        manager.camera.sig_frame.connect(self._scan_window.on_frame)
         manager.camera.sig_frame.connect(self._autogain.on_frame)
         # STOP ALL must abort a running SCAN, not just the motion in flight.
-        manager.sig_stop_all_done.connect(self._scan_window.on_stop_all_done)
+        manager.sig_stop_all_done.connect(
+            self._sample_finding.scan_panel.on_stop_all_done)
         manager.sig_job_done.connect(self._on_job_done)
         manager.sig_job_failed.connect(self._on_job_failed)
         self._snapshot_job: int | None = None
@@ -272,36 +271,17 @@ class MainWindow(QMainWindow):
         self._log_action.toggled.connect(self._log.setVisible)
         self._log.set_toggle_action(self._log_action)
 
-        # The scan and the identification chain live in their own window
-        # while they are being proven (see the workspace's docstring).
-        self._scan_window = ScanWindow(
-            self._manager, self._settings, self._state,
-            calibration_context=self._calibration, input_system=self._input,
-            autofocus_service=self._autofocus, parent=self)
-        self._scan_action = self._windows_menu.addAction("Scan")
-        self._scan_action.setCheckable(True)
-        self._scan_action.toggled.connect(self._scan_window.setVisible)
-        self._scan_window.set_toggle_action(self._scan_action)
-        # ONE live view for the whole application: the Sample Finding tab's.
-        # The scan console hands it the processed overlay and borrows it for
-        # the colour dropper (which samples the ORIGINAL frame either way).
-        self._scan_window.sig_processed_frame.connect(
-            self._sample_finding.set_processed_frame)
-        self._sample_finding.sig_processed_view.connect(
-            self._scan_window.set_preview_wanted)
-        self._scan_window.sig_pick_requested.connect(self._arm_colour_pick)
-        self._sample_finding.live_view.sig_frame_clicked.connect(
-            self._scan_window.on_pick)
+        # The scan and the identification chain live IN the Sample Finding
+        # tab now — its own columns, its own live view. The dropper is armed
+        # from the colour group there and the click is handled there too, so
+        # the tab owns every step: the PRE-PROCESSED pixel is what is
+        # sampled, and the panel that computed it is the one that reads it.
+        self._sample_finding.sig_log.connect(
+            lambda message: self._on_log_message("info", message))
 
         help_menu = menu_bar.addMenu("&Help")
         about_action = help_menu.addAction("&About TALOS")
         about_action.triggered.connect(self._on_about)
-
-    def _arm_colour_pick(self) -> None:
-        """The dropper works on the live view, so show it: the Sample
-        Finding tab is where the stream is."""
-        self._tabs.setCurrentWidget(self._sample_finding)
-        self._sample_finding.live_view.set_pick_mode(True)
 
     def _build_display_menu(self, menu) -> None:
         """Display → live-view overlays (persisted to display.*).
@@ -638,9 +618,7 @@ class MainWindow(QMainWindow):
         roi = self._af_roi.roi()
         if roi is not None:
             self._af_roi.set_roi(mirror_roi_norm(roi))
-        scan_window = getattr(self, "_scan_window", None)
-        if scan_window is not None:
-            scan_window.on_camera_flip_changed()
+        self._sample_finding.on_camera_flip_changed()
         self._on_log_message(
             "warning",
             "Camera flip changed — the scan map and the live sample "
@@ -810,15 +788,23 @@ class MainWindow(QMainWindow):
             # First launch: the layout targets 1080p 16:9 — go maximized.
             self.showMaximized()
 
+    def stop_workers(self) -> None:
+        """Stop the threads the window owns, without closing anything.
+
+        The tab owns the detection thread and any scan worker, and neither
+        stops itself. Calling this from ``closeEvent`` alone was not
+        enough: the app has shutdown paths that never close the window
+        (the headless screenshot rig, the autoquit smoke hook), and there
+        Qt destroys a *running* QThread on the way out — which aborts the
+        process after a clean exit line. Idempotent.
+        """
+        self._sample_finding.shutdown()
+
     def closeEvent(self, event) -> None:  # noqa: N802
         qs = QSettings("TALOS", "TALOS")
         qs.setValue("geometry", self.saveGeometry())
         qs.setValue("maximized", self.isMaximized())
-        # The scan window owns a detection thread; a hidden QDialog is not
-        # destroyed on its own, so its worker has to be stopped here.
-        scan_window = getattr(self, "_scan_window", None)
-        if scan_window is not None:
-            scan_window.shutdown()
+        self.stop_workers()
         super().closeEvent(event)
 
     # ------------------------------------------------------------------
@@ -963,7 +949,7 @@ class MainWindow(QMainWindow):
             self._strip.update_telem(key, payload)
             self._navigation.update_telem(key, payload)
             self._stage_window.update_telem(key, payload)
-            self._scan_window.update_telem(key, payload)
+            self._sample_finding.update_telem(key, payload)
 
     def _on_device_event(self, key: str, event: str, payload: dict) -> None:
         led = self._leds.get(key)

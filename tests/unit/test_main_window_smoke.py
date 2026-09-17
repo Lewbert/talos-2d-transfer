@@ -158,6 +158,9 @@ def window(qapp, tmp_path, monkeypatch):
     w._log.close()  # destroy the hide-not-destroy dialog
     w._focus_window.close()
     w._stage_window.close()
+    # The tab owns a detection thread; without this it outlives the test
+    # and Qt destroys it mid-run at interpreter teardown.
+    w.stop_workers()
 
 
 def test_menu_bar_structure(window):
@@ -454,18 +457,16 @@ def test_right_panel_groups_are_collapsible(window):
     assert len(sections) >= 4  # Capture / Camera / Autofocus / Temperature
     titles = {s._header.text()[2:] for s in sections}
     assert {"Capture", "Camera", "Autofocus", "Temperature"} <= titles
-    # The Sample Finding tab keeps only its live view and the scan camera
-    # profile: the scan and identification panels moved to the Scan window
-    # while they are being proven.
-    scan = window._sample_finding
-    scan_titles = {s._header.text()[2:]
-                   for s in scan.findChildren(CollapsibleGroup)}
-    assert scan_titles == {"Camera"}
-    from PySide6.QtWidgets import QLabel
-
-    pointers = [label.text() for label in scan.findChildren(QLabel)]
-    assert any("Windows ▸ Scan" in text for text in pointers), \
-        "the tab must say where the scan panel went"
+    # The Sample Finding tab carries its own camera/CV column now: the scan
+    # camera profile, the pre-processing chain and the identification gates,
+    # all collapsible and all under the tab's own state key.
+    tab = window._sample_finding
+    tab_titles = {s._header.text()[2:]
+                  for s in tab.findChildren(CollapsibleGroup)}
+    assert tab_titles == {"Camera", "Pre-processing", "Identification"}
+    for section in tab.findChildren(CollapsibleGroup):
+        assert section._settings is window._settings
+        assert section._state_key == "scan"
 
 
 def test_telemetry_updates_strip(window):
@@ -682,25 +683,47 @@ def test_input_log_reaches_the_operator(qapp, tmp_path, monkeypatch):
     assert window._msg_label.text() == "gamepad LT+RT: autofocus once"
 
 
-def test_the_scan_window_previews_the_plan_it_would_run(window):
+def test_the_scan_panel_previews_the_plan_it_would_run(window):
     """The map shows the route the CURRENT fields would walk — the same
     plan_path() the scanner uses, so a preview cannot promise a grid the
     run would not visit."""
     from talos.cv.scan import grid_shape, plan_path
 
-    scan = window._scan_window
-    plan = scan.map._plan
-    params = scan._params_for(None)
-    fov = scan._fov()
+    scan = window._sample_finding.scan_panel
+    params = scan.params_for()
+    fov = scan.fov()
+    assert scan.map._plan.waypoints == [(w.x_um, w.y_um)
+                                        for w in plan_path(params, fov)]
+    assert (scan.map._plan.fov_x_um, scan.map._plan.fov_y_um) == fov
     cols, rows = grid_shape(params, fov)
-    assert len(plan.waypoints) == cols * rows
-    assert plan.waypoints == [(w.x_um, w.y_um) for w in plan_path(params, fov)]
-    assert (plan.fov_x_um, plan.fov_y_um) == fov
+    assert len(scan.map._plan.waypoints) == cols * rows
 
     # editing the area re-derives the preview
-    scan._width.setValue(scan._width.value() * 2)
-    scan._refresh_plan()
+    scan.width.setValue(scan.width.value() * 2)
+    scan.refresh_plan()
     assert len(scan.map._plan.waypoints) > cols * rows
+
+
+def test_the_panel_owns_only_the_settings_it_shows(window):
+    """The preferences-owned values (overlap, settle, speed, backlash,
+    exports) must survive a panel edit: if the panel wrote them from
+    widgets it does not have, every edit would silently reset them."""
+    from talos.scan_settings import SCAN_KEYS, load_scan_settings
+
+    scan = window._sample_finding.scan_panel
+    section = window._settings.section("scan")
+    section["overlap"] = 0.42
+    section["settle_ms"] = 777
+    section["speed_pps"] = 1234
+    scan.reload_preferences()
+    scan.width.setValue(scan.width.value() + 100)
+    scan._persist()
+    saved = load_scan_settings(window._settings)
+    assert saved["overlap"] == pytest.approx(0.42)
+    assert saved["settle_ms"] == 777
+    assert saved["speed_pps"] == 1234
+    assert saved["width_um"] == pytest.approx(scan.width.value())
+    assert set(scan._prefs) == set(SCAN_KEYS)
 
 
 def test_scan_progress_and_tiles_reach_the_map(window):
@@ -708,14 +731,12 @@ def test_scan_progress_and_tiles_reach_the_map(window):
     and one tile per captured frame at its readback position."""
     import numpy as np
 
-    from talos.ui.widgets.scan_map import ScanMapTile
-
-    scan = window._scan_window
+    scan = window._sample_finding.scan_panel
     scan._scan_tiles.clear()
     scan._on_progress(3, 12)
-    assert scan._progress.maximum() == 12
-    assert scan._progress.value() == 3
-    assert "3/12" in scan._status.text()
+    assert scan.progress.maximum() == 12
+    assert scan.progress.value() == 3
+    assert "3/12" in scan.status.text()
 
     thumb = np.full((54, 96, 3), 90, np.uint8)
     scan._on_tile(0, 1000.0, 2000.0, thumb)
@@ -728,20 +749,62 @@ def test_scan_progress_and_tiles_reach_the_map(window):
     # what it captured), but a genuinely new area drops them
     scan.map.set_plan(scan.map._plan)
     assert len(scan.map._tiles) == 2
-    scan._width.setValue(scan._width.value() * 2)
+    scan.width.setValue(scan.width.value() * 2)
     assert not scan.map._tiles
 
 
-def test_the_scan_window_is_in_the_windows_menu_and_hides(window):
-    """The window is a singleton that HIDES (never destroyed), and Esc still
-    reaches the global STOP ALL."""
-    assert window._scan_action.text() == "Scan"
-    assert window._scan_action.isCheckable()
-    window._scan_action.setChecked(True)
-    assert window._scan_window.isVisible()
-    window._scan_window.close()
-    assert not window._scan_window.isVisible()
-    assert window._scan_action.isChecked() is False
+def test_a_captured_tile_reaches_the_detection_queue(window):
+    """The panel captures; the workspace detects. The seam between them is
+    one signal, and it carries the FULL-resolution frame — the map only
+    ever sees the thumbnail."""
+    import numpy as np
+
+    finding = window._sample_finding
+    seen: list = []
+    finding._engine.submit_tile = lambda *a, **kw: seen.append((a, kw))
+    frame = np.full((64, 96, 3), 120, np.uint8)
+    finding.scan_panel._on_scan_frame(7, 1234.5, -42.0, frame)
+    assert len(seen) == 1
+    index, delivered = seen[0][0][0], seen[0][0][1]
+    assert index == 7
+    assert delivered is frame
+    assert seen[0][1]["scale"] == 1.0            # tiles run full resolution
+    # the map's own position for the tile is recorded too
+    assert finding.scan_panel._scan_tiles[7] == (1234.5, -42.0)
+
+
+def test_the_footprint_follows_the_nested_telemetry(window):
+    """Regression: the whole device payload was passed to
+    StagePosition.from_telemetry, which reads a FLAT dict — so the position
+    came back as (0, 0, 0) and the "you are here" box sat at stage origin
+    on every idle frame."""
+    scan = window._sample_finding.scan_panel
+    scan.update_telem("zolix", {"position": {"x_um": 4321.0, "y_um": -765.0,
+                                             "x_pulses": 1, "y_pulses": 2,
+                                             "r_pulses": 0, "r_deg": 0.0},
+                                "status": {"x_moving": False}})
+    assert scan.map._footprint == (4321.0, -765.0)
+    # a payload with no position at all must leave it alone, not zero it
+    scan.update_telem("zolix", {"connected": True})
+    assert scan.map._footprint == (4321.0, -765.0)
+    # a different device is not this panel's business
+    scan.update_telem("focus", {"position": {"x_um": 1.0, "y_um": 2.0}})
+    assert scan.map._footprint == (4321.0, -765.0)
+
+
+def test_stop_all_aborts_the_run_not_just_the_motion(window):
+    """Esc must end a scan. Without this wiring the abort flag stayed
+    clear, the controller stopped, and the run continued at the next
+    waypoint — which looked exactly like Esc doing nothing."""
+    scan = window._sample_finding.scan_panel
+    aborted: list = []
+    scan._on_abort = lambda reason="abort": aborted.append(reason)
+    scan._set_job("scan")
+    window._manager.sig_stop_all_done.emit()
+    assert aborted == ["stop all"]
+    scan._set_job(None)
+    window._manager.sig_stop_all_done.emit()
+    assert aborted == ["stop all"]              # idle: nothing to abort
 
 
 def test_settings_applied_refreshes_every_cached_consumer(window):

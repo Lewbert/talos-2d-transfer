@@ -4,7 +4,7 @@ Builds the REAL app object graph in sim mode (no hardware), shows the
 window, lets the sim camera stream a few frames, then grabs each
 workspace + the auxiliary windows at 1920×1080 and 1024×640.
 
-    python tools/ui_shot.py [--out DIR] [--shots nav,scan,stage,log,prefs]
+    python tools/ui_shot.py [--out DIR] [--shots nav,sample,stage,log]
 
 Runs on the real desktop (sim only — no hardware is touched; the window
 briefly appears). Set QT_QPA_PLATFORM=offscreen to run headless — note
@@ -104,8 +104,10 @@ def main() -> int:
         f"stage{tag}": window._stage_window,
         f"log{tag}": window._log,
         f"focus{tag}": window._focus_window,
-        # the scan console: plan, run, identification chain, results
-        f"scanwin{tag}": window._scan_window,
+        # the Sample Finding tab, both halves of it: the CV column and
+        # the scan column are judged separately (see --shots below)
+        f"scanmap{tag}": window._sample_finding.scan_panel.map,
+        f"identify{tag}": window._sample_finding.colour_group,
         # embedded close-ups for the control-panel QA (checkbox dot,
         # slider handle, ms exposure, temperature grid, the AF ROI block)
         f"camgroup{tag}": window._navigation.camera_group,
