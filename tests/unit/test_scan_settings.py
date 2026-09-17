@@ -101,3 +101,12 @@ def test_the_settings_round_trip_through_a_real_settings_object(tmp_path):
     assert again["origin"] == "corner_pitch"
     assert again["speed_pps"] == 800.0
     assert scan_directory(Settings.load(path)) == tmp_path / "scans"
+
+
+def test_the_cli_benches_and_the_app_agree_on_the_folder():
+    """Two helpers, one folder. They used to differ — Documents/TALOS_scans
+    for the tools, Pictures/TALOS/scans for the app — so a bench scan and an
+    app scan were found in two different places."""
+    from talos.paths import get_scan_dir
+
+    assert get_scan_dir() == default_scan_dir()

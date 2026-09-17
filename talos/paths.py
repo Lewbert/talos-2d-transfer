@@ -10,6 +10,8 @@ import os
 import sys
 from pathlib import Path
 
+from talos.scan_settings import default_scan_dir
+
 _APP_NAME = "TALOS"
 
 
@@ -34,7 +36,15 @@ def get_calibration_db_path() -> Path:
 
 
 def get_scan_dir() -> Path:
-    return Path(os.environ.get("USERPROFILE", Path.home())) / "Documents" / "TALOS_scans"
+    """Where the CLI benches put a scan.
+
+    The APP's folder comes from ``scan.dir`` (see ``talos/scan_settings.py``)
+    and defaults to ``~/Pictures/TALOS/scans``, beside the snapshots. This
+    one exists for the tools, which take no settings object — and it now
+    returns the SAME place, so a bench scan and an app scan are found in one
+    directory instead of two.
+    """
+    return default_scan_dir()
 
 
 def resource_path(rel: str) -> Path:

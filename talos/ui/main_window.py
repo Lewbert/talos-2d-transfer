@@ -570,6 +570,14 @@ class MainWindow(QMainWindow):
         if self._input is not None:
             # axis inversion / flip X↔Y, jog speeds, focus trigger curve
             self._input.reload_settings()
+        # The Sample Finding tab caches the scan's own section (overlap,
+        # settle, speed, backlash, exports) — the values it deliberately
+        # does not show. Without this the panel keeps running the old ones
+        # until the app restarts, which is the worst kind of stale: the
+        # operator changed a number and the scan ignored it.
+        refresh = getattr(self._sample_finding, "refresh_settings", None)
+        if callable(refresh):
+            refresh()
         self._sync_camera_flip()
         self._reconnect_changed_devices()
 

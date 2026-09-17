@@ -1009,3 +1009,29 @@ def test_focus_once_refused_keeps_the_curve_and_abort(window, qapp):
     panel._on_focus_once()
     assert panel._curve._points == []
     assert panel._abort.isEnabled() is True
+
+
+def test_preferences_reach_the_running_scan(window):
+    """The scan's out-of-the-way settings (overlap, settle, speed,
+    backlash, exports) live in Preferences. Apply must push them into the
+    panel, which caches the section at startup — without the refresh the
+    panel keeps running the old numbers until the app restarts, and the
+    operator has no way to tell that the number they changed was ignored.
+    """
+    from talos.scan_settings import load_scan_settings
+    from talos.ui.dialogs.preferences import _scan_page
+
+    panel = window._sample_finding.scan_panel
+    assert panel._prefs["speed_pps"] == 500.0            # the default
+
+    section = window._settings.section("scan")
+    section["speed_pps"] = 1234
+    section["overlap"] = 0.33
+    page = _scan_page(window._settings, window)
+    page._apply()
+    window._on_settings_applied()
+
+    params = panel.params_for()
+    assert params.speed_pps == 1234
+    assert params.overlap == pytest.approx(0.33)
+    assert load_scan_settings(window._settings)["speed_pps"] == 1234
