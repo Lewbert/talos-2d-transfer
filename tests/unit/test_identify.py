@@ -8,11 +8,11 @@ import cv2
 import numpy as np
 import pytest
 
-from talos.cv.identify import (FAIL_COLOUR, PASS_COLOUR, AnnotationStage, BorderStage, ColourStage,
-                               ContrastStage, IdentifyConfig, IdentifyPipeline,
+from talos.cv.identify import (FAIL_COLOUR, PASS_COLOUR, BorderStage, ColourStage,
+                               IdentifyConfig, IdentifyPipeline,
                                MergeStage, MorphologyStage, SharpnessStage,
                                SizeStage, colour_mask, hex_to_hsv,
-                               render_overlay, valid_hex)
+                               render_overlay, sample_hex, valid_hex)
 from talos.models import ObjectiveCalibration, StagePosition
 
 CALIB = ObjectiveCalibration(objective_id=0, um_per_px_x=0.2, um_per_px_y=0.2)
@@ -95,10 +95,7 @@ def test_hue_wraparound_matches_red_on_both_sides_of_the_seam():
     img = scene([(60, 60, 50, 40, below), (200, 60, 50, 40, above)])
     result = IdentifyPipeline().run(
         img, CALIB, config=config(
-            colour=ColourStage(hex_color=hex_of(target), tolerance=15.0),
-            # a strongly red region is what the scale-bar gate exists to
-            # reject; this test is about the colour band, not that gate
-            annotation=AnnotationStage(enabled=False)))
+            colour=ColourStage(hex_color=hex_of(target), tolerance=15.0)))
     assert len(result.candidates) == 2
 
     mask = colour_mask(img, hex_of(target), tolerance=15.0)
@@ -120,26 +117,31 @@ def test_min_saturation_keeps_grey_out_of_a_hue_band():
     assert strict.candidates == []
 
 
-# --- the contrast source ---------------------------------------------------
+# --- the source is the colour, and only the colour -------------------------
 
-def test_contrast_source_alone_finds_a_bright_blob():
-    img = scene([(100, 80, 160, 120, (190, 170, 140))], shape=(480, 640))
-    stages = [ContrastStage(enabled=True), MorphologyStage(),
-              SizeStage(), BorderStage(), SharpnessStage(), MergeStage()]
-    result = IdentifyPipeline().run(img, CALIB,
-                                    config=IdentifyConfig(stages=stages))
-    assert len(result.candidates) == 1
-    assert result.candidates[0].x_px == pytest.approx(180, abs=10)
+def test_colour_is_the_only_source():
+    """Two sources used to OR into one mask, and the second was contrast.
+    It answered "what is here at all" rather than "which of these are the
+    same material" — on a frame holding one thick flake and one monolayer
+    the histogram follows the thick one, and the monolayer falls out of
+    the threshold. The flattening it relied on is a pre-processing stage
+    now instead (cv/preprocess.py)."""
+    kinds = {stage.NAME: stage.KIND for stage in IdentifyConfig().stages}
+    assert [name for name, kind in kinds.items() if kind == "source"] == \
+        ["colour"]
 
 
-def test_both_sources_feed_one_mask():
-    img = scene([(40, 60, 50, 40, MAGENTA), (220, 60, 50, 40, (190, 170, 140))])
-    stages = [ColourStage(hex_color=hex_of(MAGENTA), tolerance=20.0),
-              ContrastStage(enabled=True), MorphologyStage(), SizeStage(),
-              BorderStage(), MergeStage()]
-    result = IdentifyPipeline().run(img, CALIB,
-                                    config=IdentifyConfig(stages=stages))
-    assert len(result.candidates) == 2
+def test_a_retired_stage_in_a_stored_config_is_dropped_quietly():
+    """A settings file written before the chain narrowed must still load —
+    and must come back as the current chain, not as a chain plus a ghost."""
+    restored = IdentifyConfig.from_dict({"stages": [
+        {"name": "contrast", "enabled": True, "blur_sigma": 30.0},
+        {"name": "annotation", "enabled": True, "sat_min": 99.0},
+        {"name": "colour", "hex_color": "#0a141e"},
+    ]})
+    assert [s.NAME for s in restored.stages] == [
+        s.NAME for s in IdentifyConfig().stages]
+    assert restored.stage("colour").hex_color == "#0a141e"
 
 
 # --- the gates -------------------------------------------------------------
@@ -202,15 +204,16 @@ def test_sharpness_gate_separates_an_edge_from_a_smudge():
     assert IdentifyPipeline().run(smudge, CALIB, config=gated).candidates == []
 
 
-def test_annotation_gate_rejects_a_red_scale_bar():
-    """The app can draw a saturated red scale bar into the frame. An
-    operator looking for a red sample must not be told the bar is one."""
-    img = scene([(200, 190, 90, 20, (255, 0, 0))])       # saturated red bar
+def test_a_red_region_is_a_sample_not_a_scale_bar():
+    """A saturated red bar used to be rejected here as the app's own
+    annotation. The burn-in only ever touches snapshot copies inside the
+    camera backend — the live stream, the frame slot and every scan tile
+    are raw — so there is nothing on this path to reject, and an operator
+    looking for a genuinely red sample gets it."""
+    img = scene([(200, 190, 90, 20, (255, 0, 0))])
     stage = ColourStage(hex_color="#ff0000", tolerance=20.0)
-    off = config(colour=stage, annotation=AnnotationStage(enabled=False))
-    on = config(colour=stage, annotation=AnnotationStage())
-    assert len(IdentifyPipeline().run(img, CALIB, config=off).candidates) == 1
-    assert IdentifyPipeline().run(img, CALIB, config=on).candidates == []
+    result = IdentifyPipeline().run(img, CALIB, config=config(colour=stage))
+    assert len(result.candidates) == 1
 
 
 def test_merge_joins_two_fragments_of_one_sample():
@@ -317,11 +320,11 @@ def test_config_round_trips_through_a_settings_dict():
     original = IdentifyConfig()
     original.stage("colour").hex_color = "#123456"
     original.stage("size").min_area_um2 = 12.5
-    original.stage("contrast").enabled = True
+    original.stage("sharpness").enabled = False
     restored = IdentifyConfig.from_dict(original.to_dict())
     assert restored.stage("colour").hex_color == "#123456"
     assert restored.stage("size").min_area_um2 == 12.5
-    assert restored.stage("contrast").enabled is True
+    assert restored.stage("sharpness").enabled is False
     assert [s.NAME for s in restored.stages] == [s.NAME
                                                  for s in original.stages]
 
@@ -351,6 +354,33 @@ def test_hex_to_hsv_agrees_with_the_frame_conversion():
     assert hex_to_hsv("#ff0000")[0] == 0
     assert hex_to_hsv("#00ff00")[0] == 60
     assert hex_to_hsv("#0000ff")[0] == 120
+
+
+# --- the dropper -----------------------------------------------------------
+
+def test_sample_hex_averages_a_circular_patch():
+    img = np.zeros((40, 40, 3), np.uint8)
+    img[18:23, 18:23] = (200, 100, 50)
+    assert sample_hex(img, 20, 20, radius=2) == "#c86432"
+
+
+def test_sample_hex_ignores_the_diagonal_corners():
+    """A circle, not a square. A square's four corners are the pixels most
+    likely to belong to whatever is diagonally adjacent — on a flake edge
+    that is the substrate, and the pick lands between the two materials
+    instead of on one of them."""
+    img = np.zeros((40, 40, 3), np.uint8)
+    img[18:23, 18:23] = (100, 100, 100)
+    for corner in ((18, 18), (18, 22), (22, 18), (22, 22)):
+        img[corner] = (255, 0, 0)                  # only the corners differ
+    # a square average would be (21*100 + 4*255) / 25 = 125, not 100
+    assert sample_hex(img, 20, 20, radius=2) == "#646464"
+
+
+def test_sample_hex_refuses_a_point_off_the_frame():
+    img = np.zeros((10, 10, 3), np.uint8)
+    assert sample_hex(img, 5, 40) is None
+    assert sample_hex(img, -1, 5) is None
 
 
 # --- the processed view ----------------------------------------------------

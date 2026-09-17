@@ -28,13 +28,11 @@ Two rules this window exists to keep:
 
 from __future__ import annotations
 
-import csv
 import threading
 import time
 from dataclasses import fields, replace
 from pathlib import Path
 
-import cv2
 import numpy as np
 from PySide6.QtCore import QThread, Qt, Signal
 from PySide6.QtGui import QColor
@@ -63,21 +61,17 @@ from PySide6.QtWidgets import (
 
 from talos.cv.calibration import SENSOR_HEIGHT_PX, SENSOR_WIDTH_PX
 from talos.cv.frame_source import LatestFrameSource
-from talos.cv.identify import (IdentifyConfig, Stage, valid_hex)
+from talos.cv.identify import (IdentifyConfig, Stage, sample_hex, valid_hex)
 from talos.cv.scan import (PATH_LABELS, PATHS, GridScanner, grid_shape,
-                           plan_path, scale_scan_speed_config)
-from talos.cv.stitch import build_mosaic, build_overview
+                           plan_path, scan_speed_config)
+from talos.cv.scan_output import candidate_rows, write_outputs
+from talos.scan_settings import (SCAN_KEYS, load_scan_settings,
+                                 save_scan_settings, scan_directory)
 from talos.models import (FlakeCandidate, ObjectiveCalibration, ScanParams,
                           StagePosition)
 from talos.ui.detect_engine import DetectionEngine
 from talos.ui.widgets.scan_map import (ScanMapMarker, ScanMapPlan,
                                        ScanMapTile, ScanMapWidget)
-
-#: Settings keys the window owns (all under the "scan" section).
-SCAN_KEYS = ("width_um", "height_um", "overlap", "serpentine", "slow_speed",
-             "path", "start_axis", "x_dir", "y_dir", "settle_ms",
-             "backlash_um", "backlash_approach", "return_to_start",
-             "export_mosaic", "export_candidates", "export_overview")
 
 _DIR_CHOICES = ((1, "+"), (-1, "−"))
 _AXIS_CHOICES = (("x", "X first"), ("y", "Y first"))
@@ -91,11 +85,9 @@ _PARAM_LABELS = {
     "max_area_um2": "Max area (µm²)",
     "margin_px": "Margin (px)",
     "gap_px": "Join within (px)",
-    "sat_min": "Min saturation",
     "min_saturation": "Min saturation",
     "min_value": "Min brightness",
     "min_edge_strength": "Min edge",
-    "blur_sigma": "Blur σ",
 }
 
 
@@ -123,14 +115,6 @@ def save_scan_settings(settings, values: dict) -> None:
 def _param_label(name: str) -> str:
     """A stage parameter's label, as the operator reads it."""
     return _PARAM_LABELS.get(name, name.replace("_", " ").capitalize())
-
-
-def candidate_rows(candidates) -> list[list[str]]:
-    """Table/CSV rows for candidates — one formatter, so what is exported
-    is what was shown."""
-    return [[str(index + 1), f"{c.x_um:.1f}", f"{c.y_um:.1f}",
-             f"{c.area_um2:.1f}", f"{c.score:.1f}"]
-            for index, c in enumerate(candidates)]
 
 
 class _Worker(QThread):
@@ -281,7 +265,14 @@ class ScanWindow(QDialog):
         form.addRow("Start axis", self._start_axis)
         self._overlap = self._spin(0.0, 90.0, 10.0, " %")
         form.addRow("Overlap", self._overlap)
-        self._speed = self._combo([(True, "Slow"), (False, "Fast")])
+        self._speed = QSpinBox()
+        self._speed.setRange(10, 20000)
+        self._speed.setSingleStep(50)
+        self._speed.setSuffix(" pps")
+        self._speed.setToolTip(
+            "The scan's own speed, in pulses per second. The controller\n"
+            "ramps it in fixed-steps mode, so the manual jog speeds — and\n"
+            "the objective's speed multiplier — do not apply to a scan.")
         form.addRow("Speed", self._speed)
         self._settle = QSpinBox()
         self._settle.setRange(0, 5000)
@@ -323,15 +314,18 @@ class ScanWindow(QDialog):
         preview_form.addRow("Preview", self._preview)
         layout.addLayout(preview_form)
 
-        # any change re-plans the map and persists
+        # any change re-plans the map and persists. Speed is not in the
+        # first group: it changes how long a run takes, never where the
+        # tiles are.
         for widget in (self._width, self._height, self._overlap,
                        self._settle, self._backlash):
             widget.valueChanged.connect(self._refresh_plan)
             widget.editingFinished.connect(self._persist)
         for widget in (self._x_dir, self._y_dir, self._path, self._serpentine,
-                       self._start_axis, self._speed, self._approach):
+                       self._start_axis, self._approach):
             widget.currentIndexChanged.connect(self._refresh_plan)
             widget.currentIndexChanged.connect(self._persist)
+        self._speed.valueChanged.connect(self._persist)
         self._return_home.toggled.connect(self._persist)
         self._preview.currentIndexChanged.connect(self._persist)
         return box
@@ -638,7 +632,7 @@ class ScanWindow(QDialog):
         self._select(self._path, saved.get("path") or "serpentine")
         self._select(self._serpentine, bool(saved.get("serpentine", True)))
         self._select(self._start_axis, saved.get("start_axis") or "x")
-        self._select(self._speed, bool(saved.get("slow_speed", True)))
+        self._speed.setValue(int(saved.get("speed_pps") or 500))
         self._settle.setValue(int(saved.get("settle_ms") or 0))
         self._backlash.setValue(float(saved.get("backlash_um") or 0.0))
         self._select(self._approach, int(saved.get("backlash_approach") or 1))
@@ -672,7 +666,7 @@ class ScanWindow(QDialog):
             "path": self._path.currentData(),
             "serpentine": self._serpentine.currentData(),
             "start_axis": self._start_axis.currentData(),
-            "slow_speed": self._speed.currentData(),
+            "speed_pps": self._speed.value(),
             "settle_ms": self._settle.value(),
             "backlash_um": self._backlash.value(),
             "backlash_approach": self._approach.currentData(),
@@ -775,7 +769,7 @@ class ScanWindow(QDialog):
             width_um=self._width.value(), height_um=self._height.value(),
             overlap=self._overlap.value() / 100.0,
             serpentine=bool(self._serpentine.currentData()),
-            slow_speed=bool(self._speed.currentData()),
+            speed_pps=float(self._speed.value()),
             path=str(self._path.currentData()),
             start_axis=str(self._start_axis.currentData()),
             x_dir=int(self._x_dir.currentData() or 1),
@@ -921,7 +915,7 @@ class ScanWindow(QDialog):
         frame = self._latest_frame
         if frame is None:
             return
-        colour = sample_colour(frame, x_px, y_px)
+        colour = sample_hex(frame, x_px, y_px)
         if colour is None:
             return
         editor = self._hex_editor("colour")
@@ -983,10 +977,9 @@ class ScanWindow(QDialog):
         """The scan thread. Owns the adapter and the scanner; every UI
         update comes back as a queued signal."""
         from talos.hal.proxies.stage_adapter import ManagerStageAdapter
-        from talos.paths import get_scan_dir
 
         row = self._objective_row()
-        stage_cfg = scale_scan_speed_config(
+        stage_cfg = scan_speed_config(
             self._settings.device("zolix"),
             float(row.get("stage_speed_multiplier") or 1.0))
         adapter = ManagerStageAdapter(self._manager, stage_cfg,
@@ -1003,7 +996,8 @@ class ScanWindow(QDialog):
         scanner.sig_frame.connect(self._on_scan_frame)
         scanner.sig_log.connect(self._log)
         self._scanner = scanner
-        out_dir = get_scan_dir() / time.strftime("scan_%Y%m%d_%H%M%S")
+        out_dir = scan_directory(self._settings) / time.strftime(
+            "scan_%Y%m%d_%H%M%S")
         try:
             result = scanner.run(
                 params, out_dir,
@@ -1132,7 +1126,7 @@ class ScanWindow(QDialog):
             "mosaic": self._export_mosaic.isChecked(),
             "candidates": self._export_candidates.isChecked(),
             "overview": self._export_overview.isChecked()}
-        self._export_worker = _Worker(lambda: self._write_outputs(payload),
+        self._export_worker = _Worker(lambda: self._finish_exports(payload),
                                       self)
         self._export_worker.sig_done.connect(self._on_export_done)
         self._export_worker.sig_log.connect(self._log)
@@ -1140,78 +1134,13 @@ class ScanWindow(QDialog):
         self._export_worker.start()
 
     @staticmethod
-    def _write_outputs(payload) -> dict:
-        """The extras, on a worker thread: the mosaic, the tile overview
-        and the sample list. The raw frames and the manifest are already
-        on disk — these are summaries of them."""
-        result = payload["result"]
-        out_dir: Path = payload["out_dir"]
-        tiles = payload["tiles"]
-        hits = payload["hits"]
-        exports = payload["exports"]
-        written: list[str] = []
-        # The MANIFEST pairs a waypoint index with its frame (and leaves
-        # the cell empty for a waypoint that captured nothing), so it is
-        # the only correct alignment — zipping the frame list against the
-        # tile list would shift every frame after a miss.
-        frames: list[tuple[int, Path]] = []
-        with open(result.manifest_path, newline="", encoding="utf-8") as handle:
-            for index, row in enumerate(csv.DictReader(handle)):
-                name = (row.get("frame") or "").strip()
-                if name:
-                    frames.append((index, out_dir / "frames" / name))
-
-        if exports["candidates"]:
-            path = out_dir / "candidates.csv"
-            with open(path, "w", newline="", encoding="utf-8") as handle:
-                writer = csv.writer(handle)
-                writer.writerow(["tile", "x_um", "y_um", "area_um2",
-                                 "edge", "tile_x_um", "tile_y_um"])
-                for index in sorted(hits):
-                    x_um, y_um = tiles.get(index, (0.0, 0.0))
-                    for cand in hits[index]:
-                        writer.writerow([index, f"{cand.x_um:.3f}",
-                                         f"{cand.y_um:.3f}",
-                                         f"{cand.area_um2:.2f}",
-                                         f"{cand.score:.1f}",
-                                         f"{x_um:.3f}", f"{y_um:.3f}"])
-            written.append(path.name)
-
-        if exports["mosaic"]:
-            mosaic_tiles = []
-            for index, path in frames:
-                image = cv2.imread(str(path))
-                if image is None:
-                    continue
-                x_um, y_um = tiles.get(index, (0.0, 0.0))
-                mosaic_tiles.append(
-                    (x_um, y_um, cv2.cvtColor(image, cv2.COLOR_BGR2RGB)))
-            mosaic = build_mosaic(mosaic_tiles, payload["fov"],
-                                  flip=payload.get("flip", False))
-            if mosaic is not None:
-                path = out_dir / "mosaic.png"
-                cv2.imwrite(str(path), cv2.cvtColor(mosaic,
-                                                    cv2.COLOR_RGB2BGR))
-                written.append(f"{path.name} ({mosaic.shape[1]}×"
-                               f"{mosaic.shape[0]})")
-
-        if exports["overview"]:
-            entries = []
-            for index, path in frames:
-                image = cv2.imread(str(path))
-                if image is None:
-                    continue
-                entries.append((cv2.cvtColor(image, cv2.COLOR_BGR2RGB),
-                                hits.get(index, [])))
-            sheet = build_overview(entries)
-            if sheet is not None:
-                path = out_dir / "overview.png"
-                cv2.imwrite(str(path), cv2.cvtColor(sheet,
-                                                    cv2.COLOR_RGB2BGR))
-                written.append(path.name)
-
-        return {"dir": out_dir, "written": written,
-                "samples": sum(len(v) for v in hits.values())}
+    def _finish_exports(payload) -> dict:
+        """Hand the summaries to cv.scan_output, which owns the format."""
+        return write_outputs(
+            Path(payload["out_dir"]), Path(payload["result"].manifest_path),
+            tiles=payload["tiles"], hits=payload["hits"],
+            fov_um=payload["fov"], exports=payload["exports"],
+            flip=bool(payload.get("flip", False)))
 
     def _on_export_done(self, summary) -> None:
         self._export_worker = None
@@ -1308,28 +1237,4 @@ class ScanWindow(QDialog):
         self._engine.shutdown()
 
 
-def sample_colour(frame: np.ndarray, x_px: int, y_px: int,
-                  radius: int = 4) -> str | None:
-    """The colour under a click, averaged over a small CIRCULAR patch.
-
-    A circle rather than a square: a square's corners bias the average
-    toward whatever is diagonally adjacent, which on a flake edge is the
-    substrate. Returns ``#rrggbb`` or None when the frame is too small."""
-    height, width = frame.shape[:2]
-    if not (0 <= x_px < width and 0 <= y_px < height):
-        return None
-    x0, x1 = max(0, x_px - radius), min(width, x_px + radius + 1)
-    y0, y1 = max(0, y_px - radius), min(height, y_px + radius + 1)
-    patch = frame[y0:y1, x0:x1].astype(np.float32)
-    if patch.size == 0:
-        return None
-    yy, xx = np.mgrid[y0 - y_px:y1 - y_px, x0 - x_px:x1 - x_px]
-    mask = (xx * xx + yy * yy) <= radius * radius
-    if not mask.any():
-        mask = np.ones(patch.shape[:2], bool)
-    mean = patch[mask].mean(axis=0)
-    return "#{:02x}{:02x}{:02x}".format(*(int(round(v)) for v in mean))
-
-
-__all__ = ["SCAN_KEYS", "ScanWindow", "candidate_rows", "load_scan_settings",
-           "sample_colour", "save_scan_settings"]
+__all__ = ["ScanWindow"]

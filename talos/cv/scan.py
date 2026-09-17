@@ -40,18 +40,44 @@ PATH_LABELS = {
     HILBERT: "Hilbert (experimental)",
 }
 
+#: Where the operator's position sits relative to the area they typed.
+#: ``centre`` is the original behaviour and stays the default.
+ORIGIN_CENTRE = "centre"
+ORIGIN_CORNER_FIT = "corner_fit"
+ORIGIN_CORNER_PITCH = "corner_pitch"
+ORIGINS = (ORIGIN_CENTRE, ORIGIN_CORNER_FIT, ORIGIN_CORNER_PITCH)
+ORIGIN_LABELS = {
+    ORIGIN_CENTRE: "Centre",
+    ORIGIN_CORNER_FIT: "Corner",
+    ORIGIN_CORNER_PITCH: "Corner (pitch)",
+}
 
-def scale_scan_speed_config(stage_cfg: dict, multiplier: float) -> dict:
-    """A COPY of the stage config with the slow/fast speeds scaled by the
-    active objective's stage multiplier (floor 10 pps; the multiplier is
-    clamped to [0.05, 1.0] — manual jogs apply the same scale via the
-    ActionResolver). The scan must never mutate the live settings."""
+#: The slowest the scan will be asked to run, in pulses per second.
+SCAN_SPEED_MIN_PPS = 10
+
+
+def scan_speed_config(stage_cfg: dict, speed_pps: float) -> dict:
+    """A COPY of the stage config carrying ONE speed for the scan.
+
+    Scanning and *go to sample* drive the stage in fixed-steps mode, where
+    the controller generates its own acceleration and deceleration ramp —
+    so there is no stability case for a slow/fast pair, and the two
+    speeds the manual jogs use are simply not the scan's to borrow. The
+    objective's ``stage_speed_multiplier`` is a manual-jog preference and
+    does not apply here either.
+
+    Both keys the adapter can read are set to the same number, so which
+    one it happens to pick cannot matter. ``speed_pps`` of 0 leaves the
+    config alone: the CLI benches pass their own and predate this.
+
+    The live settings are never mutated — the scan gets this copy.
+    """
     cfg = dict(stage_cfg)
-    mult = max(0.05, min(1.0, float(multiplier or 1.0)))
+    if float(speed_pps or 0.0) <= 0.0:
+        return cfg
+    pps = int(max(SCAN_SPEED_MIN_PPS, round(float(speed_pps))))
     for key in ("slow_speed_pps", "fast_speed_pps"):
-        base = float(cfg.get(key) or 0.0)
-        if base > 0:
-            cfg[key] = int(max(10, round(base * mult)))
+        cfg[key] = pps
     return cfg
 
 
@@ -70,6 +96,93 @@ def plan_steps(params, fov_um: tuple[float, float]) -> tuple[float, float]:
             max(fov_um[1] * (1.0 - params.overlap), 1e-3))
 
 
+@dataclass(frozen=True)
+class PlanGeometry:
+    """One grid: how many tiles, where the first one is, how far apart.
+
+    ``first_x/first_y`` are the first tile's CENTRE and ``step_x/step_y``
+    the signed pitch actually used, so the two corner modes can differ
+    from the requested pitch without anything downstream needing to know
+    why. Signed rather than absolute: the direction the area grows lives
+    here, in one place, instead of being re-applied at every use.
+    """
+
+    cols: int
+    rows: int
+    first_x: float
+    first_y: float
+    step_x: float
+    step_y: float
+
+    @property
+    def count(self) -> int:
+        return self.cols * self.rows
+
+
+def _axis_geometry(origin: str, a0: float, size: float, fov: float,
+                   pitch: float, sign: int) -> tuple[int, float, float]:
+    """(count, first tile centre, signed step) along one axis."""
+    if size <= 0.0 or fov <= 0.0 or pitch <= 0.0:
+        return 1, a0, sign * max(pitch, 1e-3)
+    if origin == ORIGIN_CORNER_FIT:
+        # The operator stands on the area's CORNER: the first tile is
+        # inset half a field of view so its edge is on that corner, and
+        # the last tile's far edge lands exactly on the far one. The
+        # count is the minimum that covers the area, which means the
+        # step comes out at or below the requested pitch — more overlap
+        # than asked for at the ends, never less.
+        count = max(1, math.ceil((size - fov) / pitch) + 1)
+        if count <= 1:
+            return 1, a0 + sign * size / 2.0, sign * pitch
+        return count, a0 + sign * fov / 2.0, sign * (size - fov) / (count - 1)
+    if origin == ORIGIN_CORNER_PITCH:
+        # Same corner, but every tile sits at exactly the requested
+        # pitch: the last CENTRE lands on the far edge and the union
+        # overhangs it by up to one step. The area typed is the path the
+        # stage walks rather than the region the frames cover.
+        count = max(1, math.ceil((size - fov / 2.0) / pitch) + 1)
+        if count <= 1:
+            return 1, a0 + sign * size / 2.0, sign * pitch
+        return count, a0 + sign * fov / 2.0, sign * pitch
+    # ORIGIN_CENTRE: the operator's position is the centre of the first
+    # tile and the area grows outward from it, so half a field of view of
+    # coverage sits behind where they were standing.
+    #
+    # The count has to allow for that overhang, which the obvious
+    # ``ceil(size / pitch)`` did not: half a frame of the covered span is
+    # BEHIND the origin, so the far edge is short whenever the remainder
+    # falls in the last half-frame. On the bench 5× a 2000 µm area was
+    # covered only to 1912 µm — an 88 µm strip the operator asked for and
+    # the scan never imaged. ``(n−1)·pitch + FOV ≥ area`` was true and
+    # irrelevant: it measures the span, not where the span starts.
+    count = max(1, math.ceil((size - fov / 2.0) / pitch) + 1)
+    return count, a0, sign * pitch
+
+
+def plan_geometry(params, fov_um: tuple[float, float]) -> PlanGeometry:
+    """The grid, for the run AND for every preview of it.
+
+    One function on purpose: a preview that disagrees with the plan the
+    scanner walks is worse than no preview, and the corner modes make
+    that easy to get wrong by hand (the tile count depends on the field
+    of view, not just on the area).
+    """
+    step_x, step_y = plan_steps(params, fov_um)
+    origin = str(getattr(params, "origin", None) or ORIGIN_CENTRE).lower()
+    if origin not in ORIGINS:
+        origin = ORIGIN_CENTRE
+    sign_x = -1 if int(getattr(params, "x_dir", 1) or 1) < 0 else 1
+    sign_y = -1 if int(getattr(params, "y_dir", 1) or 1) < 0 else 1
+    cols, first_x, step_x = _axis_geometry(
+        origin, float(params.x0_um), float(params.width_um),
+        float(fov_um[0]), step_x, sign_x)
+    rows, first_y, step_y = _axis_geometry(
+        origin, float(params.y0_um), float(params.height_um),
+        float(fov_um[1]), step_y, sign_y)
+    return PlanGeometry(cols=cols, rows=rows, first_x=first_x,
+                        first_y=first_y, step_x=step_x, step_y=step_y)
+
+
 def grid_shape(params, fov_um: tuple[float, float]) -> tuple[int, int]:
     """The plan's (cols, rows).
 
@@ -77,9 +190,8 @@ def grid_shape(params, fov_um: tuple[float, float]) -> tuple[int, int]:
     would actually walk (a preview that disagrees with the run is worse
     than none).
     """
-    step_x, step_y = plan_steps(params, fov_um)
-    return (max(1, math.ceil(params.width_um / step_x)),
-            max(1, math.ceil(params.height_um / step_y)))
+    geometry = plan_geometry(params, fov_um)
+    return geometry.cols, geometry.rows
 
 
 # ----------------------------------------------------------------------
@@ -183,13 +295,11 @@ def plan_cells(params, fov_um: tuple[float, float]) -> list[tuple[int, int]]:
 
 def plan_path(params, fov_um: tuple[float, float]) -> list[Waypoint]:
     """The waypoints, in visit order, in stage µm."""
-    step_x, step_y = plan_steps(params, fov_um)
-    sign_x = -1 if int(getattr(params, "x_dir", 1) or 1) < 0 else 1
-    sign_y = -1 if int(getattr(params, "y_dir", 1) or 1) < 0 else 1
+    geometry = plan_geometry(params, fov_um)
     return [
         Waypoint(index=i,
-                 x_um=params.x0_um + sign_x * col * step_x,
-                 y_um=params.y0_um + sign_y * row * step_y,
+                 x_um=geometry.first_x + col * geometry.step_x,
+                 y_um=geometry.first_y + row * geometry.step_y,
                  col=col, row=row)
         for i, (col, row) in enumerate(plan_cells(params, fov_um))
     ]
@@ -314,7 +424,10 @@ class GridScanner(QObject):
         settle_s = max(0.0, float(getattr(params, "settle_ms", 0) or 0) / 1000.0)
         backlash_um = max(0.0, float(getattr(params, "backlash_um", 0.0) or 0.0))
         approach = int(getattr(params, "backlash_approach", 1) or 1)
-        speed = StageSpeed.SLOW if params.slow_speed else StageSpeed.FAST
+        # One speed, carried by the adapter's config (see
+        # ``scan_speed_config``); the enum choice here is therefore
+        # arbitrary, and SLOW is the one whose key that function sets.
+        speed = StageSpeed.SLOW
         frame_shape: tuple | None = None
         prev: tuple[float, float] | None = None
         try:
@@ -381,15 +494,17 @@ class GridScanner(QObject):
                 pass
         finally:
             manifest.close()
-            # Park back at the start: the operator scanned FROM a feature
-            # they had found by eye, so that is where the scope should be
-            # when the run ends. Never on an abort — the point of an abort
-            # is that the stage stops moving.
+            # Park back at the ORIGIN — where the operator was standing
+            # when they pressed the button, not the first waypoint: in the
+            # corner modes those differ by half a field of view, and the
+            # point of the return is to put the scope back where they left
+            # it. Never on an abort — the point of an abort is that the
+            # stage stops moving.
             if (params.return_to_start and not result.aborted
                     and not self.abort_requested and waypoints):
                 try:
-                    self._stage.move_abs_um(waypoints[0].x_um,
-                                            waypoints[0].y_um, speed=speed)
+                    self._stage.move_abs_um(params.x0_um, params.y0_um,
+                                            speed=speed)
                     self._stage.wait_idle(timeout_s=120.0)
                 except Exception as exc:  # noqa: BLE001
                     self.sig_log.emit(f"return to start failed: {exc}")

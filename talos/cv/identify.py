@@ -1,12 +1,31 @@
 """Sample identification as a chain of stages.
 
-The operator builds a filter chain rather than picking a mode: two SOURCE
-stages turn the frame into a mask (colour match, contrast), one cleans the
-mask up, then gates decide which blobs survive (size, border, sharpness,
-annotation) and a final stage merges fragments of the same object. Every
+The operator builds a filter chain rather than picking a mode: a SOURCE
+stage turns the frame into a mask (the colour match), one stage cleans the
+mask up, then gates decide which blobs survive (size, frame edge,
+sharpness) and a final stage merges fragments of the same object. Every
 stage can be switched off, and each reports how many candidates it let
 through — so the panel reads like the chain it is: ``colour 812 → size 12 →
 sharpness 2``.
+
+Colour is now the only source, deliberately. There used to be a contrast
+source (Otsu on an illumination-flattened frame) and it answered a
+different question — *what is here at all* — which is not the question a
+transfer workflow asks. On the thin samples this is built for, the
+threshold follows the bulk of the histogram rather than the object of
+interest, and a monolayer's deviation from the substrate can sit at the
+flattening's own residual. Its useful half, the flattening, is a
+pre-processing stage now (``cv/preprocess.py``), where it prepares the
+frame instead of segmenting it.
+
+**The frames this runs on are pre-processed, never composited.** The
+input is the raw camera frame with the operator's pre-processing chain
+applied and nothing else — no scale bar, no crosshair, no annotation of
+any kind. There used to be a stage here whose job was to reject the app's
+own red scale bar from the results; it was removed when the burn-in was
+traced and found to touch only snapshot copies inside the camera backend.
+The rule it stood for is worth keeping in its place: the pipeline is fed
+from the frame slot and from nothing that draws.
 
 Design rules worth keeping:
 
@@ -26,15 +45,17 @@ Qt-free and camera-free: usable from a worker thread, a CLI tool or a test.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field, fields
 from typing import Any, ClassVar
 
 import cv2
 import numpy as np
 
-from talos.cv.flakes import (flake_to_stage, flatten_contrast,
-                             is_red_annotation, merge_fragments)
+from talos.cv.flakes import flake_to_stage, merge_fragments
 from talos.models import FlakeCandidate, ObjectiveCalibration, StagePosition
+
+logger = logging.getLogger(__name__)
 
 #: A connected region smaller than this many pixels is noise, at any scale.
 _MIN_AREA_PX2 = 4.0
@@ -77,6 +98,35 @@ def valid_hex(text: Any, fallback: str = "#c8a2c8") -> str:
 def hex_to_rgb(text: str) -> tuple[int, int, int]:
     raw = valid_hex(text).lstrip("#")
     return (int(raw[0:2], 16), int(raw[2:4], 16), int(raw[4:6], 16))
+
+
+def sample_hex(img: np.ndarray, x_px: int, y_px: int,
+               radius: int = 4) -> str | None:
+    """The colour under a click, averaged over a small CIRCULAR patch.
+
+    A circle rather than a square: a square's corners bias the average
+    toward whatever is diagonally adjacent, which on a flake edge is the
+    substrate. Returns ``#rrggbb``, or None when the point is off-frame.
+
+    The frame handed in must be the one the operator is judging colour
+    in — the pre-processed frame, which IS the raw frame when
+    pre-processing is switched off. Sampling a composited display instead
+    would pick up the darkening and the outlines rather than the sample.
+    """
+    height, width = img.shape[:2]
+    if not (0 <= x_px < width and 0 <= y_px < height):
+        return None
+    x0, x1 = max(0, x_px - radius), min(width, x_px + radius + 1)
+    y0, y1 = max(0, y_px - radius), min(height, y_px + radius + 1)
+    patch = img[y0:y1, x0:x1].astype(np.float32)
+    if patch.size == 0:
+        return None
+    yy, xx = np.mgrid[y0 - y_px:y1 - y_px, x0 - x_px:x1 - x_px]
+    mask = (xx * xx + yy * yy) <= radius * radius
+    if not mask.any():
+        mask = np.ones(patch.shape[:2], bool)
+    mean = patch[mask].mean(axis=0)
+    return "#{:02x}{:02x}{:02x}".format(*(int(round(v)) for v in mean))
 
 
 def hex_to_hsv(text: str) -> tuple[int, int, int]:
@@ -180,22 +230,6 @@ class ColourStage(Stage):
 
 @_register
 @dataclass
-class ContrastStage(Stage):
-    """Source: illumination-flattened contrast, Otsu-thresholded."""
-
-    blur_sigma: float = 15.0
-
-    NAME = "contrast"
-    RANGES = {"blur_sigma": (1.0, 60.0, 1.0)}
-    LABEL = "Contrast"
-    KIND = "source"
-
-    def source_mask(self, ctx: "_Ctx") -> np.ndarray:
-        return flatten_contrast(ctx.img, self.blur_sigma)[1]
-
-
-@_register
-@dataclass
 class MorphologyStage(Stage):
     """Mask: open then close — removes speckle, joins broken edges."""
 
@@ -263,12 +297,10 @@ class SharpnessStage(Stage):
     gradients), so it means the same thing in the preview and in a
     full-resolution tile.
 
-    The default is deliberately LOW. A colour-matched contour traces the
-    colour boundary exactly (scores in the tens), but a contrast-matched
-    one wanders through the noise around the object, so its mean boundary
-    gradient is only a few counts — the first version of this gate, tuned
-    on colour matches, silently rejected every contrast-source candidate.
-    Raise it to reject diffuse blobs.
+    Raise it to reject diffuse blobs; the default is deliberately low,
+    because a colour-matched contour traces the colour boundary and
+    scores in the tens while a diffuse blob scores in single digits, so a
+    threshold picked without measuring would reject most real samples.
     """
 
     min_edge_strength: float = 4.0
@@ -282,25 +314,6 @@ class SharpnessStage(Stage):
         strength = ctx.edge_strength(cand)
         cand.score = strength          # the table's ranking number
         return strength >= self.min_edge_strength * ctx.scale
-
-
-@_register
-@dataclass
-class AnnotationStage(Stage):
-    """Gate: saturated pure-red overlays are the scale bar, not a sample."""
-
-    sat_min: float = 120.0
-
-    NAME = "annotation"
-    RANGES = {"sat_min": (0, 255, 5)}
-    LABEL = "Scale bar"
-    KIND = "gate"
-
-    def keep(self, cand: FlakeCandidate, ctx: "_Ctx") -> bool:
-        contour = ctx.contour_for(cand)
-        if contour is None:
-            return True
-        return not is_red_annotation(ctx.hsv, contour, self.sat_min)
 
 
 @_register
@@ -322,8 +335,24 @@ class MergeStage(Stage):
 
 
 #: The canonical order — how a config is written, read and shown.
-CANONICAL_STAGES = (ColourStage, ContrastStage, MorphologyStage, SizeStage,
-                    BorderStage, SharpnessStage, AnnotationStage, MergeStage)
+CANONICAL_STAGES = (ColourStage, MorphologyStage, SizeStage, BorderStage,
+                    SharpnessStage, MergeStage)
+
+#: Stage names that used to ship and no longer do. ``from_dict`` already
+#: drops an unknown name, so these need no migration — they are listed so
+#: the drop is a decision with a record rather than a silent absence:
+#:
+#: - ``contrast`` — Otsu on illumination-flattened contrast. It answers
+#:   "what is here at all", never "which of these are the same material",
+#:   and on the thin samples this is for, the threshold follows the bulk
+#:   of the histogram rather than the object of interest. The useful half
+#:   (the flattening) is now a pre-processing stage, where it prepares
+#:   the frame instead of segmenting it.
+#: - ``annotation`` — rejected saturated red blobs as the app's scale bar.
+#:   The bar is drawn only into snapshot copies inside the camera backend,
+#:   never into the live stream, the frame slot or a scan tile, so there
+#:   was never anything for it to catch on this path.
+_RETIRED_STAGES = {"contrast", "annotation"}
 
 
 @dataclass
@@ -331,9 +360,7 @@ class IdentifyConfig:
     """The whole chain. Serialises to the settings file verbatim."""
 
     stages: list = field(default_factory=lambda: [
-        # contrast is a second opinion, off until the operator wants it:
-        # the simple path is "point at the colour".
-        cls(enabled=not (cls is ContrastStage)) for cls in CANONICAL_STAGES
+        cls() for cls in CANONICAL_STAGES
     ])
 
     def stage(self, name: str) -> Stage | None:
@@ -355,8 +382,12 @@ class IdentifyConfig:
         for entry in (data or {}).get("stages") or []:
             if not isinstance(entry, dict) or "name" not in entry:
                 continue
-            stage_cls = _STAGE_TYPES.get(str(entry["name"]))
+            name = str(entry["name"])
+            stage_cls = _STAGE_TYPES.get(name)
             if stage_cls is None:
+                if name not in _RETIRED_STAGES:
+                    logger.info("identification: dropping unknown stage %r",
+                                name)
                 continue
             declared = {f.name: f.type for f in fields(stage_cls)}
             kwargs = {}
@@ -673,9 +704,9 @@ def render_overlay(img: np.ndarray, result: IdentifyResult,
     return out
 
 
-__all__ = ["CANONICAL_STAGES", "ColourStage", "ContrastStage", "IdentifyConfig",
+__all__ = ["CANONICAL_STAGES", "ColourStage", "IdentifyConfig",
            "Region",
            "IdentifyPipeline", "IdentifyResult", "MorphologyStage",
-           "AnnotationStage", "BorderStage", "MergeStage", "SharpnessStage",
+           "BorderStage", "MergeStage", "SharpnessStage",
            "SizeStage", "Stage", "colour_mask", "hex_to_hsv", "hex_to_rgb",
-           "identify", "render_overlay", "valid_hex"]
+           "identify", "render_overlay", "sample_hex", "valid_hex"]

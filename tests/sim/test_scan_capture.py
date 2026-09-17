@@ -89,13 +89,15 @@ def test_a_scan_captures_a_frame_at_every_waypoint(qapp, rig, tmp_path):
         lambda i, x, y, thumb: tiles.append((i, x, y, thumb)))
     scanner.sig_frame.connect(lambda i, x, y, frame: frames.append((i, frame)))
 
-    result = scanner.run(_params(width_um=300.0, height_um=200.0), tmp_path,
+    params = _params(width_um=300.0, height_um=200.0)
+    expected = len(scanner.plan(params, (100.0, 100.0)))
+    result = scanner.run(params, tmp_path,
                          meta={"fov_um": (100.0, 100.0), "objective_id": 2})
     qapp.processEvents()      # drain the queued signal, if it was queued
 
     assert not result.aborted, result.message
     assert result.missing == 0
-    assert len(result.frames) == 6          # 2 cols × 3 rows
+    assert len(result.frames) == expected
     for path in result.frames:
         assert path.exists() and path.stat().st_size > 0
 
@@ -105,16 +107,16 @@ def test_a_scan_captures_a_frame_at_every_waypoint(qapp, rig, tmp_path):
     assert rows[0]["objective_id"] == "2"
 
     meta = json.loads((tmp_path / "meta.json").read_text(encoding="utf-8"))
-    assert meta["n_frames"] == 6 and meta["n_missing"] == 0
+    assert meta["n_frames"] == expected and meta["n_missing"] == 0
     assert meta["frame_shape"] == [240, 320, 3]
 
     # the map gets a tile per waypoint, in order, at its readback position
-    assert [i for i, _x, _y, _t in tiles] == list(range(6))
+    assert [i for i, _x, _y, _t in tiles] == list(range(expected))
     assert tiles[0][3].shape == (120, 160, 3)
     assert (tiles[0][1], tiles[0][2]) == pytest.approx((0.0, 0.0))
     assert (tiles[1][1], tiles[1][2]) == pytest.approx((100.0, 0.0))
     # and the detection feed gets the FULL frame with the same position
-    assert [i for i, _f in frames] == list(range(6))
+    assert [i for i, _f in frames] == list(range(expected))
     assert frames[0][1].shape == (240, 320, 3)
 
 
@@ -124,13 +126,14 @@ def test_a_stalled_stream_leaves_waypoints_missing(qapp, rig, tmp_path):
     the frame from before the move under the new position."""
     stage, camera, slot, worker = rig
     scanner = GridScanner(stage, LatestFrameSource(slot))
+    params = _params(width_um=300.0, height_um=200.0, settle_ms=200)
+    expected = len(scanner.plan(params, (100.0, 100.0)))
     box: dict = {}
-    # 6 waypoints at a 200 ms settle cannot finish inside 0.5 s, and the
-    # first one is long since captured — so the kill lands mid-run.
+    # a 200 ms settle per waypoint cannot finish inside 0.5 s, and the
+    # first waypoint is long since captured — so the kill lands mid-run.
     thread = threading.Thread(
         target=lambda: box.update(result=scanner.run(
-            _params(width_um=300.0, height_um=200.0, settle_ms=200),
-            tmp_path, meta={"fov_um": (100.0, 100.0)})))
+            params, tmp_path, meta={"fov_um": (100.0, 100.0)})))
     thread.start()
     time.sleep(0.5)
     worker.stop()
@@ -138,11 +141,12 @@ def test_a_stalled_stream_leaves_waypoints_missing(qapp, rig, tmp_path):
     thread.join(timeout=60.0)
     result = box["result"]
 
-    assert 0 < len(result.frames) < 6, "the kill landed at the wrong moment"
-    assert result.missing + len(result.frames) == 6
+    assert 0 < len(result.frames) < expected, \
+        "the kill landed at the wrong moment"
+    assert result.missing + len(result.frames) == expected
     with open(result.manifest_path, encoding="utf-8") as fh:
         rows = list(csv.DictReader(fh))
-    assert len(rows) == 6
+    assert len(rows) == expected
     empties = [row for row in rows if row["frame"] == ""]
     assert len(empties) == result.missing
 

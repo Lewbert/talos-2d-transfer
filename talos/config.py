@@ -38,7 +38,7 @@ def load_defaults() -> dict:
         # detection-based), but a stale number here was one of three
         # disagreeing values (defaults said 4, this said 3, _normalize logged
         # "v5"), and a test pinned the wrong one.
-        return {"_version": 7}
+        return {"_version": 8}
 
 
 # Keys superseded by schema v3 (autofocus is µm-based now; the focus
@@ -60,8 +60,17 @@ _DEAD_KEYS: dict[str, set[str]] = {
     # objective's calibration now, so the manual override (and the flag that
     # chose between them) is gone — two sources for one number can disagree,
     # and the calibration is the one the rest of the app measures with.
+    # v8: the scan runs at ONE speed (fixed-steps mode, the controller
+    # ramps itself, so the slow/fast pair bought nothing) and that speed
+    # is its own — scan.slow_speed was a choice between two manual jog
+    # speeds, which the scan no longer borrows.
+    #
+    # Not dropped, deliberately: ``ui.collapsed_sections.scan_window``
+    # from the retired Scan window. It is a name→titles map that nothing
+    # reads any more, and the mechanism here removes keys from a section,
+    # not entries from inside one.
     "scan": {"min_flake_area_um2", "default_dir", "fov_auto", "fov_x_um",
-             "fov_y_um"},
+             "fov_y_um", "slow_speed"},
 }
 
 

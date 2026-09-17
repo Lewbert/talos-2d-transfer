@@ -66,16 +66,17 @@ def test_move_abs_um_uses_the_fast_speed_when_asked():
     assert manager.jobs[-1][2][-1] == 2000
 
 
-def test_scan_speed_config_scales_the_pps():
-    """The workspace hands the adapter an already-scaled config (the
-    objective's stage multiplier), exactly as the old private-device path
-    did."""
-    from talos.cv.scan import scale_scan_speed_config
+def test_scan_speed_config_reaches_the_adapter():
+    """The scan hands the adapter a config carrying its own single speed,
+    and the adapter reads it — the last link in the chain from the
+    operator's number to the commanded pulses."""
+    from talos.cv.scan import scan_speed_config
 
-    cfg = scale_scan_speed_config({"slow_speed_pps": 500, "fast_speed_pps": 2000}, 0.5)
+    cfg = scan_speed_config({"slow_speed_pps": 500, "fast_speed_pps": 2000},
+                            900)
     adapter = ManagerStageAdapter(StubManager(), cfg)
-    assert adapter._pps(StageSpeed.SLOW) == 250
-    assert adapter._pps(StageSpeed.FAST) == 1000
+    assert adapter._pps(StageSpeed.SLOW) == 900
+    assert adapter._pps(StageSpeed.FAST) == 900
 
 
 def test_job_failure_surfaces_as_device_error():
