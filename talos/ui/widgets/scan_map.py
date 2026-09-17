@@ -30,6 +30,7 @@ from PySide6.QtCore import QPointF, QRectF, Qt, Signal
 from PySide6.QtGui import QColor, QFont, QImage, QPainter, QPen
 from PySide6.QtWidgets import QWidget
 
+from talos.cv.orientation import axis_signs, mosaic_offset
 from talos.ui import theme
 
 #: Cap on the QImage conversions kept alive for painting. A 200-tile scan
@@ -78,20 +79,22 @@ class ScanMapPlan:
                 round(self.fov_x_um, 6), round(self.fov_y_um, 6),
                 tuple((round(x, 6), round(y, 6)) for x, y in self.waypoints))
 
-    def mirrored(self) -> "ScanMapPlan":
-        """The same plan drawn in the flipped camera's coordinates.
+    def oriented(self, flip: bool) -> "ScanMapPlan":
+        """The same plan drawn in the frames' coordinates.
 
         The map is laid out in the sample frame AS THE FRAMES SHOW IT, so
-        with the flip on the whole layout mirrors about the origin — the
-        same rule the mosaic uses, and the reason a flipped scan's tiles
-        line up instead of appearing twice (cv/orientation.py).
+        every stage coordinate — and every direction — is scaled by the
+        axis signs in cv/orientation.py: the same rule the mosaic uses, and
+        the reason a scan's tiles line up instead of appearing twice, with
+        the map pointing the same way as the live view beside it.
         """
+        sx, sy = axis_signs(flip)
         return ScanMapPlan(
-            x0_um=-self.x0_um, y0_um=-self.y0_um,
+            x0_um=sx * self.x0_um, y0_um=sy * self.y0_um,
             width_um=self.width_um, height_um=self.height_um,
-            x_dir=-self.x_dir, y_dir=-self.y_dir,
+            x_dir=sx * self.x_dir, y_dir=sy * self.y_dir,
             fov_x_um=self.fov_x_um, fov_y_um=self.fov_y_um,
-            waypoints=[(-x, -y) for x, y in self.waypoints])
+            waypoints=[(x * sx, y * sy) for x, y in self.waypoints])
 
 
 def plan_bounds(plan: ScanMapPlan) -> tuple[float, float, float, float]:
@@ -158,12 +161,13 @@ class ScanMapWidget(QWidget):
 
     def _effective_plan(self) -> ScanMapPlan:
         """The plan in the coordinates this map draws in."""
-        return self._plan.mirrored() if self._flip else self._plan
+        return self._plan.oriented(self._flip)
 
     def _at(self, x_um: float, y_um: float) -> tuple[float, float]:
-        """A stage coordinate in the map's own coordinates."""
-        return (-float(x_um), -float(y_um)) if self._flip \
-            else (float(x_um), float(y_um))
+        """A stage coordinate in the coordinates this map draws in — the
+        SAME transform the mosaic uses, so the two cannot disagree about
+        which way an axis runs."""
+        return mosaic_offset(x_um, y_um, self._flip)
 
     def set_plan(self, plan: ScanMapPlan) -> None:
         """A NEW plan: the tiles and markers belong to the old one and are

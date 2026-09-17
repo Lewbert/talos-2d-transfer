@@ -24,11 +24,21 @@ def test_tiles_land_where_the_stage_was():
     assert int(mosaic[40, 150, 0]) == 200
 
 
-def test_y_increases_downwards_like_an_image():
-    mosaic = build_mosaic([(0.0, 0.0, tile(50)), (0.0, 800.0, tile(200))], FOV)
-    assert mosaic.shape == (160, 100, 3)
-    assert int(mosaic[40, 50, 0]) == 50
-    assert int(mosaic[120, 50, 0]) == 200
+def test_the_y_axis_follows_the_mounting():
+    """Stage +Y is drawn UPWARD — the bench's vertical axis runs the other
+    way from the assumption the first version made (see
+    cv/orientation.py). The flip negates BOTH axes, so it is downward
+    again with the flip on."""
+    up = build_mosaic([(0.0, 0.0, tile(50)), (0.0, 800.0, tile(200))], FOV)
+    assert up.shape == (160, 100, 3)
+    assert int(up[120, 50, 0]) == 50         # y = 0 is the LOWER tile
+    assert int(up[40, 50, 0]) == 200
+
+    down = build_mosaic([(0.0, 0.0, tile(50)), (0.0, 800.0, tile(200))], FOV,
+                        flip=True)
+    assert down.shape == (160, 100, 3)
+    assert int(down[40, 50, 0]) == 50
+    assert int(down[120, 50, 0]) == 200
 
 
 def test_overlapping_tiles_are_averaged_not_stamped():

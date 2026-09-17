@@ -294,16 +294,22 @@ caller's pixels and µm — pixel-unit gates are scaled with it), and **the
 pipeline never sees a half-edited config** (the panel rebuilds the whole config
 per job; the worker never reads a widget).
 
-**The camera flip is a coordinate transform, not a display tweak**
-(`cv/orientation.py` is the one place it lives). A flipped frame is the scene
-rotated 180° about the frame centre, so with the flip on a feature RIGHT of
-the centre is at a SMALLER stage X — and a mosaic must therefore MIRROR its
-layout (place a tile taken at `+p` at `−p`) or every feature lands once per
-tile, a mosaic that looks doubled. Both the px→µm mapping
-(`flake_to_stage(..., flip=…)`, used by the identification pipeline and "go
-to sample") and the mosaic/map layout follow it. Placing tiles and rotating
-their content instead — which is what shipped first — produced exactly that
-doubling, and a map that read upside down against the live view.
+**Stage↔image orientation lives in one place** (`cv/orientation.py`), because
+two independent things decide it and everything else must agree with both.
+The **mounting** is which way the optics put the specimen on the sensor —
+bench-measured as `(x, −y)`: stage +X moves a feature right in the frame and
+stage +Y moves it up. The **camera flip** is a 180° rotation of every
+delivered frame, so it negates both axes. Together they give the per-axis
+signs every consumer uses: the px→µm mapping (`flake_to_stage(..., flip=…)`,
+behind the identification pipeline and "go to sample"), the mosaic layout and
+the scan map.
+
+The layout matters as much as the offsets: a frame taken at `p` shows the
+sample point `s` at image offset `a·(s − p)`, so a mosaic must place that
+tile at a position scaled by the SAME `a` — otherwise every feature lands once
+per tile and the mosaic looks doubled. Placing tiles with the wrong sign and
+rotating their content to compensate is what shipped first, and it produced
+exactly that doubling plus a map that read upside down against the live view.
 
 **The map is drawn in the sample's frame** (`ui/widgets/scan_map.py`): tiles at
 their readback positions (mirrored with the flip, as above), the camera

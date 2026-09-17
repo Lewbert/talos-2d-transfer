@@ -285,10 +285,11 @@ def test_x_um_y_um_come_from_the_stage_position():
                                                      tolerance=20.0)),
         stage_pos=stage_pos)
     cand = result.candidates[0]
-    # image centre (320, 240) is the stage position; +10 px right of centre
-    # at 0.2 µm/px is +2 µm
+    # Image centre (320, 240) is the stage position. Right of centre is
+    # +X, but the mounting runs Y the other way (bench-measured, see
+    # cv/orientation.py), so a feature ABOVE centre is at a LARGER stage Y.
     assert cand.x_um == pytest.approx(1000.0 + (130 - 320) * 0.2, abs=1.0)
-    assert cand.y_um == pytest.approx(2000.0 + (100 - 240) * 0.2, abs=1.0)
+    assert cand.y_um == pytest.approx(2000.0 + (240 - 100) * 0.2, abs=1.0)
 
 
 def test_the_camera_flip_mirrors_the_stage_mapping():

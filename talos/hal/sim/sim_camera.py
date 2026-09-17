@@ -155,11 +155,14 @@ class SimCamera(Camera):
         x_um, y_um = bench.get_xy()
         spp = self.wafer_um_per_px
         left = x_um - (w * spp) / 2.0
-        top = y_um - (h * spp) / 2.0
+        # The bench's mounting runs the vertical axis the other way — image
+        # +Y is the wafer's −Y (measured 2026-09-17, see cv/orientation.py).
+        # The sim mirrors the vertical axis so it models THAT convention:
+        # a simulation that asserts a mounting the hardware does not have
+        # would happily certify a mirror-image mosaic.
+        top = y_um + (h * spp) / 2.0
         xs = left + np.arange(w) * spp
-        ys = top + np.arange(h) * spp
-        # illumination ramps in WAFER coordinates (a smooth, non-repeating
-        # pattern over the few mm a scan covers)
+        ys = top - np.arange(h) * spp
         base = (128.0
                 + 26.0 * np.sin(xs / 2200.0 * 2.0 * np.pi)[None, :]
                 + 20.0 * np.cos(ys / 1700.0 * 2.0 * np.pi)[:, None])
@@ -169,7 +172,7 @@ class SimCamera(Camera):
         img[:, :, 2] = np.clip(base * 1.04, 0, 255).astype(np.uint8)
         for fx, fy, radius_um, colour in self._wafer_features:
             cx = int(round((fx - left) / spp))
-            cy = int(round((fy - top) / spp))
+            cy = int(round((top - fy) / spp))
             r = max(1, int(round(radius_um / spp)))
             if -r <= cx < w + r and -r <= cy < h + r:
                 cv2.circle(img, (cx, cy), r, colour, -1)

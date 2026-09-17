@@ -136,6 +136,30 @@ def test_a_scan_stitches_into_one_continuous_image(qapp, rig, tmp_path, flip):
         "line up")
 
 
+def test_the_sim_models_the_measured_mounting(qapp, rig):
+    """The bench statement, pinned so the mosaic tests mean something.
+
+    Measured on the bench 2026-09-17, flip in its default state: jogging the
+    stage +X moves a feature RIGHT in the frame, and +Y moves it UP. If the
+    simulation ever models a different mounting, the stitching tests below
+    would happily certify a mirror-image mosaic — which is exactly how the
+    first version shipped wrong.
+    """
+    stage, camera = rig
+    camera.set_flip(True)
+    start = _beacon_centre(camera.fetch())
+    assert start is not None
+    stage.move_abs_um(200.0, 0.0)
+    stage.wait_idle(timeout_s=10.0)
+    moved_x = _beacon_centre(camera.fetch())
+    assert moved_x[0] > start[0] + 50.0, "+X must move a feature right"
+
+    stage.move_abs_um(200.0, 200.0)
+    stage.wait_idle(timeout_s=10.0)
+    moved_y = _beacon_centre(camera.fetch())
+    assert moved_y[1] < moved_x[1] - 25.0, "+Y must move a feature up"
+
+
 def test_the_mosaic_grows_in_the_scan_direction(qapp, rig, tmp_path):
     """A tile taken further along +X must land further along +X — the sign
     the map and the mosaic share with the readback."""

@@ -1,42 +1,57 @@
-"""The camera flip, as a coordinate transform — one place, one sign.
+"""How stage coordinates and image coordinates are related — one place, and
+the sign of every axis is in it.
 
-The flip is a 180° rotation applied to every delivered frame (the backends
-apply it at their single egress). It is not cosmetic: it decides how stage
-motion and image content relate, so anything that maps BETWEEN the image
-and the stage has to apply it, and anything that ASSEMBLES images into a
-sample-frame picture has to mirror its layout by it.
+Two independent things decide the relation:
 
-Why the layout mirrors. A frame taken with the stage at ``p`` is the scene
-rotated 180° about the frame centre, so the sample point whose stage
-coordinate is ``s`` (the stage position at which that point is centred in
-the image) sits at image offset ``-(s - p)``. Drop that tile into a mosaic
-at position ``m(p)`` and the point lands at ``m(p) - (s - p)``. For two
-tiles to agree about where a feature is, that must depend on ``s`` alone —
-so ``m(p) + p`` has to be constant, i.e. ``m(p) = C - p``: the layout is
-mirrored. Place tiles unmirrored instead and every feature appears once per
-tile, at a different place each time — a mosaic that looks doubled, which
-is exactly what shipped before this module existed.
+**The mounting.** Which way the optics put the specimen on the sensor. The
+bench was measured on 2026-09-17, with the flip in its default state: stage
++X moves a feature to the right in the frame, and stage +Y moves it UP.
+``_MOUNTED`` is that statement in the form this module uses — the sign of
+each stage axis as the UNFLIPPED frame sees it: ``(x, -y)``. It was
+``(x, y)`` by assumption before the bench said otherwise, which put every
+mosaic, map and "go to sample" move a mirror-image away in Y.
 
-The same reasoning fixes the px→µm mapping: with the flip on, a feature
-appearing to the RIGHT of the frame centre is at a smaller stage X, not a
-larger one. ``flake_to_stage`` ignored the flip, so "go to sample" drove
-the stage to the mirrored position.
+**The camera flip.** A 180° rotation of every delivered frame
+(``cv2.flip(frame, -1)``, applied by each backend at its single egress), so
+it negates BOTH axes of that relation. It is the operator's correction for
+the bench's optics, and it is why the default build reads ``(-x, +y)``.
 
-The other half of the convention — whether an UNFLIPPED frame has stage +X
-to the right — is the mounting, and it is what the flip setting exists to
-correct: with the flip set the way the operator wants, an unflipped frame
-is the reference. That is the assumption `flake_to_stage` has always made.
+Why this maps more than offsets. A frame taken with the stage at ``p`` shows
+the sample point whose stage coordinate is ``s`` at image offset
+``a·(s - p)`` where ``a`` is the per-axis sign above. Drop that tile into a
+mosaic at position ``m(p)`` and the point lands at ``m(p) + a·(s - p)``,
+which must depend on ``s`` ALONE for two tiles to agree about where a
+feature is — so ``m(p) - a·p`` has to be constant: **the layout is scaled by
+the same ``a``**, not merely the offsets. Place tiles with the wrong sign and
+every feature appears once per tile, at a different place each time: a mosaic
+that looks doubled, which is exactly what shipped before this module existed
+(the tiles were placed unmirrored AND rotated in place, which is wrong twice
+over).
+
+The same ``a`` governs the px→µm mapping, so "go to sample" and the map can
+never disagree about which way +Y is.
 """
 
 from __future__ import annotations
 
+#: The mounting, as the UNFLIPPED frame sees it: (x sign, y sign).
+#: Bench-measured 2026-09-17 — X as assumed, Y inverted.
+_MOUNTED: tuple[int, int] = (1, -1)
+
+
+def axis_signs(flip: bool) -> tuple[int, int]:
+    """(sx, sy): the sign of each stage axis in the frame's coordinates.
+    The flip is a 180° rotation, so it negates both."""
+    sx, sy = _MOUNTED
+    return (-sx, -sy) if flip else (sx, sy)
+
 
 def orient(x: float, y: float, flip: bool) -> tuple[float, float]:
-    """A 2-D offset in the other frame: (x, y) with the flip, unchanged
-    without it. Used for stage↔image offsets and for mosaic layout."""
-    if flip:
-        return -float(x), -float(y)
-    return float(x), float(y)
+    """A 2-D offset in the other frame. Used for stage↔image offsets and
+    for mosaic/map layout alike (see the module docstring for why one
+    function serves both)."""
+    sx, sy = axis_signs(flip)
+    return float(x) * sx, float(y) * sy
 
 
 def stage_offset(dx_um: float, dy_um: float, flip: bool) -> tuple[float, float]:
@@ -50,4 +65,4 @@ def mosaic_offset(x_um: float, y_um: float, flip: bool) -> tuple[float, float]:
     return orient(x_um, y_um, flip)
 
 
-__all__ = ["mosaic_offset", "orient", "stage_offset"]
+__all__ = ["axis_signs", "mosaic_offset", "orient", "stage_offset"]
