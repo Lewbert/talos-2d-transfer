@@ -13,8 +13,17 @@ Two feeds, one worker, and they are deliberately NOT treated the same way:
 
 Nothing here touches the camera, the live view's stream or the autofocus.
 It consumes frames that were delivered anyway, and hands back candidates
-plus (for the live feed) a display image. A failure in here can never stop
-a scan: it is logged and the next job runs.
+plus (for the live feed) two display images. A failure in here can never
+stop a scan: it is logged and the next job runs.
+
+**Pre-processing happens here, and only here.** Both the pipeline and the
+frame the operator is looking at are the output of the same chain
+(``cv/preprocess.py``), applied once per job. That is the non-blocking
+guarantee: a denoise costing hundreds of milliseconds delays the next
+preview and nothing else — not the camera's capture sequence, not the
+frame slot, not the autofocus, not a running scan. It is also why the two
+processed views lag the live one slightly, which is the honest price of
+never making the capture path wait.
 """
 
 from __future__ import annotations
@@ -25,6 +34,7 @@ from dataclasses import dataclass
 
 from PySide6.QtCore import QObject, QThread, QTimer, Signal
 
+from talos.cv import preprocess as pre
 from talos.cv.identify import IdentifyPipeline, render_overlay
 
 #: Live-feed sample period. The stream runs at ~15-19 fps; asking for a
@@ -42,12 +52,15 @@ class DetectJob:
     scale: float = 1.0
     render: bool = True
     flip: bool = False    # the camera flip, for the px→stage mapping
+    preprocess: object = None    # PreprocessConfig | None
+    colour: object = None        # the picked colour, for the curve's centre
 
 
 class _DetectWorker(QThread):
     """The pipeline, on its own thread, fed by a queue."""
 
-    sig_result = Signal(int, object, object)   # index, IdentifyResult, preview
+    #: index, IdentifyResult, the pre-processed frame, the overlay
+    sig_result = Signal(int, object, object, object)
     sig_log = Signal(str)
 
     def __init__(self, parent: QObject | None = None):
@@ -72,22 +85,27 @@ class _DetectWorker(QThread):
             if job is None or self._stopping.is_set():
                 return
             try:
+                # One transform per job, feeding BOTH the pipeline and the
+                # two processed views — so the mask can only ever find
+                # colours that are on the screen the operator tuned it on.
+                work = pre.apply(job.frame, job.preprocess, job.colour)
                 result = IdentifyPipeline().run(
-                    job.frame, job.calib, config=job.config,
+                    work, job.calib, config=job.config,
                     stage_pos=job.stage_pos, scale=job.scale,
                     flip=job.flip)
-                preview = (render_overlay(job.frame, result)
+                overlay = (render_overlay(work, result)
                            if job.render else None)
             except Exception as exc:  # noqa: BLE001 - never kill the scan
                 self.sig_log.emit(f"detection failed: {exc}")
                 continue
-            self.sig_result.emit(job.index, result, preview)
+            self.sig_result.emit(job.index, result, work, overlay)
 
 
 class DetectionEngine(QObject):
     """Owns the worker, the live timer, and the "one job in flight" rule."""
 
-    sig_result = Signal(int, object, object)   # index, IdentifyResult, preview
+    #: index, IdentifyResult, the pre-processed frame, the overlay
+    sig_result = Signal(int, object, object, object)
     sig_log = Signal(str)
 
     def __init__(self, interval_ms: int = DEFAULT_INTERVAL_MS,
@@ -97,7 +115,7 @@ class DetectionEngine(QObject):
         self._worker.sig_result.connect(self._on_result)
         self._worker.sig_log.connect(self.sig_log)
         self._worker.start()
-        self._source = None            # () -> (frame, calib, pos, cfg, scale)
+        self._source = None            # () -> the seven-tuple below
         self._busy = False
         self._live_on = False
         self._tiles_outstanding = 0
@@ -108,8 +126,9 @@ class DetectionEngine(QObject):
     # --- the live feed --------------------------------------------------
 
     def set_source(self, fn) -> None:
-        """``fn()`` returns the newest (frame, calib, stage_pos, config,
-        scale, flip) or None. Called on the GUI thread, once per tick."""
+        """``fn()`` returns the newest ``(frame, calib, stage_pos, config,
+        scale, flip, preprocess, colour)`` or None. Called on the GUI
+        thread, once per tick."""
         self._source = fn
 
     def set_live(self, on: bool) -> None:
@@ -135,25 +154,33 @@ class DetectionEngine(QObject):
             return
         if not item:
             return
-        frame, calib, stage_pos, config, scale, flip = item
+        (frame, calib, stage_pos, config, scale, flip,
+         preprocess, colour) = item
         if frame is None or config is None:
             return
         self._busy = True
         self._worker.submit(DetectJob(index=-1, frame=frame, calib=calib,
                                       stage_pos=stage_pos, config=config,
-                                      scale=scale, render=True, flip=flip))
+                                      scale=scale, render=True, flip=flip,
+                                      preprocess=preprocess, colour=colour))
 
     # --- the scan feed --------------------------------------------------
 
     def submit_tile(self, index: int, frame, calib, stage_pos, config,
-                    scale: float = 1.0, flip: bool = False) -> None:
+                    scale: float = 1.0, flip: bool = False,
+                    preprocess=None, colour=None) -> None:
         """One captured tile. Queued unconditionally: a scan must not be
-        able to outrun the detector and silently lose a sample."""
+        able to outrun the detector and silently lose a sample.
+
+        The tile is pre-processed the same way the live preview is, so a
+        parameter tuned while looking at the screen means the same thing
+        on the full-resolution tile. The PNG on disk stays raw."""
         self._tiles_outstanding += 1
         self._worker.submit(DetectJob(index=int(index), frame=frame,
                                       calib=calib, stage_pos=stage_pos,
                                       config=config, scale=scale,
-                                      render=False, flip=flip))
+                                      render=False, flip=flip,
+                                      preprocess=preprocess, colour=colour))
 
     @property
     def busy(self) -> bool:
@@ -168,12 +195,12 @@ class DetectionEngine(QObject):
         for this to reach zero before writing a scan's results."""
         return self._tiles_outstanding
 
-    def _on_result(self, index, result, preview) -> None:
+    def _on_result(self, index, result, preprocessed, overlay) -> None:
         if index < 0:
             self._busy = False         # the live slot is free again
         elif self._tiles_outstanding > 0:
             self._tiles_outstanding -= 1
-        self.sig_result.emit(index, result, preview)
+        self.sig_result.emit(index, result, preprocessed, overlay)
 
     def shutdown(self) -> None:
         self._timer.stop()

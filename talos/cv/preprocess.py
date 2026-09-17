@@ -513,6 +513,12 @@ def build_lut(cfg: PreprocessConfig,
               centre_rgb: tuple[int, int, int] | None = None) -> np.ndarray:
     """The whole point chain as a (3, 256) uint8 table, RGB order.
 
+    Channel-major — row 0 is red's 256 outputs — because that is the shape
+    the composition below needs and the shape a reader can check by
+    indexing. :func:`cv_lut` converts it to the one OpenCV wants; the two
+    are NOT the same memory layout, and reshaping between them without the
+    transpose silently applies red's curve to green.
+
     The local-contrast curve is composed **last** — its input is the
     output of the simple operations — so its fixed point lands on the
     value the dropper actually sampled, which is a value in *output*
@@ -534,6 +540,18 @@ def build_lut(cfg: PreprocessConfig,
 # ----------------------------------------------------------------------
 # The spatial stages
 # ----------------------------------------------------------------------
+
+def cv_lut(lut: np.ndarray) -> np.ndarray:
+    """A channel-major (3, 256) table as the (1, 256, 3) OpenCV wants.
+
+    The transpose is the whole point. ``(3, 256).reshape(1, 256, 3)``
+    reinterprets the same bytes in a different order rather than moving
+    them, so the table arrives permuted and every channel is filtered by
+    another channel's curve — a bug that leaves the image looking like a
+    plausible, wrongly-tinted photograph.
+    """
+    return np.ascontiguousarray(lut.T).reshape(1, LUT_SIZE, 3)
+
 
 def shade_correct(img: np.ndarray, sigma: float = 60.0,
                   strength: float = 1.0) -> np.ndarray:
@@ -581,8 +599,7 @@ def apply(img: np.ndarray, cfg: PreprocessConfig | None,
         out = denoise(out, cfg.denoise.diameter, cfg.denoise.sigma_color,
                       cfg.denoise.sigma_space)
     if not cfg.points_identity(centre_rgb):
-        lut = build_lut(cfg, centre_rgb).reshape(1, LUT_SIZE, 3)
-        out = cv2.LUT(out, lut)
+        out = cv2.LUT(out, cv_lut(build_lut(cfg, centre_rgb)))
     return out
 
 
@@ -598,6 +615,7 @@ __all__ = [
     "build_lut",
     "channel_curve",
     "curve_values",
+    "cv_lut",
     "denoise",
     "effective_gain",
     "effective_width",

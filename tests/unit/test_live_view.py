@@ -196,3 +196,73 @@ def test_ruler_needs_calibration(qapp):
     view._render_pending()
     view.set_ruler_enabled(True)            # no calibration yet
     assert _rendered(view).pixelColor(2, 2).red() == 90
+
+
+# --- three views, three buffers --------------------------------------------
+
+def test_the_mode_bar_offers_exactly_the_three_views(qapp):
+    from talos.ui.widgets.live_view import (VIEW_MODES, VIEW_MODE_BUTTONS,
+                                            LiveViewModeBar)
+    bar = LiveViewModeBar(LiveViewWidget())
+    assert tuple(mode for mode, _ in VIEW_MODE_BUTTONS) == VIEW_MODES
+    assert tuple(bar.buttons) == VIEW_MODES
+    for mode in VIEW_MODES:
+        assert bar.buttons[mode].text()
+        assert bar.buttons[mode].toolTip()
+    # exclusive: checking one unchecks the last
+    bar.buttons["samples"].setChecked(True)
+    assert not bar.buttons["original"].isChecked()
+
+
+def test_each_mode_shows_its_own_buffer(qapp):
+    view = LiveViewWidget()
+    live = _frame()
+    filtered = np.full((240, 320, 3), 90, np.uint8)
+    overlay = np.full((240, 320, 3), 200, np.uint8)
+    view.show_frame(live)
+    view.set_preprocessed_frame(filtered)
+    view.set_overlay_frame(overlay)
+
+    assert view._shown_frame() is live
+    view.set_view_mode("preprocessed")
+    assert view._shown_frame() is filtered
+    view.set_view_mode("samples")
+    assert view._shown_frame() is overlay
+    # and back: the live stream was never disturbed
+    view.set_view_mode("original")
+    assert view._shown_frame() is live
+
+
+def test_a_processed_view_falls_back_to_the_stream_until_it_arrives(qapp):
+    """A mode switched on before the worker has produced anything must not
+    blank the view — the operator is watching a live microscope."""
+    view = LiveViewWidget()
+    live = _frame()
+    view.show_frame(live)
+    view.set_view_mode("preprocessed")
+    assert view._shown_frame() is live
+    view.set_view_mode("samples")
+    assert view._shown_frame() is live
+
+
+def test_an_unknown_mode_falls_back_to_the_stream(qapp):
+    view = LiveViewWidget()
+    view.set_view_mode("live")             # the pre-third-button name
+    assert view.view_mode == "original"
+    view.set_view_mode("nonsense")
+    assert view.view_mode == "original"
+
+
+def test_the_dropper_samples_the_preprocessed_layer_never_the_display(qapp):
+    """In samples mode the screen is darkened and outlined: sampling it
+    would return a colour the sample does not have."""
+    view = LiveViewWidget()
+    live = np.full((240, 320, 3), 30, np.uint8)
+    filtered = np.full((240, 320, 3), 130, np.uint8)
+    overlay = np.full((240, 320, 3), 240, np.uint8)
+    view.show_frame(live)
+    assert view.pick_frame() is live          # nothing filtered yet
+    view.set_preprocessed_frame(filtered)
+    view.set_overlay_frame(overlay)
+    view.set_view_mode("samples")
+    assert view.pick_frame() is filtered

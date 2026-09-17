@@ -59,10 +59,9 @@ class SampleFindingWorkspace(QWidget):
         self.live_view = LiveViewWidget()
         view_layout.addWidget(self.live_view)
         self.mode_bar = LiveViewModeBar(self.live_view)
-        self.mode_bar.live_btn.toggled.connect(
-            lambda on: on and self._set_view_mode("live"))
-        self.mode_bar.processed_btn.toggled.connect(
-            lambda on: on and self._set_view_mode("processed"))
+        for mode, button in self.mode_bar.buttons.items():
+            button.toggled.connect(
+                lambda on, mode=mode: on and self._set_view_mode(mode))
         self.live_view.installEventFilter(self)
         splitter.addWidget(view)
 
@@ -105,11 +104,11 @@ class SampleFindingWorkspace(QWidget):
 
     def set_processed_frame(self, frame) -> None:
         """The identification overlay, handed over by the Scan window."""
-        self.live_view.set_processed_frame(frame)
+        self.live_view.set_overlay_frame(frame)
 
     def _set_view_mode(self, mode: str) -> None:
         self.live_view.set_view_mode(mode)
-        self.sig_processed_view.emit(mode == "processed")
+        self.sig_processed_view.emit(mode in ("preprocessed", "samples"))
 
     def eventFilter(self, obj, event):  # noqa: N802
         if obj is self.live_view and event.type() == event.Type.Resize:

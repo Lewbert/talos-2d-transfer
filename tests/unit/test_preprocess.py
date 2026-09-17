@@ -272,6 +272,28 @@ def test_apply_keeps_the_shape_and_dtype():
     assert out.shape == img.shape and out.dtype == np.uint8
 
 
+def test_apply_maps_every_channel_by_its_own_curve():
+    """THE test that was missing: the table is built channel-major and
+    OpenCV wants it interleaved, and reshaping between the two without the
+    transpose permutes it. The image still comes out plausible, so only
+    checking actual pixel values catches it — the shape checks did not.
+    """
+    img = np.array([[[10, 20, 30], [250, 200, 150]]], np.uint8)
+    cfg = PreprocessConfig(enabled=True, brightness=5.0)
+    out = apply(img, cfg)
+    assert out.tolist() == [[[15, 25, 35], [255, 205, 155]]]
+
+    # and per-channel, with a curve on one channel only: the middle pixel
+    # of a per-channel table must survive, and the others must not move
+    cfg = PreprocessConfig(enabled=True)
+    cfg.local = LocalContrast(enabled=True, gain=4.0, width=8.0)
+    lut = build_lut(cfg, centre_rgb=(10, 20, 30))
+    assert lut[0][10] == 10 and lut[1][20] == 20 and lut[2][30] == 30
+    out = apply(img, cfg, centre_rgb=(10, 20, 30))
+    assert np.array_equal(out[0, 0], img[0, 0])
+    assert not np.array_equal(out[0, 1], img[0, 1])
+
+
 def test_apply_never_mutates_the_input():
     img = _frame(3)
     before = img.copy()

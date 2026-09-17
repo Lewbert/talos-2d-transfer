@@ -59,13 +59,34 @@ class _OverlaySurface(QWidget):
         painter.end()
 
 
-class LiveViewModeBar(QFrame):
-    """Live / Processed, floating over a live view.
+#: The three things there are to look at, and what the buttons say.
+#: ``original`` is the camera's own frame; ``preprocessed`` is what the
+#: pre-processing chain makes of it; ``samples`` is the identification
+#: result drawn over that same pre-processed layer.
+VIEW_MODES = ("original", "preprocessed", "samples")
+VIEW_MODE_BUTTONS = (("original", "Original"),
+                     ("preprocessed", "Pre-processed"),
+                     ("samples", "Samples"))
+VIEW_MODE_HINTS = {
+    "original": "The camera's own frame, exactly as captured",
+    "preprocessed": "After the pre-processing chain — this is the layer the "
+                    "dropper samples and identification runs on",
+    "samples": "Pre-processed, with everything the chain did not match "
+               "darkened and every region outlined by its verdict",
+}
 
-    Two buttons, because there are two things to look at: the camera's own
-    stream and the identification overlay computed from it. Translucent
-    until the pointer is on it — the operator is judging an image, and the
-    control must not be what they are looking at.
+
+class LiveViewModeBar(QFrame):
+    """Original / Pre-processed / Samples, floating over a live view.
+
+    Three buttons, because there are three different questions: what the
+    camera sees, what the filters make of it, and what the chain found.
+    Translucent until the pointer is on it — the operator is judging an
+    image, and the control must not be what they are looking at.
+
+    Only the first is the live stream. The other two are the detection
+    worker's output, computed once per job on its own thread; they lag
+    the stream slightly and never make it wait (``ui/detect_engine.py``).
     """
 
     def __init__(self, parent: QWidget):
@@ -75,16 +96,21 @@ class LiveViewModeBar(QFrame):
         layout = QHBoxLayout(self)
         layout.setContentsMargins(6, 3, 6, 3)
         layout.setSpacing(4)
-        self.live_btn = QPushButton("Live")
-        self.processed_btn = QPushButton("Processed")
+        self.buttons: dict[str, QPushButton] = {}
         self.group = QButtonGroup(self)
         self.group.setExclusive(True)
-        for button in (self.live_btn, self.processed_btn):
+        for mode, label in VIEW_MODE_BUTTONS:
+            button = QPushButton(label)
             button.setCheckable(True)
             button.setObjectName("hoverbar_btn")
+            button.setToolTip(VIEW_MODE_HINTS[mode])
             self.group.addButton(button)
             layout.addWidget(button)
-        self.live_btn.setChecked(True)
+            self.buttons[mode] = button
+        self.buttons["original"].setChecked(True)
+        # kept as names for the callers that predate the third button
+        self.live_btn = self.buttons["original"]
+        self.processed_btn = self.buttons["samples"]
         self._effect = QGraphicsOpacityEffect(self)
         self._effect.setOpacity(0.6)
         self.setGraphicsEffect(self._effect)
@@ -142,13 +168,14 @@ class LiveViewWidget(QWidget):
         self._crosshair_display = False
         self._crosshair_ticks = False
         self._af_indicator_enabled = False
-        # Two buffers, one display: the live stream keeps arriving while a
-        # "processed" frame (the identification overlay, computed off the
-        # GUI thread) is shown in its place. Switching modes never touches
-        # the camera or the stream — it only picks which buffer renders.
+        # Three buffers, one display: the live stream keeps arriving while
+        # a filtered or annotated frame (both computed off the GUI thread)
+        # is shown in its place. Switching modes never touches the camera,
+        # the stream or the autofocus — it only picks which buffer renders.
         self._live_frame: np.ndarray | None = None
-        self._processed_frame: np.ndarray | None = None
-        self._view_mode = "live"
+        self._preprocessed_frame: np.ndarray | None = None
+        self._overlay_frame: np.ndarray | None = None
+        self._view_mode = "original"
         self._picking = False
         self._af_phase: int | None = None
         self._af_label = ""
@@ -167,17 +194,18 @@ class LiveViewWidget(QWidget):
         self.update()
         self._overlay.update()  # re-draw the overlays over the new frame
 
-    # --- live vs processed -----------------------------------------------
+    # --- original vs pre-processed vs samples ----------------------------
 
     @property
     def view_mode(self) -> str:
         return self._view_mode
 
     def set_view_mode(self, mode: str) -> None:
-        """``"live"`` (the stream) or ``"processed"`` (the identification
-        overlay). Display only: the stream, the autofocus and the scan are
-        untouched by which one is showing."""
-        mode = "processed" if str(mode) == "processed" else "live"
+        """One of :data:`VIEW_MODES`. Display only: the camera stream, the
+        autofocus and a running scan are untouched by which one shows."""
+        mode = str(mode)
+        if mode not in VIEW_MODES:
+            mode = "original"
         if mode == self._view_mode:
             return
         self._view_mode = mode
@@ -185,17 +213,41 @@ class LiveViewWidget(QWidget):
         self.update()
         self._overlay.update()
 
-    def set_processed_frame(self, frame: np.ndarray | None) -> None:
-        """Hand over the newest processed frame (from the detection
-        worker). Only re-rendered when the processed view is showing."""
-        self._processed_frame = frame
-        if self._view_mode == "processed":
+    def set_preprocessed_frame(self, frame: np.ndarray | None) -> None:
+        """The pre-processing chain's output, from the detection worker.
+
+        It is also the frame the DROPPER samples and the one identification
+        ran on, so a colour picked off the screen is a colour the mask will
+        look for. With pre-processing off it is the raw frame itself.
+        """
+        self._preprocessed_frame = frame
+        if self._view_mode == "preprocessed":
+            self._pending = self._shown_frame()
+            self.update()
+
+    def set_overlay_frame(self, frame: np.ndarray | None) -> None:
+        """The identification result drawn over the pre-processed layer."""
+        self._overlay_frame = frame
+        if self._view_mode == "samples":
             self._pending = self._shown_frame()
             self.update()
 
     def _shown_frame(self) -> np.ndarray | None:
-        if self._view_mode == "processed" and self._processed_frame is not None:
-            return self._processed_frame
+        if self._view_mode == "preprocessed" \
+                and self._preprocessed_frame is not None:
+            return self._preprocessed_frame
+        if self._view_mode == "samples" and self._overlay_frame is not None:
+            return self._overlay_frame
+        return self._live_frame
+
+    def pick_frame(self) -> np.ndarray | None:
+        """The frame the dropper should sample: the pre-processed layer,
+        never what is on screen. In samples mode the display is darkened
+        and outlined, so sampling it would return a colour the sample does
+        not have — and with pre-processing off this is the raw frame, byte
+        for byte."""
+        if self._preprocessed_frame is not None:
+            return self._preprocessed_frame
         return self._live_frame
 
     # --- picking a pixel --------------------------------------------------

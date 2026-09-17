@@ -168,3 +168,86 @@ def test_zoom_keeps_the_centre_fixed(qapp):
     assert (after - centre).manhattanLength() > (before - centre).manhattanLength()
     widget.fit()
     assert widget._zoom == 1.0
+
+
+# --- the "you are here" footprint ------------------------------------------
+
+def test_the_footprint_is_drawn_at_the_stage_position(qapp):
+    from talos.cv.orientation import mosaic_offset
+
+    widget = ScanMapWidget()
+    widget.resize(800, 400)
+    widget.set_plan(_plan())
+    widget.set_footprint(900.0, 500.0)
+    assert widget._footprint == (900.0, 500.0)
+    # through the SAME transform as the tiles and the markers — which is
+    # the mosaic layout's, so the mounting's Y inversion applies here too
+    assert (widget._at(*widget._footprint)
+            == pytest.approx(mosaic_offset(900.0, 500.0, False)))
+    assert widget._at(*widget._footprint)[1] == pytest.approx(-500.0)
+
+
+def test_an_unknown_position_draws_nothing(qapp):
+    """Regression: the footprint used to be fed zeroes whenever the
+    position was unknown, and stage (0, 0) is a real place — the box sat
+    there looking like a measurement, unrelated to the plan, on most
+    frames."""
+    widget = ScanMapWidget()
+    widget.resize(800, 400)
+    widget.set_plan(_plan())
+    widget.set_footprint(100.0, 200.0)
+    widget.set_footprint(None)
+    assert widget._footprint is None
+    widget.set_footprint(10.0, None)
+    assert widget._footprint is None
+
+
+def test_the_footprint_can_be_cleared(qapp):
+    widget = ScanMapWidget()
+    widget.resize(800, 400)
+    widget.set_plan(_plan())
+    widget.set_footprint(0.0, 0.0)
+    widget.clear_footprint()
+    assert widget._footprint is None
+
+
+def test_the_footprint_is_a_survivable_kind_of_wrong_after_a_flip(qapp):
+    """The flip mirrors the layout, so the footprint has to be mirrored
+    with it — otherwise the box reports the camera on the wrong side of
+    the sample."""
+    widget = ScanMapWidget()
+    widget.resize(800, 400)
+    widget.set_plan(_plan())
+    widget.set_footprint(900.0, 500.0)
+    straight = widget._at(*widget._footprint)
+    widget.set_flip(True)
+    flipped = widget._at(*widget._footprint)
+    assert flipped == pytest.approx((-straight[0], -straight[1]))
+
+
+def test_the_footprint_uses_the_effective_plans_field_of_view(qapp):
+    """It read the raw plan while everything else read the oriented one —
+    harmless only while oriented() happened not to scale the field of view."""
+    widget = ScanMapWidget()
+    widget.resize(800, 400)
+    widget.set_plan(_plan(fov_x_um=1000.0, fov_y_um=500.0))
+    widget.set_flip(True)
+    plan = widget._effective_plan()
+    assert (plan.fov_x_um, plan.fov_y_um) == (1000.0, 500.0)
+
+
+def test_a_double_click_asks_to_be_enlarged_rather_than_fitting(qapp):
+    """Double-click used to call fit(); the map is the smallest panel and
+    the one worth seeing big, so the gesture opens it instead. Fit moved
+    to a button."""
+    widget = ScanMapWidget()
+    widget.resize(800, 400)
+    widget.set_plan(_plan())
+    widget._zoom = 3.0
+    asked: list = []
+    widget.sig_enlarge_requested.connect(lambda: asked.append(True))
+    widget.mouseDoubleClickEvent(None)
+    assert asked == [True]
+    assert widget._zoom == 3.0          # the view was not reset
+    widget.fit()
+    assert widget._zoom == 1.0

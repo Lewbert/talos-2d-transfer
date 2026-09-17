@@ -206,6 +206,50 @@ QPushButton#qa_primary {{
 }}
 QPushButton#qa_primary:hover {{ background: {accent_light}; }}
 QPushButton#qa_primary:pressed {{ background: {accent_dark}; }}
+QFrame#card {{
+    border: 1px solid {BORDER};
+    border-radius: 5px;
+    background: {PANEL};
+}}
+QWidget#segmented {{
+    border: 1px solid {BORDER};
+    border-radius: 4px;
+    background: {BG};
+}}
+QPushButton#segmented_btn {{
+    background: transparent;
+    border: none;
+    border-right: 1px solid {BORDER};
+    border-radius: 0;
+    padding: 3px 8px;
+    min-width: 0;
+}}
+QPushButton#segmented_btn:last-child {{ border-right: none; }}
+QPushButton#segmented_btn:hover {{ color: {accent}; }}
+QPushButton#segmented_btn:checked {{
+    background: {accent};
+    color: {primary_text};
+    font-weight: 700;
+}}
+QPushButton#segmented_btn:disabled {{ color: #565b68; }}
+QFrame#hoverbar {{
+    border: 1px solid {BORDER};
+    border-radius: 4px;
+    background: {PANEL_ALT};
+}}
+QPushButton#hoverbar_btn {{
+    background: transparent;
+    border: none;
+    padding: 2px 8px;
+    min-width: 0;
+}}
+QPushButton#hoverbar_btn:hover {{ color: {accent}; }}
+QPushButton#hoverbar_btn:checked {{
+    background: {accent};
+    color: {primary_text};
+    font-weight: 700;
+    border-radius: 3px;
+}}
 QPushButton#danger {{
     background: {DANGER};
     color: #ffffff;

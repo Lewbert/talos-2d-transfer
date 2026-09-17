@@ -18,7 +18,14 @@ the camera flip and the axis settings are set to.
 The tile POSITIONS are the manifest readback, so no stage↔image sign
 convention is assumed anywhere here either.
 
-Wheel zooms, drag pans, Fit resets.
+The **footprint** is the field of view at the current stage position, and
+it is set only from a position that is actually known — ``set_footprint(None)``
+means "no telemetry yet" and draws nothing. Passing zeros instead would
+put the box at stage origin, which is a real place and reads as a
+measurement; that is exactly how it used to misbehave.
+
+Wheel zooms, drag pans, double-click asks to be enlarged (the panel owns
+that), Fit resets.
 """
 
 from __future__ import annotations
@@ -128,6 +135,11 @@ def fit_view(bounds: tuple[float, float, float, float],
 
 class ScanMapWidget(QWidget):
     sig_marker_selected = Signal(int)      # index into markers
+    #: The operator asked for a bigger view of this. The widget does not
+    #: open a window itself — the panel owns that, and reparents this
+    #: widget into it (see ui/widgets/map_window.py), so there is one set
+    #: of tiles and one view transform rather than two that can drift.
+    sig_enlarge_requested = Signal()
 
     def __init__(self, parent: QWidget | None = None):
         super().__init__(parent)
@@ -208,10 +220,26 @@ class ScanMapWidget(QWidget):
         self._markers = list(markers)
         self.update()
 
-    def set_footprint(self, x_um: float, y_um: float) -> None:
-        """Where the camera is looking right now (stage readback)."""
-        self._footprint = (float(x_um), float(y_um))
+    def set_footprint(self, x_um: float | None,
+                      y_um: float | None = None) -> None:
+        """Where the camera is looking right now (stage readback).
+
+        ``None`` means "position unknown" and draws nothing. That case
+        matters: a caller that has no telemetry yet must not pass zeros,
+        because stage (0, 0) is a real place and the box would sit there
+        looking like a measurement.
+        """
+        if x_um is None or y_um is None:
+            self._footprint = None
+        else:
+            self._footprint = (float(x_um), float(y_um))
         self.update()
+
+    def clear_footprint(self) -> None:
+        """Stop drawing the "you are here" box (a run that has just ended,
+        a fresh plan, a camera flip — anywhere the old position would be
+        read as current)."""
+        self.set_footprint(None)
 
     def set_caption(self, text: str) -> None:
         self._caption = str(text)
@@ -257,7 +285,11 @@ class ScanMapWidget(QWidget):
         self._drag_from = None
 
     def mouseDoubleClickEvent(self, event) -> None:  # noqa: N802
-        self.fit()
+        """Enlarge, rather than fit. The map is the one view whose whole
+        point is seeing where a run went, and it is the smallest thing on
+        the panel — so the double-click is spent on opening it up. Fit
+        moved to a button beside it."""
+        self.sig_enlarge_requested.emit()
 
     # --- painting -----------------------------------------------------
 
@@ -354,14 +386,26 @@ class ScanMapWidget(QWidget):
             previous = point
 
     def _draw_footprint(self, painter: QPainter, scale: float) -> None:
+        """The field of view at the current stage position — "you are
+        here", drawn over the plan rather than as another plan rectangle.
+
+        A translucent fill and a two-pixel outline, because an empty
+        rectangle among the plan's outlines reads as a stray artefact
+        rather than as the camera. The field of view comes from the
+        EFFECTIVE plan, like everything else here: reading the raw one was
+        harmless only while oriented() happened not to scale it.
+        """
         if self._footprint is None:
             return
-        rect = QRectF(0.0, 0.0, self._plan.fov_x_um * scale,
-                      self._plan.fov_y_um * scale)
+        plan = self._effective_plan()
+        rect = QRectF(0.0, 0.0, plan.fov_x_um * scale, plan.fov_y_um * scale)
         rect.moveCenter(self._to_widget(*self._at(*self._footprint)))
         painter.setPen(QPen(QColor(theme.ACCENT), 2))
-        painter.setBrush(Qt.BrushStyle.NoBrush)
+        fill = QColor(theme.ACCENT)
+        fill.setAlpha(38)
+        painter.setBrush(fill)
         painter.drawRect(rect)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
 
     def _draw_markers(self, painter: QPainter) -> None:
         font = QFont(painter.font())

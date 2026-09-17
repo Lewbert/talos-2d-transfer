@@ -840,13 +840,14 @@ class ScanWindow(QDialog):
                 self._identify_config(), float(self._preview.currentData()),
                 self._camera_flip())
 
-    def _on_detected(self, index: int, result, preview) -> None:
+    def _on_detected(self, index: int, result, _preprocessed,
+                     overlay) -> None:
         if result is None:
             return
         if index < 0:                       # the live feed
             self._live_candidates = list(result.candidates)
-            if preview is not None:
-                self.sig_processed_frame.emit(preview)
+            if overlay is not None:
+                self.sig_processed_frame.emit(overlay)
             self._counts.setText(result.summary)
             if self._job is None and not self._scan_hits:
                 self._show_candidates(self._live_candidates, "live view")
