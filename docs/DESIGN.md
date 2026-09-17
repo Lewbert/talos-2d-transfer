@@ -202,7 +202,9 @@ The plan's risk register, with the outcome attached:
 
 ## Reading order
 
-New to the code? [ARCHITECTURE.md](ARCHITECTURE.md) first, then this document, then
-[AUTOFOCUS.md](AUTOFOCUS.md) if you intend to touch anything that moves the focus axis. If you are
-adding an instrument, the checklist is in the README and the long form — with the bench tools for
-validating a driver against real hardware — is in [DEVELOPMENT.md](DEVELOPMENT.md).
+New to the code? [ARCHITECTURE.md](ARCHITECTURE.md) first, then this document. After that it depends
+on what you are touching: [AUTOFOCUS.md](AUTOFOCUS.md) for anything that moves the focus axis,
+[SCAN.md](SCAN.md) for the stage geometry and the capture path,
+[IDENTIFICATION.md](IDENTIFICATION.md) for the image-processing chain. If you are adding an
+instrument, the checklist is in the README and the long form — with the bench tools for validating a
+driver against real hardware — is in [DEVELOPMENT.md](DEVELOPMENT.md).

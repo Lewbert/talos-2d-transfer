@@ -34,7 +34,7 @@ Three kinds of test, deliberately separated:
 |---|---|---|
 | `tests/unit/` | Drivers against scripted fake serial ports (CRC faults, torn lines, timeouts, late replies), protocol codecs, the settings merge and migrations, the calibration store, CV maths, input resolution, UI wiring | No |
 | `tests/integration/` | The manager, the proxies and their life-cycle: submit/stop ordering, reconnect, retirement, the STOP ALL budget | No |
-| `tests/sim/` | Closed-loop **simulations**, marked `slow`: the autofocus strategies and the grid scan drive simulated focus curves and stage models in real time and must land on the true focus position | No |
+| `tests/sim/` | Closed-loop **simulations**, marked `slow`: the autofocus strategies and the grid scan drive simulated focus curves and stage models in real time and must land on the true focus position. For anything geometric, `SimCamera(wafer=True)` images a synthetic wafer that the stage carries (`hal/sim/bench.py`) — the scene moves with the stage, so a stitched result can be checked instead of merely looking plausible | No |
 
 The suite needs no instruments — that is a design rule, not an accident. Hardware-in-the-loop work
 lives in `tools/` instead.

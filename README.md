@@ -325,6 +325,8 @@ docs/                         design, architecture, hardware notes, camera inter
 | [docs/DESIGN.md](docs/DESIGN.md) | How TALOS is put together and why: the bench, the decisions, the hardware register maps, and where the build diverged from the plan |
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | Layers, threading and proxy life-cycle, the job model, safety interlocks, known weaknesses |
 | [docs/AUTOFOCUS.md](docs/AUTOFOCUS.md) | The axis physics, the algorithm and its safety invariants, the measured numbers, the tuning ladder |
+| [docs/SCAN.md](docs/SCAN.md) | The grid scan: the geometry and its coverage proof, the path orders, settling and backlash, capture through the frame slot, what a scan writes, which way is up |
+| [docs/IDENTIFICATION.md](docs/IDENTIFICATION.md) | The identification chain: the eight stages, the three rules it must keep, the processed view, tuning it on a real wafer |
 | [docs/CAMERA_208.md](docs/CAMERA_208.md) | What the Axiocam 208 can and cannot do, and how to coexist with ZEN |
 | [docs/SMARTCAM_API.md](docs/SMARTCAM_API.md) | Interoperability notes for the SmartCamApi DLL |
 | [docs/hardware/focus/protocol.md](docs/hardware/focus/protocol.md) | The focus controller's complete serial protocol |

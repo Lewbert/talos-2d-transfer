@@ -263,6 +263,11 @@ change, on Apply, and (defensively) if the database is unreadable — a corrupt
 
 ## The grid scan and the identification chain
 
+The long form of both — the geometry and its coverage proof, the path orders,
+the chain's stages and the tuning ladder — is in [SCAN.md](SCAN.md) and
+[IDENTIFICATION.md](IDENTIFICATION.md). This section is the architecture: what
+crosses which thread, and the rules that keep the two honest.
+
 Two pieces of automation share one rule and one shape.
 
 **Capture never touches the camera.** The scan runs on its own thread, and the
