@@ -145,6 +145,9 @@ class Stage:
     NAME: ClassVar[str] = ""
     LABEL: ClassVar[str] = ""
     KIND: ClassVar[str] = "gate"
+    #: (min, max, step) per parameter — the UI reads these to build its
+    #: spin boxes, so a stage describes its own editor.
+    RANGES: ClassVar[dict] = {}
 
     def params(self) -> dict:
         return {f.name: getattr(self, f.name) for f in fields(self)
@@ -165,6 +168,7 @@ class ColourStage(Stage):
     min_value: float = 0.0
 
     NAME = "colour"
+    RANGES = {"tolerance": (0.0, 100.0, 5.0), "min_saturation": (0, 255, 5), "min_value": (0, 255, 5)}
     LABEL = "Colour match"
     KIND = "source"
 
@@ -181,6 +185,7 @@ class ContrastStage(Stage):
     blur_sigma: float = 15.0
 
     NAME = "contrast"
+    RANGES = {"blur_sigma": (1.0, 60.0, 1.0)}
     LABEL = "Contrast"
     KIND = "source"
 
@@ -196,6 +201,7 @@ class MorphologyStage(Stage):
     kernel: int = 3
 
     NAME = "morphology"
+    RANGES = {"kernel": (1, 15, 2)}
     LABEL = "Clean up"
     KIND = "mask"
 
@@ -217,6 +223,7 @@ class SizeStage(Stage):
     max_area_um2: float = 100000.0
 
     NAME = "size"
+    RANGES = {"min_area_um2": (0.0, 100000.0, 10.0), "max_area_um2": (0.0, 10000000.0, 100.0)}
     LABEL = "Size"
     KIND = "gate"
 
@@ -233,6 +240,7 @@ class BorderStage(Stage):
     margin_px: int = 4
 
     NAME = "border"
+    RANGES = {"margin_px": (0, 100, 1)}
     LABEL = "Frame edge"
     KIND = "gate"
 
@@ -264,6 +272,7 @@ class SharpnessStage(Stage):
     min_edge_strength: float = 4.0
 
     NAME = "sharpness"
+    RANGES = {"min_edge_strength": (0.0, 200.0, 1.0)}
     LABEL = "Sharpness"
     KIND = "gate"
 
@@ -281,6 +290,7 @@ class AnnotationStage(Stage):
     sat_min: float = 120.0
 
     NAME = "annotation"
+    RANGES = {"sat_min": (0, 255, 5)}
     LABEL = "Scale bar"
     KIND = "gate"
 
@@ -299,6 +309,7 @@ class MergeStage(Stage):
     gap_px: float = 25.0
 
     NAME = "merge"
+    RANGES = {"gap_px": (0.0, 500.0, 5.0)}
     LABEL = "Merge fragments"
     KIND = "merge"
 

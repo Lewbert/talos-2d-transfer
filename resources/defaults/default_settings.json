@@ -1,5 +1,5 @@
 {
-  "_version": 6,
+  "_version": 7,
   "selected_objective": 0,
   "objective_offsets_enabled": true,
   "display": {
@@ -226,16 +226,43 @@
      "z_offset_um": 0.0, "backlash_um": 0.0}
   ],
   "scan": {
+    "width_um": 2000.0,
+    "height_um": 1000.0,
     "overlap": 0.10,
+    "path": "serpentine",
+    "serpentine": true,
+    "start_axis": "x",
+    "x_dir": 1,
+    "y_dir": 1,
+    "slow_speed": true,
+    "settle_ms": 200,
+    "backlash_um": 0.0,
+    "backlash_approach": 1,
+    "return_to_start": true,
+    "fov_auto": true,
     "fov_x_um": 700.0,
     "fov_y_um": 390.0,
-    "min_flake_area_um2": 30.0,
-    "width_um": 2000.0,
-    "height_um": 1000.0
+    "export_mosaic": true,
+    "export_candidates": true,
+    "export_overview": true
+  },
+  "identify": {
+    "stages": [
+      {"name": "colour", "enabled": true, "hex_color": "#c8a2c8",
+       "tolerance": 25.0, "min_saturation": 40.0, "min_value": 0.0},
+      {"name": "contrast", "enabled": false, "blur_sigma": 15.0},
+      {"name": "morphology", "enabled": true, "kernel": 3},
+      {"name": "size", "enabled": true, "min_area_um2": 30.0,
+       "max_area_um2": 100000.0},
+      {"name": "border", "enabled": true, "margin_px": 4},
+      {"name": "sharpness", "enabled": true, "min_edge_strength": 4.0},
+      {"name": "annotation", "enabled": true, "sat_min": 120.0},
+      {"name": "merge", "enabled": true, "gap_px": 25.0}
+    ]
   },
   "ui": {
     "accent": "#00BCBC",
     "font_size": 12,
-    "collapsed_sections": {"nav": [], "scan": []}
+    "collapsed_sections": {"nav": [], "scan": [], "scan_window": []}
   }
 }

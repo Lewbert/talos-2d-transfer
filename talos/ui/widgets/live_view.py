@@ -10,14 +10,12 @@ crosshair, AF-status indicator (top-right).
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-
 import numpy as np
 from PySide6.QtCore import QRectF, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QImage, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import QLabel, QVBoxLayout, QWidget
 
-from talos.cv.af_roi import letterbox_rect, normalized_roi
+from talos.cv.af_roi import letterbox_map, letterbox_rect, normalized_roi
 from talos.cv.calibration import SENSOR_WIDTH_PX
 from talos.ui.theme import OK
 from talos.ui.widgets.overlay import (
@@ -26,33 +24,7 @@ from talos.ui.widgets.overlay import (
     draw_crosshair_ticks_q,
     draw_ruler_q,
     draw_scale_bar_q,
-    draw_scan_plan_q,
 )
-
-
-@dataclass(frozen=True)
-class ScanPlanOverlay:
-    """The grid-scan path shown near the top of the live view.
-
-    A schematic (one arrow per row, serpentine order) — see
-    draw_scan_plan_q for why it is not registered to the image.
-    """
-
-    cols: int
-    rows: int
-    detail: str = ""              # "8 × 5 grid · 700 × 390 µm"
-    active_row: int = -1          # -1 = preview, nothing running
-    active_col: int = -1
-    serpentine: bool = True
-
-    def status_text(self) -> str:
-        if self.active_row < 0:
-            return f"{self.cols * self.rows} waypoints · ready"
-        forward = not (self.serpentine and self.active_row % 2 == 1)
-        arrow = "→" if forward else "←"
-        col = self.active_col if self.active_col >= 0 else 0
-        return (f"Row {self.active_row + 1}/{self.rows} "
-                f"· col {col + 1}/{self.cols} {arrow}")
 
 # The AF region is drawn in the CROSSHAIR's style (thin dashed cyan) and
 # completely unfilled, so it never hides the image it is measuring; the
@@ -86,6 +58,7 @@ class _OverlaySurface(QWidget):
 
 class LiveViewWidget(QWidget):
     sig_roi_selected = Signal(object)   # normalized (x, y, w, h) | None
+    sig_frame_clicked = Signal(int, int)   # frame pixel (x, y) — the dropper
 
     def __init__(self, parent: QWidget | None = None):
         super().__init__(parent)
@@ -120,8 +93,14 @@ class LiveViewWidget(QWidget):
         self._crosshair_display = False
         self._crosshair_ticks = False
         self._af_indicator_enabled = False
-        self._scan_plan: ScanPlanOverlay | None = None
-        self._scan_path_enabled = True
+        # Two buffers, one display: the live stream keeps arriving while a
+        # "processed" frame (the identification overlay, computed off the
+        # GUI thread) is shown in its place. Switching modes never touches
+        # the camera or the stream — it only picks which buffer renders.
+        self._live_frame: np.ndarray | None = None
+        self._processed_frame: np.ndarray | None = None
+        self._view_mode = "live"
+        self._picking = False
         self._af_phase: int | None = None
         self._af_label = ""
         self._af_success = False
@@ -133,10 +112,52 @@ class LiveViewWidget(QWidget):
 
     def show_frame(self, frame: np.ndarray) -> None:
         """Queue the newest frame; actual paint happens in paintEvent."""
-        self._pending = frame
+        self._live_frame = frame
+        self._pending = self._shown_frame()
         self._last_shape = frame.shape
         self.update()
         self._overlay.update()  # re-draw the overlays over the new frame
+
+    # --- live vs processed -----------------------------------------------
+
+    @property
+    def view_mode(self) -> str:
+        return self._view_mode
+
+    def set_view_mode(self, mode: str) -> None:
+        """``"live"`` (the stream) or ``"processed"`` (the identification
+        overlay). Display only: the stream, the autofocus and the scan are
+        untouched by which one is showing."""
+        mode = "processed" if str(mode) == "processed" else "live"
+        if mode == self._view_mode:
+            return
+        self._view_mode = mode
+        self._pending = self._shown_frame()
+        self.update()
+        self._overlay.update()
+
+    def set_processed_frame(self, frame: np.ndarray | None) -> None:
+        """Hand over the newest processed frame (from the detection
+        worker). Only re-rendered when the processed view is showing."""
+        self._processed_frame = frame
+        if self._view_mode == "processed":
+            self._pending = self._shown_frame()
+            self.update()
+
+    def _shown_frame(self) -> np.ndarray | None:
+        if self._view_mode == "processed" and self._processed_frame is not None:
+            return self._processed_frame
+        return self._live_frame
+
+    # --- picking a pixel --------------------------------------------------
+
+    def set_pick_mode(self, on: bool) -> None:
+        """Click-to-sample: the next click emits ``sig_frame_clicked`` with
+        the frame pixel under the cursor (letterbox-corrected), then the
+        mode turns itself off — a dropper is a single action."""
+        self._picking = bool(on)
+        self.setCursor(Qt.CursorShape.CrossCursor if on
+                       else Qt.CursorShape.ArrowCursor)
 
     # --- Display overlays ------------------------------------------------
 
@@ -176,16 +197,6 @@ class LiveViewWidget(QWidget):
 
     def set_af_indicator_enabled(self, on: bool) -> None:
         self._af_indicator_enabled = bool(on)
-        self._overlay.update()
-
-    def set_scan_path_enabled(self, on: bool) -> None:
-        """Display-menu toggle for the grid-scan path indicator."""
-        self._scan_path_enabled = bool(on)
-        self._overlay.update()
-
-    def set_scan_plan(self, plan: ScanPlanOverlay | None) -> None:
-        """Show (or clear) the scan-path indicator. ``None`` hides it."""
-        self._scan_plan = plan
         self._overlay.update()
 
     def set_af_phase(self, phase: int, label: str) -> None:
@@ -233,9 +244,26 @@ class LiveViewWidget(QWidget):
         self._overlay.update()
 
     def mousePressEvent(self, event) -> None:  # noqa: N802
+        if self._picking and event.button() == Qt.MouseButton.LeftButton:
+            self._emit_click(event.position())
+            return
         if self._selecting and event.button() == Qt.MouseButton.LeftButton:
             self._drag_start = event.position()
             self._drag_rect = QRectF(self._drag_start, self._drag_start)
+
+    def _emit_click(self, position) -> None:
+        """Widget point → frame pixel, through the same letterbox
+        transform the ROI selection uses (a click on the letterbox bar is
+        not a click on the image)."""
+        shape = self._last_shape
+        if shape is None:
+            return
+        x, y = letterbox_map((self.width(), self.height()), shape,
+                             (position.x(), position.y()))
+        if not (0 <= x < shape[1] and 0 <= y < shape[0]):
+            return
+        self.set_pick_mode(False)
+        self.sig_frame_clicked.emit(int(x), int(y))
 
     def mouseMoveEvent(self, event) -> None:  # noqa: N802
         if self._selecting and self._drag_start is not None:
@@ -363,10 +391,6 @@ class LiveViewWidget(QWidget):
             painter.setPen(_ROI_PEN)
             painter.setBrush(Qt.BrushStyle.NoBrush)
             painter.drawRect(self._drag_rect)
-        if self._scan_path_enabled and self._scan_plan is not None \
-                and self._last_shape is not None:
-            draw_scan_plan_q(painter, self._scan_plan, self._last_shape,
-                             (self.width(), self.height()))
         live_um_per_px = self._live_um_per_px()
         if self._scale_bar_enabled and live_um_per_px is not None:
             # the length choice lives in the shared spec now (same ladder

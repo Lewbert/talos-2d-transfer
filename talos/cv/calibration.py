@@ -14,6 +14,9 @@ import numpy as np
 # working on other frame widths (the 1080p live view) scale by
 # SENSOR_WIDTH_PX / frame_width — a 1080p pixel covers 2× the µm.
 SENSOR_WIDTH_PX = 3840
+#: The same sensor's height. The field of view is um_per_px × these two,
+#: which is why the FOV does not change when the frame size does.
+SENSOR_HEIGHT_PX = 2160
 
 
 @dataclass

@@ -104,6 +104,8 @@ def main() -> int:
         f"stage{tag}": window._stage_window,
         f"log{tag}": window._log,
         f"focus{tag}": window._focus_window,
+        # the scan console: plan, run, identification chain, results
+        f"scanwin{tag}": window._scan_window,
         # embedded close-ups for the control-panel QA (checkbox dot,
         # slider handle, ms exposure, temperature grid, the AF ROI block)
         f"camgroup{tag}": window._navigation.camera_group,

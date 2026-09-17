@@ -151,6 +151,13 @@ class InstrumentManager(QObject):
         if isinstance(focus, FocusProxy):
             focus.set_frame_slot(slot)
 
+    @property
+    def frame_slot(self):
+        """The shared frame mailbox — the documented way for a worker thread
+        (the autofocus controller, the grid scan) to read the newest frame
+        without touching the camera backend. None until the app wires one."""
+        return self._frame_slot
+
     def connection_config_changed(self, key: str) -> bool:
         """True when a connection key differs from the value the LIVE
         driver was built with (port, baudrate, slave address, timeout)."""

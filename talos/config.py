@@ -38,7 +38,7 @@ def load_defaults() -> dict:
         # detection-based), but a stale number here was one of three
         # disagreeing values (defaults said 4, this said 3, _normalize logged
         # "v5"), and a test pinned the wrong one.
-        return {"_version": 6}
+        return {"_version": 7}
 
 
 # Keys superseded by schema v3 (autofocus is µm-based now; the focus
@@ -51,6 +51,12 @@ _DEAD_KEYS: dict[str, set[str]] = {
     # they are replaced by the per-stick invert_left_*/invert_right_* keys
     # (a single pair cannot express "invert only the Zolix stick").
     "input.gamepad": {"invert_x", "invert_y"},
+    # v7: the scan-path indicator on the live view is gone — the scan map in
+    # the Scan window draws the route now, registered to the area (the old
+    # one was an unregistered schematic). scan.min_flake_area_um2 moved into
+    # the identification chain, which owns every detection threshold.
+    "display": {"scan_path"},
+    "scan": {"min_flake_area_um2", "default_dir"},
 }
 
 

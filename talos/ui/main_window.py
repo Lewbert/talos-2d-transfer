@@ -42,6 +42,7 @@ from talos.ui.camera_profiles import (
 from talos.ui.theme import DANGER, WARN
 from talos.ui.widgets.overlay import PHASE_NAMES
 from talos.ui.widgets.focus_window import FocusWindow
+from talos.ui.widgets.scan_window import ScanWindow
 from talos.ui.widgets.gamepad_indicator import GamepadIndicator
 from talos.ui.widgets.hardware_strip import HardwareStrip
 from talos.ui.widgets.log_window import LogWindow
@@ -136,7 +137,10 @@ class MainWindow(QMainWindow):
         manager.camera.sig_frame.connect(self._sample_finding.on_frame)
         manager.camera.sig_frame.connect(
             self._sample_finding.live_view.show_frame)
+        manager.camera.sig_frame.connect(self._scan_window.on_frame)
         manager.camera.sig_frame.connect(self._autogain.on_frame)
+        # STOP ALL must abort a running SCAN, not just the motion in flight.
+        manager.sig_stop_all_done.connect(self._scan_window.on_stop_all_done)
         manager.sig_job_done.connect(self._on_job_done)
         manager.sig_job_failed.connect(self._on_job_failed)
         self._snapshot_job: int | None = None
@@ -268,6 +272,17 @@ class MainWindow(QMainWindow):
         self._log_action.toggled.connect(self._log.setVisible)
         self._log.set_toggle_action(self._log_action)
 
+        # The scan and the identification chain live in their own window
+        # while they are being proven (see the workspace's docstring).
+        self._scan_window = ScanWindow(
+            self._manager, self._settings, self._state,
+            calibration_context=self._calibration, input_system=self._input,
+            autofocus_service=self._autofocus, parent=self)
+        self._scan_action = self._windows_menu.addAction("Scan")
+        self._scan_action.setCheckable(True)
+        self._scan_action.toggled.connect(self._scan_window.setVisible)
+        self._scan_window.set_toggle_action(self._scan_action)
+
         help_menu = menu_bar.addMenu("&Help")
         about_action = help_menu.addAction("&About TALOS")
         about_action.triggered.connect(self._on_about)
@@ -362,10 +377,6 @@ class MainWindow(QMainWindow):
             ("ruler", "Tick ruler", False,
              lambda on: self._for_each_live_view(
                  lambda v: v.set_ruler_enabled(on))),
-            # The serpentine scan-path panel (Sample Finding workspace).
-            ("scan_path", "Scan path", True,
-             lambda on: self._for_each_live_view(
-                 lambda v: v.set_scan_path_enabled(on))),
         ]
         for key, label, default, apply in specs:
             action = menu.addAction(label)
@@ -421,6 +432,9 @@ class MainWindow(QMainWindow):
         second = getattr(self._sample_finding, "live_view", None)
         if second is not None:
             views.append(second)
+        scan = getattr(self, "_scan_window", None)
+        if scan is not None:
+            views.append(scan.live_view)
         return views
 
     # ------------------------------------------------------------------
@@ -611,14 +625,14 @@ class MainWindow(QMainWindow):
         roi = self._af_roi.roi()
         if roi is not None:
             self._af_roi.set_roi(mirror_roi_norm(roi))
-        invalidate = getattr(self._sample_finding, "invalidate_detections",
-                             None)
-        if callable(invalidate):
-            invalidate()
+        scan_window = getattr(self, "_scan_window", None)
+        if scan_window is not None:
+            scan_window.on_camera_flip_changed()
         self._on_log_message(
             "warning",
-            "Camera flip changed — the flake table was cleared; re-check the "
-            "µm/px calibration if saved images are used for measurements")
+            "Camera flip changed — the scan map and the live sample "
+            "positions were reset; re-check the µm/px calibration if saved "
+            "images are used for measurements")
 
     def _on_about(self) -> None:
         QMessageBox.about(
@@ -787,6 +801,11 @@ class MainWindow(QMainWindow):
         qs = QSettings("TALOS", "TALOS")
         qs.setValue("geometry", self.saveGeometry())
         qs.setValue("maximized", self.isMaximized())
+        # The scan window owns a detection thread; a hidden QDialog is not
+        # destroyed on its own, so its worker has to be stopped here.
+        scan_window = getattr(self, "_scan_window", None)
+        if scan_window is not None:
+            scan_window.shutdown()
         super().closeEvent(event)
 
     # ------------------------------------------------------------------
@@ -883,6 +902,10 @@ class MainWindow(QMainWindow):
             f"{mode} owns the axes — manual jog input is gated"
             if busy else "")
         self._mode_badge.setVisible(busy)
+        # The nosepiece is manual and unsensed: changing the objective
+        # mid-scan would silently invalidate the FOV the running scan is
+        # tiling at, and the objective id the manifest records.
+        self._objective.setEnabled(not busy)
 
     def _on_gamepad_state(self, state) -> None:
         self._strip.trigger_bar().set_state(
@@ -927,6 +950,7 @@ class MainWindow(QMainWindow):
             self._strip.update_telem(key, payload)
             self._navigation.update_telem(key, payload)
             self._stage_window.update_telem(key, payload)
+            self._scan_window.update_telem(key, payload)
 
     def _on_device_event(self, key: str, event: str, payload: dict) -> None:
         led = self._leds.get(key)

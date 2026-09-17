@@ -139,7 +139,7 @@ def test_load_applies_normalization(tmp_path):
     assert settings.section("autofocus")["quality_threshold"] == 0.5
     # the schema marker: nothing gates on it, but it must match the
     # bundled defaults (it used to disagree with them AND the code)
-    assert settings.get("_version") == 6
+    assert settings.get("_version") == 7
     assert len(settings.get("objectives")) == 5
 
 

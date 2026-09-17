@@ -28,6 +28,10 @@ class StubManager(QObject):
         self.camera = StubCamera()
         self.camera_props = {}
         self.focus_position = 0
+        # The real manager publishes the last telemetry per device; the
+        # scan window reads the zolix position to place the map footprint.
+        self.last_position: dict[str, dict] = {}
+        self.frame_slot = None
         self._enabled: dict[str, bool] = {}
         self.stopped = 0
         self.camera_submits: list = []
@@ -197,10 +201,9 @@ def test_overlay_toggles_work_and_are_never_submenu_parents(window):
     assert set(actions) == {"Scale Bar", "Show scale bar",
                             "Burn into snapshots", "Crosshair",
                             "Show crosshair", "Crosshair ticks",
-                            "AF Indicator", "Tick ruler", "Scan path"}
+                            "AF Indicator", "Tick ruler"}
     for label in ("Show scale bar", "Burn into snapshots", "Show crosshair",
-                  "Crosshair ticks", "AF Indicator", "Tick ruler",
-                  "Scan path"):
+                  "Crosshair ticks", "AF Indicator", "Tick ruler"):
         action = actions[label]
         assert action.isCheckable(), label
         assert action.menu() is None, f"{label} owns a submenu — untoggleable"
@@ -451,10 +454,18 @@ def test_right_panel_groups_are_collapsible(window):
     assert len(sections) >= 4  # Capture / Camera / Autofocus / Temperature
     titles = {s._header.text()[2:] for s in sections}
     assert {"Capture", "Camera", "Autofocus", "Temperature"} <= titles
+    # The Sample Finding tab keeps only its live view and the scan camera
+    # profile: the scan and identification panels moved to the Scan window
+    # while they are being proven.
     scan = window._sample_finding
-    scan_sections = scan.findChildren(CollapsibleGroup)
-    scan_titles = {s._header.text()[2:] for s in scan_sections}
-    assert {"Camera", "Scan & Detection"} <= scan_titles
+    scan_titles = {s._header.text()[2:]
+                   for s in scan.findChildren(CollapsibleGroup)}
+    assert scan_titles == {"Camera"}
+    from PySide6.QtWidgets import QLabel
+
+    pointers = [label.text() for label in scan.findChildren(QLabel)]
+    assert any("Windows ▸ Scan" in text for text in pointers), \
+        "the tab must say where the scan panel went"
 
 
 def test_telemetry_updates_strip(window):
@@ -671,34 +682,66 @@ def test_input_log_reaches_the_operator(qapp, tmp_path, monkeypatch):
     assert window._msg_label.text() == "gamepad LT+RT: autofocus once"
 
 
-def test_scan_plan_preview_and_progress(window):
-    """The Sample Finding live view previews the configured grid and
-    highlights the row the scan is on (the indicator is a schematic, so
-    only its geometry and the row maths matter)."""
-    scan = window._sample_finding
-    plan = scan.live_view._scan_plan
-    assert plan is not None
-    width = scan._grid_w.value()
-    height = scan._grid_h.value()
-    from talos.cv.scan import grid_shape
-    cols, rows = grid_shape(scan._scan_params(),
-                            (scan._fov_x.value(), scan._fov_y.value()))
-    assert (plan.cols, plan.rows) == (cols, rows)
-    assert f"{width:.0f}" in plan.detail
-    assert plan.active_row == -1                    # preview, not running
+def test_the_scan_window_previews_the_plan_it_would_run(window):
+    """The map shows the route the CURRENT fields would walk — the same
+    plan_path() the scanner uses, so a preview cannot promise a grid the
+    run would not visit."""
+    from talos.cv.scan import grid_shape, plan_path
 
-    scan._on_scan_progress(1, cols * rows)          # first waypoint
-    assert scan.live_view._scan_plan.active_row == 0
-    assert scan.live_view._scan_plan.active_col == 0
-    scan._on_scan_progress(cols + 2, cols * rows)   # second row
-    assert scan.live_view._scan_plan.active_row == 1
-    assert scan.live_view._scan_plan.active_col == 1
+    scan = window._scan_window
+    plan = scan.map._plan
+    params = scan._params_for(None)
+    fov = scan._fov()
+    cols, rows = grid_shape(params, fov)
+    assert len(plan.waypoints) == cols * rows
+    assert plan.waypoints == [(w.x_um, w.y_um) for w in plan_path(params, fov)]
+    assert (plan.fov_x_um, plan.fov_y_um) == fov
 
-    # editing the grid re-derives the preview
-    scan._grid_w.setValue(width * 2)
-    scan._refresh_scan_plan()
-    assert scan.live_view._scan_plan.active_row == -1
-    assert scan.live_view._scan_plan.cols >= cols
+    # editing the area re-derives the preview
+    scan._width.setValue(scan._width.value() * 2)
+    scan._refresh_plan()
+    assert len(scan.map._plan.waypoints) > cols * rows
+
+
+def test_scan_progress_and_tiles_reach_the_map(window):
+    """What the scan thread emits must land on the map: the progress bar,
+    and one tile per captured frame at its readback position."""
+    import numpy as np
+
+    from talos.ui.widgets.scan_map import ScanMapTile
+
+    scan = window._scan_window
+    scan._scan_tiles.clear()
+    scan._on_progress(3, 12)
+    assert scan._progress.maximum() == 12
+    assert scan._progress.value() == 3
+    assert "3/12" in scan._status.text()
+
+    thumb = np.full((54, 96, 3), 90, np.uint8)
+    scan._on_tile(0, 1000.0, 2000.0, thumb)
+    scan._on_tile(1, 1500.0, 2000.0, thumb)
+    assert len(scan.map._tiles) == 2
+    assert scan.map._tiles[1].x_um == 1500.0
+    assert scan._scan_tiles[0] == (1000.0, 2000.0)
+    assert "2 tiles" in scan.map._caption
+    # re-stating the SAME plan keeps them (a finished run must not erase
+    # what it captured), but a genuinely new area drops them
+    scan.map.set_plan(scan.map._plan)
+    assert len(scan.map._tiles) == 2
+    scan._width.setValue(scan._width.value() * 2)
+    assert not scan.map._tiles
+
+
+def test_the_scan_window_is_in_the_windows_menu_and_hides(window):
+    """The window is a singleton that HIDES (never destroyed), and Esc still
+    reaches the global STOP ALL."""
+    assert window._scan_action.text() == "Scan"
+    assert window._scan_action.isCheckable()
+    window._scan_action.setChecked(True)
+    assert window._scan_window.isVisible()
+    window._scan_window.close()
+    assert not window._scan_window.isVisible()
+    assert window._scan_action.isChecked() is False
 
 
 def test_settings_applied_refreshes_every_cached_consumer(window):

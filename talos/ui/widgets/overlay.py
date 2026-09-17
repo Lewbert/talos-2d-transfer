@@ -20,8 +20,7 @@ from PySide6.QtGui import QColor, QPainter, QPen
 from talos.cv.af_roi import fit_transform
 from talos.cv.ruler import ruler_spec, tick_label, tick_offsets
 from talos.cv.scale_bar import scale_bar_layout
-from talos.ui import theme
-from talos.ui.theme import DANGER, OK, TEXT, TEXT_DIM, WARN
+from talos.ui.theme import DANGER, TEXT, TEXT_DIM, WARN
 
 PHASE_NAMES = {1: "coarse scan", 2: "fine sweep", 3: "landing",
                4: "coarse pass", 5: "hill climb", 6: "lock-on",
@@ -139,68 +138,6 @@ def draw_scale_bar_q(painter: QPainter, um_per_px: float,
     painter.drawText(_map(spec.text_rect),
                      Qt.AlignmentFlag.AlignHCenter
                      | Qt.AlignmentFlag.AlignVCenter, spec.label)
-    painter.restore()
-
-
-def draw_scan_plan_q(painter: QPainter, plan, frame_shape: tuple,
-                     widget_size: tuple) -> None:
-    """The scan-path indicator: one arrow per grid row (serpentine), the
-    ACTIVE row highlighted, plus the grid size and the current row.
-
-    Deliberately a schematic near the frame's top edge, NOT a grid drawn
-    onto the specimen: the stage↔image sign convention is a mounting
-    assumption that has never been verified on the bench, and a wrongly
-    registered grid would be worse than no grid. It answers "where is the
-    scan going next", which is what the operator needs mid-scan.
-    """
-    if plan is None or frame_shape is None:
-        return
-    scale, off_x, off_y = fit_transform(widget_size, frame_shape)
-    if scale <= 0:
-        return
-    frame_w = frame_shape[1] * scale
-    rows = max(1, int(plan.rows))
-    shown = min(rows, 12)                    # the panel stays compact
-    row_h = 5.0
-    width = min(230.0, max(150.0, frame_w * 0.28))
-    height = 30.0 + shown * (row_h + 2.0) + 12.0
-    x = off_x + (frame_w - width) / 2.0
-    y = off_y + 10.0
-    if x < off_x:
-        x = off_x
-
-    painter.save()
-    painter.setPen(Qt.PenStyle.NoPen)
-    painter.setBrush(QColor(0, 0, 0, 165))
-    painter.drawRoundedRect(QRectF(x, y, width, height), 3, 3)
-
-    font = painter.font()
-    font.setPixelSize(10)
-    painter.setFont(font)
-    painter.setPen(QColor(TEXT_DIM))
-    painter.drawText(QRectF(x + 8, y + 3, width - 16, 12),
-                     Qt.AlignmentFlag.AlignLeft
-                     | Qt.AlignmentFlag.AlignVCenter, plan.detail)
-
-    arrow_x1 = x + 10.0
-    arrow_x2 = x + width - 10.0
-    top = y + 18.0
-    for row in range(shown):
-        cy = top + row * (row_h + 2.0) + row_h / 2.0
-        forward = not (plan.serpentine and row % 2 == 1)
-        painter.setPen(QColor(theme.ACCENT if row == plan.active_row
-                              else TEXT_DIM))
-        painter.drawLine(QPointF(arrow_x1, cy), QPointF(arrow_x2, cy))
-        tip_x = arrow_x2 if forward else arrow_x1
-        back = tip_x - 4.0 if forward else tip_x + 4.0
-        painter.drawLine(QPointF(tip_x, cy), QPointF(back, cy - 2.5))
-        painter.drawLine(QPointF(tip_x, cy), QPointF(back, cy + 2.5))
-
-    status = plan.status_text()
-    painter.setPen(QColor(theme.ACCENT if plan.active_row >= 0 else TEXT_DIM))
-    painter.drawText(QRectF(x + 8, y + height - 14, width - 16, 12),
-                     Qt.AlignmentFlag.AlignLeft
-                     | Qt.AlignmentFlag.AlignVCenter, status)
     painter.restore()
 
 

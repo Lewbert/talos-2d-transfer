@@ -83,8 +83,11 @@ def _params(**kw) -> ScanParams:
 def test_a_scan_captures_a_frame_at_every_waypoint(qapp, rig, tmp_path):
     stage, _camera, slot, _worker = rig
     scanner = GridScanner(stage, LatestFrameSource(slot))
-    tiles: list[tuple[int, object]] = []
-    scanner.sig_tile.connect(lambda i, thumb: tiles.append((i, thumb)))
+    tiles: list = []
+    frames: list = []
+    scanner.sig_tile.connect(
+        lambda i, x, y, thumb: tiles.append((i, x, y, thumb)))
+    scanner.sig_frame.connect(lambda i, x, y, frame: frames.append((i, frame)))
 
     result = scanner.run(_params(width_um=300.0, height_um=200.0), tmp_path,
                          meta={"fov_um": (100.0, 100.0), "objective_id": 2})
@@ -105,9 +108,14 @@ def test_a_scan_captures_a_frame_at_every_waypoint(qapp, rig, tmp_path):
     assert meta["n_frames"] == 6 and meta["n_missing"] == 0
     assert meta["frame_shape"] == [240, 320, 3]
 
-    # the map gets a tile per waypoint, in order, as an RGB thumbnail
-    assert [i for i, _ in tiles] == list(range(6))
-    assert tiles[0][1].shape == (120, 160, 3)
+    # the map gets a tile per waypoint, in order, at its readback position
+    assert [i for i, _x, _y, _t in tiles] == list(range(6))
+    assert tiles[0][3].shape == (120, 160, 3)
+    assert (tiles[0][1], tiles[0][2]) == pytest.approx((0.0, 0.0))
+    assert (tiles[1][1], tiles[1][2]) == pytest.approx((100.0, 0.0))
+    # and the detection feed gets the FULL frame with the same position
+    assert [i for i, _f in frames] == list(range(6))
+    assert frames[0][1].shape == (240, 320, 3)
 
 
 def test_a_stalled_stream_leaves_waypoints_missing(qapp, rig, tmp_path):

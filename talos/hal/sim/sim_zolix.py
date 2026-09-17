@@ -35,6 +35,15 @@ class SimZolixXYRStage(XYRStage):
         self._r = int(config.get("initial_r", 0))
         self._moving = {"x": False, "y": False, "r": False}
         self._done_at: dict[str, float] = {}
+        # A move's start (position, time) so READS can report where the
+        # stage actually is while it travels. Without this the simulated
+        # position jumped to the target the instant a move was commanded,
+        # so anything that waits for the position to settle — the scan's
+        # wait_idle, which is how the real controller is polled — saw a
+        # "settled" axis on a stage that was still moving, and the next
+        # move was refused as busy.
+        self._started_at: dict[str, float] = {}
+        self._start_pos: dict[str, int] = {}
         self._estop = False
         self._limits = {k: False for k in ("x+", "x-", "y+", "y-", "r+", "r-")}
         self._alarm = False
@@ -71,8 +80,27 @@ class SimZolixXYRStage(XYRStage):
 
     def _tick(self) -> None:
         for axis, moving in list(self._moving.items()):
-            if moving and now() >= self._done_at[axis]:
+            if moving is True and now() >= self._done_at.get(axis, 0.0):
                 self._moving[axis] = False
+                self._started_at.pop(axis, None)
+                self._start_pos.pop(axis, None)
+
+    def _position_now(self, axis: str) -> int:
+        """The axis position AT THIS INSTANT: the target once the move has
+        finished, a linear interpolation while it is still travelling."""
+        if self._moving.get(axis) is not True:
+            return int(getattr(self, f"_{axis}"))
+        started = self._started_at.get(axis)
+        done_at = self._done_at.get(axis)
+        if started is None or done_at is None or done_at <= started:
+            return int(getattr(self, f"_{axis}"))
+        fraction = (now() - started) / (done_at - started)
+        if fraction >= 1.0:
+            self._tick()
+            return int(getattr(self, f"_{axis}"))
+        begin = self._start_pos.get(axis, int(getattr(self, f"_{axis}")))
+        span = int(getattr(self, f"_{axis}")) - begin
+        return int(round(begin + span * max(0.0, fraction)))
 
     def _ensure_idle(self) -> None:
         self._tick()
@@ -82,8 +110,11 @@ class SimZolixXYRStage(XYRStage):
             raise EStopError("SimZolix: emergency stop active")
 
     def _start_move(self, axis: str, steps: int, speed_pps: int) -> None:
+        start = now()
         self._moving[axis] = True
-        self._done_at[axis] = now() + self.latency_s + move_duration(steps, speed_pps)
+        self._started_at[axis] = start
+        self._start_pos[axis] = self._position_now(axis)
+        self._done_at[axis] = start + self.latency_s + move_duration(steps, speed_pps)
 
     def move_abs_pulses(self, x: int, y: int, r: int | None = None,
                         speed_pps: int | None = None) -> None:
@@ -105,8 +136,14 @@ class SimZolixXYRStage(XYRStage):
             setattr(self, f"_{axis}", target)
 
     def move_abs_um(self, x_um: float, y_um: float, r_deg: float | None = None,
-                    speed: StageSpeed = StageSpeed.SLOW) -> None:
-        pps = self.fast_speed_pps if speed is StageSpeed.FAST else self.slow_speed_pps
+                    speed: StageSpeed = StageSpeed.SLOW,
+                    speed_pps: int | None = None) -> None:
+        # The explicit speed wins over the SLOW/FAST preset — that is how
+        # the grid scan runs the stage at the ACTIVE OBJECTIVE's scaled
+        # speed (ManagerStageAdapter passes it as the fifth argument, and
+        # the real driver takes it too).
+        pps = speed_pps or (self.fast_speed_pps if speed is StageSpeed.FAST
+                            else self.slow_speed_pps)
         self.move_abs_pulses(
             round(x_um / self.um_per_pulse_xy),
             round(y_um / self.um_per_pulse_xy),
@@ -162,12 +199,15 @@ class SimZolixXYRStage(XYRStage):
         )
 
     def get_position(self) -> StagePosition:
-        self._tick()
+        # Interpolated while moving — a readback that jumped to the target
+        # would make a settled axis indistinguishable from a travelling one.
+        x, y, r = (self._position_now("x"), self._position_now("y"),
+                   self._position_now("r"))
         return StagePosition(
-            x_pulses=self._x, y_pulses=self._y, r_pulses=self._r,
-            x_um=self._x * self.um_per_pulse_xy,
-            y_um=self._y * self.um_per_pulse_xy,
-            r_deg=self._r * self.um_per_pulse_r,
+            x_pulses=x, y_pulses=y, r_pulses=r,
+            x_um=x * self.um_per_pulse_xy,
+            y_um=y * self.um_per_pulse_xy,
+            r_deg=r * self.um_per_pulse_r,
         )
 
     def check_estop(self) -> bool:

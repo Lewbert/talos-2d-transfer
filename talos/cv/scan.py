@@ -243,8 +243,12 @@ class ScanResult:
 
 class GridScanner(QObject):
     sig_progress = Signal(int, int)     # waypoint index, total
-    sig_frame = Signal(object)          # captured frame (np.ndarray)
-    sig_tile = Signal(int, object)      # (index, RGB thumbnail)
+    #: (index, x_um, y_um, frame) — the full captured frame and the readback
+    #: position it was taken at. Both signals carry the position so neither
+    #: depends on the other's delivery order.
+    sig_frame = Signal(int, float, float, object)
+    #: (index, x_um, y_um, thumbnail) — for the scan map.
+    sig_tile = Signal(int, float, float, object)
     sig_done = Signal(object)           # ScanResult
     sig_log = Signal(str)
 
@@ -338,10 +342,12 @@ class GridScanner(QObject):
                     frame_shape = tuple(frame.shape)
                     cv2.imwrite(str(frame_path),
                                 cv2.cvtColor(frame, cv2.COLOR_RGB2BGR))
-                    self.sig_frame.emit(frame)
+                    self.sig_frame.emit(waypoint.index, pos.x_um, pos.y_um,
+                                        frame)
                     thumb = self._thumbnail(frame)
                     if thumb is not None:
-                        self.sig_tile.emit(waypoint.index, thumb)
+                        self.sig_tile.emit(waypoint.index, pos.x_um, pos.y_um,
+                                           thumb)
                     result.frames.append(frame_path)
                 else:
                     # No frame source (or the fetch failed). The row is
