@@ -468,7 +468,7 @@ class SampleFindingWorkspace(QWidget):
         adapter = ManagerStageAdapter(self._manager, stage_cfg,
                                       abort_check=self._scan_abort.is_set)
         params = self._scan_params()
-        scanner = GridScanner(adapter, camera=None)
+        scanner = GridScanner(adapter)
         # Live row/column highlight: a queued connection from the worker
         # thread (the slot runs on the GUI thread).
         scanner.sig_progress.connect(self._on_scan_progress)

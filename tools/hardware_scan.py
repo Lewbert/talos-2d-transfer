@@ -20,6 +20,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from talos.config import Settings  # noqa: E402
+from talos.cv.frame_source import CameraFrameSource  # noqa: E402
 from talos.cv.scan import GridScanner  # noqa: E402
 from talos.hal.base import DeviceError  # noqa: E402
 from talos.hal.devices.camera import camera_chain  # noqa: E402
@@ -36,6 +37,10 @@ def main() -> int:
     parser.add_argument("--overlap", type=float, default=0.10)
     parser.add_argument("--fov-x", type=float, default=768.0)
     parser.add_argument("--fov-y", type=float, default=432.0)
+    parser.add_argument("--settle-ms", type=int, default=200,
+                        help="quiet time between the move and the capture")
+    parser.add_argument("--backlash-um", type=float, default=0.0,
+                        help="play to take up on every move (0 = off)")
     parser.add_argument("--out", type=Path, default=None)
     args = parser.parse_args()
 
@@ -55,6 +60,14 @@ def main() -> int:
     if camera is None:
         print("no camera available — aborting")
         return 1
+    # This tool OWNS the camera (no app, no camera worker running), so it
+    # sets the mode itself: real-time ops run at 1080p — 4K is laggy with
+    # an unstable framerate on the Axiocam 208.
+    try:
+        camera.set_property("resolution", 1)
+        print("camera resolution: 1080p")
+    except Exception as exc:  # noqa: BLE001
+        print(f"resolution default (set failed: {exc})")
 
     stage = make_device("zolix", settings.device("zolix"), sim=False)
     stage.connect()
@@ -63,9 +76,11 @@ def main() -> int:
 
     params = ScanParams(x0_um=pos.x_um, y0_um=pos.y_um,
                         width_um=args.width, height_um=args.height,
-                        overlap=args.overlap, serpentine=True, slow_speed=True)
+                        overlap=args.overlap, serpentine=True, slow_speed=True,
+                        settle_ms=args.settle_ms,
+                        backlash_um=args.backlash_um)
     out_dir = args.out or (get_scan_dir() / "hardware_scan")
-    scanner = GridScanner(stage, camera)
+    scanner = GridScanner(stage, CameraFrameSource(camera))
     box: dict = {}
 
     def worker():

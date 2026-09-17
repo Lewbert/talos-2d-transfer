@@ -6,6 +6,7 @@ import json
 import pytest
 from PySide6.QtWidgets import QApplication
 
+from talos.cv.frame_source import CameraFrameSource
 from talos.cv.scan import GridScanner
 from talos.hal.sim import SimCamera, SimZolixXYRStage
 from talos.models import ScanParams
@@ -58,7 +59,7 @@ def test_run_scan_manifest_and_frames(qapp, tmp_path):
     stage, camera = make_rig()
     params = ScanParams(x0_um=0, y0_um=0, width_um=300, height_um=200,
                         overlap=0.0, serpentine=True)
-    scanner = GridScanner(stage, camera)
+    scanner = GridScanner(stage, CameraFrameSource(camera))
     result = scanner.run(params, tmp_path, meta={"objective_id": 0, "focus_pos": 42,
                                                  "fov_um": (100.0, 100.0)})
     assert not result.aborted, result.message
@@ -85,7 +86,7 @@ def test_scan_without_a_camera_reports_no_frames(qapp, tmp_path):
     stage, _camera = make_rig()
     params = ScanParams(x0_um=0, y0_um=0, width_um=300, height_um=200,
                         overlap=0.0)
-    scanner = GridScanner(stage, camera=None)
+    scanner = GridScanner(stage)
     result = scanner.run(params, tmp_path, meta={"fov_um": (100.0, 100.0)})
     assert len(result.frames) == 0
     assert result.missing == 6
@@ -103,7 +104,7 @@ def test_run_scan_abort_stops_cleanly(qapp, tmp_path):
     stage.slow_speed_pps = 200  # slow moves so the abort lands mid-scan
     params = ScanParams(x0_um=0, y0_um=0, width_um=500, height_um=500,
                         overlap=0.0)
-    scanner = GridScanner(stage, camera)
+    scanner = GridScanner(stage, CameraFrameSource(camera))
 
     import threading
 

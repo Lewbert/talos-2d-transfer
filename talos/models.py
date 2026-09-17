@@ -80,7 +80,15 @@ class FocusStatus:
 
 @dataclass
 class ScanParams:
-    """Grid-scan request, in stage coordinates (µm)."""
+    """Grid-scan request, in stage coordinates (µm).
+
+    ``x0_um/y0_um`` is the FIRST WAYPOINT (the operator jogs there and
+    clicks "scan from here"); the rectangle grows from it by ``width_um``
+    along ``x_dir`` and ``height_um`` along ``y_dir``. ``path`` selects the
+    visit order over the resulting tile grid, ``start_axis`` which axis
+    advances first, and ``serpentine`` whether the rows alternate direction
+    (bi-directional) or all run the same way (uni-directional).
+    """
 
     x0_um: float
     y0_um: float
@@ -90,6 +98,14 @@ class ScanParams:
     serpentine: bool = True
     slow_speed: bool = True
     capture: str = "camera"  # "camera" | "manual"
+    path: str = "serpentine"       # serpentine | spiral | hilbert
+    start_axis: str = "x"          # which axis advances first
+    x_dir: int = 1                 # +1 / -1 — the direction the area grows
+    y_dir: int = 1
+    settle_ms: int = 200           # wait after the move, before the capture
+    backlash_um: float = 0.0       # 0 = off (see cv.scan.backlash_fix)
+    backlash_approach: int = 1     # the side every move finishes from
+    return_to_start: bool = True   # drive back to (x0, y0) when done
 
 
 @dataclass
