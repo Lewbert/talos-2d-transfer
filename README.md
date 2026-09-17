@@ -195,7 +195,9 @@ without a dialog.*
   display is darkened and outlined, so the colours on screen are not the
   sample's.
 - **Samples** — the finds with their stage coordinates, a *go to* that brings
-  one to the crosshair, and the per-scan exports.
+  one to the crosshair, and the per-scan exports. Identification runs on each
+  captured frame on its own, at full resolution; the mosaic is an overview for
+  the eye, and nothing measures from it.
 
 ![The Scan window](docs/images/scan_window.png)
 

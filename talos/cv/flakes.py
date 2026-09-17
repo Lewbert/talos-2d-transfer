@@ -240,11 +240,16 @@ def flake_to_stage(x_px: float, y_px: float, img_shape: tuple[int, ...],
     """Map a pixel position to the stage coordinate it images (µm).
 
     Orthotropic pixel scale (um_per_px_x/y) with the image centre at the
-    stage position. The plan had this upgrade to a measured 2×2 jacobian;
-    the bench says not to bother — the X↔Y anisotropy is negligible and the
-    stage-to-image rotation is extremely small, so the off-diagonal terms
-    would add a calibration step and a matrix inversion for a correction
-    below the noise of everything downstream (2026-09-18).
+    stage position.
+
+    The plan had this upgrade to a measured 2×2 jacobian, and the machinery
+    for one is in the tree (`cv/calibration.py`, `ObjectiveCalibration.
+    jacobian_px_per_um`). The off-diagonal terms — stage↔image rotation and
+    X↔Y anisotropy — are NOT applied, for two reasons that both hold: the
+    bench measured them as negligible, and nothing here needs the last
+    fraction of a micron, because **processing is always per single frame**
+    (see cv/stitch.py — the mosaic is for the eye). Applying them later is
+    a change to this function, not to its callers.
 
     ``flip`` is the camera flip: the frame is rotated 180° about its centre,
     so with the flip on a feature RIGHT of the centre is at a SMALLER stage

@@ -167,11 +167,14 @@ The plan was written before any hardware was touched. These are the places where
 - **Gamepad input moved off the `inputs` package** to raw XInput.
 - **The settings schema is at version 7**, not the planned 2 — each bump is a migration in
   `talos/config.py`, which is also where removed keys are recorded.
-- **The px→µm mapping stayed orthotropic.** The plan had it upgrade to a measured 2×2 jacobian once
-  the calibration wizard existed. The bench settled it the other way: the X↔Y anisotropy is
-  negligible and the stage-to-image rotation is extremely small, so the off-diagonal terms would buy
-  a correction below the noise of everything downstream at the cost of a calibration step and a
-  matrix inversion. The wizard's phase-correlation code stays in the tree as stored knowledge.
+- **The px→µm mapping is orthotropic, and the jacobian upgrade is kept in reserve.** The plan had it
+  upgrade to a measured 2×2 jacobian once the calibration wizard existed. Two things now say "not
+  yet": the bench measured the X↔Y anisotropy as negligible and the stage-to-image rotation as
+  extremely small, and nothing in the application needs the last fraction of a micron — **every
+  measurement is taken from a single frame**, and the mosaic is an overview for the eye, where a
+  small gap is acceptable. The wizard's phase-correlation code and the calibration store's jacobian
+  column stay exactly where they are: if a future upgrade ever needs merged-image accuracy, applying
+  the off-diagonal terms is a change to one function, not to its callers.
 - **Flake identification arrived as a filter chain, not a classifier.** The plan left it open; what
   shipped is a stack of stages the operator switches on and off (colour match, contrast, size,
   sharpness, and so on) whose parameters are judged by eye against a processed live view. It finds

@@ -1,9 +1,20 @@
 """Assemble what a scan captured: a mosaic, and a tile overview.
 
-Both are OVERVIEWS, not the data — the frames in ``frames/`` are the data,
-and they are the only thing a measurement should ever be taken from. A
-mosaic is what makes a scan legible at a glance: the whole visited area in
-one image, at whatever resolution fits.
+Both are OVERVIEWS, not the data. The frames in ``frames/`` are the data, and
+they are the only thing anything measures from: **identification runs per
+single frame, never on a merged image** — merging tens or hundreds of tiles
+is too expensive in compute and memory for what it would buy, and the
+per-frame result is what "go to sample" needs anyway. A mosaic here exists
+so an operator can see at a glance where a scan went and what it covered.
+
+That sets the accuracy bar, and it is a low one: **a small gap or a slightly
+imperfect seam is acceptable** because nothing downstream consumes the
+stitched pixels. So the builder deliberately stays simple — placement by the
+manifest readback positions, overlaps AVERAGED (a stamp would leave a seam,
+a seam is what the overlap exists to avoid) — with no registration, no seam
+blending and no rotation correction. If a future upgrade ever needs the
+mosaic to be measurement-grade, that is when the jacobian work in
+cv/calibration.py comes back into play.
 
 Pure numpy/cv2, no Qt, no camera — unit-testable and usable from a CLI.
 """

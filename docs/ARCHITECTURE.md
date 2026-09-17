@@ -287,6 +287,14 @@ let through. The engine is order-respecting and kind-dispatched (`source` /
 `mask` / `gate` / `merge`), so a new stage is a dataclass and a `RANGES` entry
 — no UI code and no pipeline change.
 
+**It always runs on ONE frame.** A scan's tiles are each identified on their
+own, at full resolution, and the mosaic is never an input: merging tens or
+hundreds of tiles is too expensive in compute and memory for what it would buy,
+and per-frame results are what "go to sample" needs. That is also why the
+mosaic tolerates a small gap or an imperfect seam — nothing measures from it —
+and why the scan's px→µm mapping is orthotropic (see `cv/orientation.py` and
+the jacobian note in `flake_to_stage`).
+
 Three rules the implementation exists to keep: **hue wraps** across the 0/179
 seam (a red target's tolerance is not one-sided), **the preview is honest**
 (the live view processes a downscaled copy, but results come back in the
