@@ -261,6 +261,51 @@ change, on Apply, and (defensively) if the database is unreadable — a corrupt
   `try_set_flip` first) and it is deliberately not a camera-profile key, since
   it is not per-workspace.
 
+## The grid scan and the identification chain
+
+Two pieces of automation share one rule and one shape.
+
+**Capture never touches the camera.** The scan runs on its own thread, and the
+SmartCamApi binding is exclusive and not thread-safe, so a scan that called
+`fetch()` would be reaching into a backend the camera worker owns. Instead it
+reads the shared **frame slot** (`cv/frame_slot.py`) — the same mailbox the
+autofocus controller polls — and its `LatestFrameSource`
+(`cv/frame_source.py`) refuses a frame whose capture timestamp predates the
+settle window. That gate is the point: the manifest records where the stage IS
+(a readback) next to every frame, so a frame taken before the move would
+mislabel the image. A capture that fails returns `None` and the waypoint is
+counted **missing**; nothing is ever filed under a position it did not come
+from. The CLI benches, which own their camera, use `CameraFrameSource` and the
+same gate.
+
+**Identification is a chain of stages** (`cv/identify.py`), not a mode: two
+source stages (colour match, contrast) produce a mask, one cleans it, then
+gates — size in µm², frame edge, boundary sharpness, scale-bar annotation —
+decide what survives, and a merge stage joins fragments. Each stage carries its
+own parameters, switches off independently, and reports how many candidates it
+let through. The engine is order-respecting and kind-dispatched (`source` /
+`mask` / `gate` / `merge`), so a new stage is a dataclass and a `RANGES` entry
+— no UI code and no pipeline change.
+
+Three rules the implementation exists to keep: **hue wraps** across the 0/179
+seam (a red target's tolerance is not one-sided), **the preview is honest**
+(the live view processes a downscaled copy, but results come back in the
+caller's pixels and µm — pixel-unit gates are scaled with it), and **the
+pipeline never sees a half-edited config** (the panel rebuilds the whole config
+per job; the worker never reads a widget).
+
+**The map is drawn in the sample's frame** (`ui/widgets/scan_map.py`): tiles at
+their readback positions, the camera footprint walking across them, the route,
+and a marker per find. No geometry depends on the stage↔image sign convention
+— still the unverified mounting assumption — so the only convention applied is
+the camera flip, to the tile content.
+
+**Nothing here blocks.** Capture runs on the scan thread; identification runs
+on a detection thread fed by a queue (tiles queue — a tile not examined is a
+sample not found; live preview frames drop instead — a preview lagging the
+stream is worse than one that skips). Detection outlives the capture by design,
+so the exports wait for the queue to drain.
+
 ## Testing model
 
 - `tests/unit/` — drivers against scripted fake serial ports, CV maths, settings
@@ -270,7 +315,9 @@ change, on Apply, and (defensively) if the database is unreadable — a corrupt
 - `tests/sim/` — closed-loop simulations marked `slow`: the autofocus
   strategies and the grid scan run against simulated focus curves and stages,
   asserting where they land (within one fine step of the truth) and how they
-  behave on abort, limits and flat scenes.
+  behave on abort, limits and flat scenes. The scan suite feeds the simulated
+  camera into a frame slot exactly as the camera worker does, so the capture
+  path is exercised rather than stubbed.
 - `tools/` — hardware-in-the-loop benches. Not part of the suite (they need
   instruments), but they are the evidence behind most of the constants.
 

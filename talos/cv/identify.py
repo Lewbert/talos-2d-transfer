@@ -168,7 +168,8 @@ class ColourStage(Stage):
     min_value: float = 0.0
 
     NAME = "colour"
-    RANGES = {"tolerance": (0.0, 100.0, 5.0), "min_saturation": (0, 255, 5), "min_value": (0, 255, 5)}
+    RANGES = {"tolerance": (0.0, 100.0, 5.0), "min_saturation": (0, 255, 5),
+              "min_value": (0, 255, 5)}
     LABEL = "Colour match"
     KIND = "source"
 
@@ -223,7 +224,8 @@ class SizeStage(Stage):
     max_area_um2: float = 100000.0
 
     NAME = "size"
-    RANGES = {"min_area_um2": (0.0, 100000.0, 10.0), "max_area_um2": (0.0, 10000000.0, 100.0)}
+    RANGES = {"min_area_um2": (0.0, 100000.0, 10.0),
+              "max_area_um2": (0.0, 10000000.0, 100.0)}
     LABEL = "Size"
     KIND = "gate"
 

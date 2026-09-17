@@ -44,8 +44,9 @@ and gain are never modified by any autofocus path.
 
 **Automation.** Bounded autofocus (window clamped inside the soft limits, readback verification after
 every move) and backlash auto-calibration (≤ 0.4 µm repeatability) are the established parts. The
-serpentine grid scan and flake detection exist and run, but are still under development — see
-*Known limitations*.
+grid scan and the sample-identification chain exist and run — capture, tile manifest, mosaic and
+candidate list — but have not yet been through a bench campaign, so they are still under
+development; see *Known limitations*.
 
 **Hardware abstraction.** Every instrument sits behind an abstract interface with a factory registry
 and a worker thread of its own, and each has a simulated counterpart, so `python -m talos --sim` runs
@@ -154,17 +155,49 @@ rotates the image and never touches an axis.
   foldable right-panel groups for Capture / Camera / Autofocus / Temperature.
   Manual jogging is on the gamepad (the recommended route), the keyboard, or in
   the Stage Control window.
-- **Sample Finding** — flake detection on the current frame, bounded autofocus,
-  and the grid scan (serpentine waypoints and a manifest; frame capture is still
-  being completed), with a scan-path panel that previews the grid and highlights
-  the row the run is on. This workspace is the one under active development.
+- **Sample Finding** — the largest live view, with the scan camera profile
+  (manual exposure and white balance: identification needs a stable image, not
+  an auto-adjusted one). The scan panels have moved to their own window while
+  they are being developed, and will come back here once they have bench miles.
+
+**Windows ▸ Scan** is the console for the two new functions. It has its own
+live view with a floating **Live / Processed / Pick** bar (the processed view is
+a display choice — the stream, the autofocus and the scan never wait on it), the
+**scan map**, and three columns:
+
+- **Scan** — the area (a corner-sized rectangle grown from wherever the stage is
+  now, in the direction you pick), the path (serpentine bi- or uni-directional,
+  or a spiral/Hilbert order marked experimental), overlap, speed, settle time
+  and an optional backlash take-up. The field of view comes from the objective's
+  calibration, so the tile count follows the objective rather than a typed-in
+  guess. *Scan from here* starts from the current position and returns there
+  when it finishes.
+- **Identification** — a filter chain: colour match (pick a colour off the
+  image or type a hex) and/or contrast produce a mask, then clean-up, size,
+  frame-edge, sharpness, scale-bar and merge stages decide what survives. Every
+  stage switches off independently, and the chain reports what each one let
+  through (`Colour match 812 → Size 12 → Sharpness 2`).
+- **Samples** — the finds with their stage coordinates, a *go to* that brings
+  one to the crosshair, and the per-scan exports.
+
+![The Scan window](docs/images/scan_window.png)
+
+*The Scan console after a 3 × 3 scan in simulation: the live view with its
+Live/Processed/Pick bar, the map with the captured tiles, the planned area, the
+route and the camera footprint, then the scan, the identification chain and the
+results. Every scan also writes `manifest.csv`, the raw frames, and optionally a
+mosaic, an overview sheet and the candidate list.*
+
+A scan owns the axes while it runs: manual jogging is refused (the mode badge in
+the status bar says so), and **STOP ALL** — Esc or LB+RB — stops the stage and
+aborts the run.
 
 Menus: **File**, **Edit → Preferences** (`Ctrl+,`), **Display** (overlays, scale
-bar), **Windows** (AF Detail, Stage Control, Log), **Help**. Display toggles the
-live-view overlays: scale bar (with optional burn-in for snapshots), the AF
-status pill, crosshairs (inverse-video, so they stay visible on any image) with
-an optional calibrated tick reticle, a µm tick ruler on all four frame edges,
-and the scan path.
+bar), **Windows** (Scan, AF Detail, Stage Control, Log), **Help**. Display
+toggles the live-view overlays: scale bar (with optional burn-in for snapshots),
+the AF status pill, crosshairs (inverse-video, so they stay visible on any
+image) with an optional calibrated tick reticle, and a µm tick ruler on all four
+frame edges.
 
 Two Preferences points worth knowing:
 
@@ -258,7 +291,7 @@ talos/
   models.py                   shared dataclasses (positions, statuses, jobs)
   calibration_store.py        SQLite objective/calibration table
   hal/                        drivers, proxies (one worker thread per device), sim devices
-  cv/                         autofocus strategies, flake detection, grid scan, metrics
+  cv/                         autofocus strategies, grid scan, identification chain, metrics
   input/                      gamepad + keyboard/UI resolver (all motion gating)
   ui/                         windows, dialogs, widgets, workspaces, theme
 tests/                        unit / sim / integration suites
@@ -296,12 +329,13 @@ python -m pytest                  # everything — the real-time simulations dom
 python -m pytest -m "not slow"    # the fast subset (order of a minute)
 ```
 
-About 800 tests: unit tests for the drivers/CV/settings/UI wiring, integration
-tests for the job/stop/reconnect machinery, and closed-loop **simulations**
-(marked `slow`) that run the autofocus strategies and the grid scan against
-simulated focus curves and check that they land on the true focus position.
-Hardware-in-the-loop checks live in `tools/` rather than in the suite, so the
-suite needs no instruments.
+About 890 tests (800 fast + 89 `slow`): unit tests for the drivers/CV/settings/UI
+wiring, integration tests for the job/stop/reconnect machinery, and closed-loop
+**simulations** that run the autofocus strategies and the grid scan against
+simulated hardware — the scan suite captures frames through the same frame slot
+the application uses, and checks that a stalled camera leaves waypoints missing
+rather than misfiled. Hardware-in-the-loop checks live in `tools/` rather than in
+the suite, so the suite needs no instruments.
 
 The bench tools that matter most day to day:
 
@@ -326,10 +360,14 @@ The frozen build excludes the unwired camera backends. Drop an icon at
 
 ## Known limitations / deferred
 
-- The grid scan captures frames only if a camera is wired to it; today's
-  workspace leaves the camera detached, and missing frames are counted and
-  reported rather than faked (the manifest keeps an empty frame column).
-- Flake identification (as opposed to detection) is not implemented yet.
+- The scan and the identification chain have not been run on hardware yet. They
+  are exercised end to end in simulation (the scan captures frames through the
+  application's own frame slot), but a bench campaign is still owed — the
+  capture path, the tile geometry and the colour thresholds all need it.
+- Sample identification is deliberately simple: what the operator points at,
+  matched by colour and filtered by size, sharpness and shape. It does not judge
+  thickness, and on a wafer whose flakes share a hue with the substrate it will
+  find substrate.
 - GenTL / Micro-Manager / MCam / DirectShow camera backends stay in the tree as
   stored knowledge but are unwired: they need a USB3-Vision driver this bench
   does not have, or are far too slow (see

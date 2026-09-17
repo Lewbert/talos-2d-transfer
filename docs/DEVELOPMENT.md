@@ -55,7 +55,7 @@ confirmation flag. **Read-only unless stated otherwise.**
 | `focus_firmware_probe.py` | Raw-serial verification of the focus firmware's parser (junk, torn lines, floods) — the post-flash check | Yes |
 | `sigmakoki_latency.py --yes` | Continuous-jog ack/latency drill for the transfer stage; prints the raw first reply line | Yes |
 | `scan_manager_bench.py --yes` | The grid scan driven through the real manager, plus a mid-flight abort drill | Yes |
-| `hardware_scan.py` | Standalone serpentine scan (builds its own driver — superseded by the above for app-accurate runs) | Yes |
+| `hardware_scan.py` | Standalone serpentine scan (builds its own driver and camera — the app-accurate route is `scan_manager_bench.py`, or the Scan window itself). Takes `--settle-ms` and `--backlash-um` | Yes |
 | `autofocus_hardware.py` | Autofocus and backlash calibration from the command line — the tuning companion to the AF panel | Yes |
 | `af_bench3.py` | The current adaptive-v3 autofocus bench, including the σ measurement and the v2/v3 comparison | Yes |
 | `af_abort_bench.py` | Input-abort and stay-on-failure drill through the full stack (manager + service + proxies) | Yes |

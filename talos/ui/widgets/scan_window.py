@@ -440,7 +440,6 @@ class ScanWindow(QDialog):
         card.setObjectName("card")
         layout = QVBoxLayout(card)
         layout.setSpacing(6)
-        self._identify_layout = layout
         self._identify_host = QWidget()
         self._identify_host_layout = QVBoxLayout(self._identify_host)
         self._identify_host_layout.setContentsMargins(0, 0, 0, 0)
@@ -1007,6 +1006,9 @@ class ScanWindow(QDialog):
         self._scan_worker = _Worker(lambda: self._run_scan(position), self)
         self._scan_worker.sig_log.connect(self._log)
         self._scan_worker.sig_done.connect(self._on_scan_done)
+        # a finished QThread deletes itself; the window keeps no graveyard
+        # of one object per scan
+        self._scan_worker.finished.connect(self._scan_worker.deleteLater)
         self._scan_worker.start()
 
     def _run_scan(self, origin: StagePosition):
@@ -1169,6 +1171,7 @@ class ScanWindow(QDialog):
                                       self)
         self._export_worker.sig_done.connect(self._on_export_done)
         self._export_worker.sig_log.connect(self._log)
+        self._export_worker.finished.connect(self._export_worker.deleteLater)
         self._export_worker.start()
 
     @staticmethod

@@ -144,6 +144,8 @@ Each milestone was also an experiment on the hardware. The lessons, in the order
 | Camera | GenTL, Micro-Manager and MCam all enumerate zero devices on this machine — the 208 is libusb0-bound and only the vendor API works. The unwired backends stay in the tree as stored knowledge |
 | Grid scan | The absolute-move opcode is a silent no-op (see above), and a CRC-glitched frame produced a wild move. Both are now enforced in the driver: composed relative moves, and distance readback before every motion |
 | Edge + flake finding | The wafer-vs-stage colour contrast is strong enough for a colour-threshold mask plus a rectangle fit — circle fitting was the wrong model for a hand-cut wafer |
+| Grid scan, second pass | The scan could never capture a frame because it held a camera the camera worker owned. Reading the shared frame slot removed the camera from the scan entirely — and the same pass found that STOP ALL stopped the motion without stopping the RUN, because the abort flag was only ever set by the Abort button |
+| Sample identification | A colour threshold is easy; making it behave is not. Hue has to wrap across the 0/179 seam, saturation needs its own floor or a red band matches every grey, and a sharpness gate tuned on colour-matched contours silently rejects every contrast-matched one |
 | Calibration | The Labscope objective table imports cleanly but its units need resolving at import time; TALOS stores its own provenance for every calibration entry |
 | Gamepad | Python's `inputs` package hangs on this machine; the gamepad is read as raw XInput through `ctypes` instead, which also removed a dependency |
 | Packaging | The frozen build hung on two bugs (gamepad initialisation and proxy shutdown) that never appear in a source run — worth freezing early, not at the end |
@@ -163,10 +165,17 @@ The plan was written before any hardware was touched. These are the places where
   closed-loop simulation suites.
 - **Absolute Zolix moves became composed relative moves**, with readback verification.
 - **Gamepad input moved off the `inputs` package** to raw XInput.
-- **The settings schema is at version 6**, not the planned 2 — each bump is a migration in
+- **The settings schema is at version 7**, not the planned 2 — each bump is a migration in
   `talos/config.py`, which is also where removed keys are recorded.
-- **Flake *identification* was never started.** Flake *detection* works; anything that would tell
-  you which flake is worth transferring is still open.
+- **Flake identification arrived as a filter chain, not a classifier.** The plan left it open; what
+  shipped is a stack of stages the operator switches on and off (colour match, contrast, size,
+  sharpness, and so on) whose parameters are judged by eye against a processed live view. It finds
+  what the operator points at and does not rank material — a deliberate limit, and the one most
+  likely to be revisited.
+- **The scan captures through the frame slot, not a camera handle.** The first implementation took a
+  camera object, which cannot work in an application where the camera belongs to its own worker
+  thread; the mailbox the autofocus controller already used turned out to be the right seam, and the
+  scan now has no camera dependency at all.
 
 ## Risks, and which ones materialised
 
