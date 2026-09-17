@@ -37,7 +37,7 @@ stage itself (`LABEL`, `RANGES`), so a new stage needs no UI code.
 | # | Stage | Kind | Default | What it does |
 |---|---|---|---|---|
 | 1 | **Colour match** | source | **on** | Pixels within a tolerance of the picked colour |
-| 2 | **Contrast** | source | off | Illumination-flattened contrast, Otsu-thresholded |
+| 2 | **Contrast** | source | off | Illumination-flattened contrast, Otsu-thresholded — see [Contrast, and what it is not for](#contrast-and-what-it-is-not-for) |
 | 3 | **Clean up** | mask | **on** | Open then close: removes speckle, joins broken edges |
 | 4 | **Size** | gate | **on** | Area in µm², min and max |
 | 5 | **Frame edge** | gate | **on** | Rejects blobs touching the field of view's edge |
@@ -76,6 +76,39 @@ must yield the same µm at 1.0 and 0.5 scale.
 
 The pipeline also never sees a half-edited configuration: the panel rebuilds the
 whole config per job and hands it over, so the worker never reads a widget.
+
+## Contrast, and what it is not for
+
+The contrast source divides the frame by a heavily blurred copy of itself and
+thresholds the *relative* deviation with Otsu (see `flatten_contrast`). Two
+things about that are worth knowing before it is switched on:
+
+**Otsu splits the histogram in two; it does not select "the most distinct".**
+It needs no absolute contrast level, so a frame containing only faint objects
+still gets segmented — but the split is driven by the bulk of the histogram, so
+one thick flake in the same frame can become the dominant foreground mode and
+push a faint one below the threshold. The mask then contains what is
+conspicuous and misses what is wanted, which is the opposite of a useful prior.
+
+**The floor, not the threshold, is what fails on thin samples.** The flattening
+division leaves a residual (blur mismatch, sensor noise, texture), and a
+monolayer's deviation from the substrate can sit at that residual. When it does,
+Otsu is splitting texture rather than material, and no threshold choice fixes it.
+
+So: **for monolayers and few-layer samples, use the colour source.** Layer count
+shifts the interference colour in hue and saturation at fixed illumination, so a
+picked colour with a narrow tolerance discriminates on the property that
+actually tracks thickness, rather than on "how different from the background" —
+which measures thickness, focus and illumination together. Contrast is the tool
+for *what is here at all* (dust, tape residue, the wafer edge, a target whose
+colour is unknown), and it is off by default for that reason.
+
+A caveat for whoever tunes it: `blur_sigma` is in pixels of whatever frame it is
+given, so the preview's 50 % scale makes the same sigma cover **twice** the
+physical distance it covers in a full-resolution tile. The sharpness threshold is
+normalised for exactly this reason; the blur sigma is not, so a value tuned on
+the live preview is not the same filter on a captured tile. (Noted 2026-09-18;
+no test covers it, and the stage is off by default.)
 
 ## Configuration
 
@@ -139,6 +172,8 @@ counts — each stage's `(in, out)` says whether it is doing anything useful.
    scores in the tens, while a contrast-matched one wanders through the noise
    around the object and scores in single digits, so a threshold tuned on one
    source will silently reject everything from the other.
+   If the target is a monolayer or few-layer flake, skip this ladder's contrast
+   branch entirely and tune the colour source instead (see the section above).
 6. **Merge**: raise the gap when one flake arrives as several boxes.
 
 The unit tests build synthetic frames with known truth (a blob of a known colour
