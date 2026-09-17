@@ -179,13 +179,14 @@ without a dialog.*
 - **Scan** — the area (a corner-sized rectangle grown from wherever the stage is
   now, in the direction you pick), the path (serpentine bi- or uni-directional,
   or a spiral/Hilbert order marked experimental), overlap, speed, settle time
-  and an optional backlash take-up. The field of view is taken from the
-  objective's calibration data — the values set in Preferences → Objectives &
-  Calibration — so the tile count follows the objective rather than a typed-in
-  guess, and the window names the source (`measured in TALOS`, `imported from
-  Labscope`, `estimated from the sensor pitch`) so an estimate is never mistaken
-  for a measurement. *Scan from here* starts from the current position and
-  returns there when it finishes.
+  and an optional backlash take-up. The field of view is **read from the
+  objective's calibration** — the values set in Preferences → Objectives &
+  Calibration — with no manual override, so the tile count follows the objective
+  and there is only one number for the two to disagree about. The window states
+  where that number came from (`measured in TALOS`, `imported from Labscope`) and
+  says so plainly if it is only an estimate, pointing at where to fix it.
+  *Scan from here* starts from the current position and returns there when it
+  finishes.
 - **Identification** — a filter chain: colour match (use the dropper on the
   live view, or type a hex) and/or contrast produce a mask, then clean-up, size,
   frame-edge, sharpness, scale-bar and merge stages decide what survives. Every

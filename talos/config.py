@@ -56,7 +56,12 @@ _DEAD_KEYS: dict[str, set[str]] = {
     # one was an unregistered schematic). scan.min_flake_area_um2 moved into
     # the identification chain, which owns every detection threshold.
     "display": {"scan_path"},
-    "scan": {"min_flake_area_um2", "default_dir"},
+    # v7 continued: the scan's field of view is DERIVED from the active
+    # objective's calibration now, so the manual override (and the flag that
+    # chose between them) is gone — two sources for one number can disagree,
+    # and the calibration is the one the rest of the app measures with.
+    "scan": {"min_flake_area_um2", "default_dir", "fov_auto", "fov_x_um",
+             "fov_y_um"},
 }
 
 

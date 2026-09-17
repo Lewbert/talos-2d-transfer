@@ -35,10 +35,17 @@ configured in Preferences → Objectives & Calibration) is expressed in µm per
 
 is resolution-independent — the same field of view whether the frame in hand is
 a 1080p live frame or a 4K snapshot. On this bench the 5× is a measured
-0.3557 µm/px, giving 1366 × 768 µm. The window prints the source beside the
-number (`measured in TALOS` / `imported from Labscope` / `estimated from the
-sensor pitch`) so an estimate is never mistaken for a measurement, and the
-manual FOV fields are a fallback for an uncalibrated bench, not the normal path.
+0.3557 µm/px, giving 1366 × 768 µm.
+
+There is no manual field-of-view field, deliberately: two sources for one number
+is a way for them to disagree, and the calibration is the one the rest of the
+application measures with (µm² on every candidate, the scale bar, *go to
+sample*). So the window **shows** the number and where it came from — `measured
+in TALOS`, `imported from Labscope` — and if it can only estimate (no
+calibration row for that objective), it says so and points at Preferences →
+Objectives & Calibration, where correcting it fixes everything else too. The
+field of view and the planned grid follow the objective selector live, so
+changing objectives updates the tile count rather than leaving a stale plan.
 
 The grid is `ceil(area / pitch)` tiles per axis, anchored at the **first
 waypoint** — the operator jogs to a feature they can see and presses *Scan from

@@ -77,8 +77,7 @@ from talos.ui.widgets.scan_map import (ScanMapMarker, ScanMapPlan,
 SCAN_KEYS = ("width_um", "height_um", "overlap", "serpentine", "slow_speed",
              "path", "start_axis", "x_dir", "y_dir", "settle_ms",
              "backlash_um", "backlash_approach", "return_to_start",
-             "fov_auto", "fov_x_um", "fov_y_um", "export_mosaic",
-             "export_candidates", "export_overview")
+             "export_mosaic", "export_candidates", "export_overview")
 
 _DIR_CHOICES = ((1, "+"), (-1, "−"))
 _AXIS_CHOICES = (("x", "X first"), ("y", "Y first"))
@@ -297,17 +296,22 @@ class ScanWindow(QDialog):
         form.addRow(self._return_home)
         layout.addWidget(area)
 
+        # The field of view is READ from the objective's calibration, with no
+        # manual override: two sources for the same number is a way for them
+        # to disagree, and the calibration is the one the rest of the
+        # application measures with (µm², "go to sample", the scale bar).
+        # Correcting it belongs in Preferences → Objectives & Calibration,
+        # where it also fixes everything else.
         fov = QFrame()
         fov.setObjectName("card")
         fov_layout = QVBoxLayout(fov)
-        self._fov_auto = QCheckBox("Field of view from the objective")
-        fov_layout.addWidget(self._fov_auto)
-        fov_form = QFormLayout()
-        self._fov_x = self._spin(1.0, 100000.0, 700.0, " µm")
-        self._fov_y = self._spin(1.0, 100000.0, 390.0, " µm")
-        fov_form.addRow("FOV X", self._fov_x)
-        fov_form.addRow("FOV Y", self._fov_y)
-        fov_layout.addLayout(fov_form)
+        fov_layout.setContentsMargins(6, 6, 6, 6)
+        fov_layout.setSpacing(2)
+        self._fov_value = QLabel("")
+        bold = self._fov_value.font()
+        bold.setBold(True)
+        self._fov_value.setFont(bold)
+        fov_layout.addWidget(self._fov_value)
         self._fov_note = QLabel("")
         self._fov_note.setObjectName("dim")
         self._fov_note.setWordWrap(True)
@@ -321,8 +325,7 @@ class ScanWindow(QDialog):
 
         # any change re-plans the map and persists
         for widget in (self._width, self._height, self._overlap,
-                       self._fov_x, self._fov_y, self._settle,
-                       self._backlash):
+                       self._settle, self._backlash):
             widget.valueChanged.connect(self._refresh_plan)
             widget.editingFinished.connect(self._persist)
         for widget in (self._x_dir, self._y_dir, self._path, self._serpentine,
@@ -330,7 +333,6 @@ class ScanWindow(QDialog):
             widget.currentIndexChanged.connect(self._refresh_plan)
             widget.currentIndexChanged.connect(self._persist)
         self._return_home.toggled.connect(self._persist)
-        self._fov_auto.toggled.connect(self._on_fov_auto)
         self._preview.currentIndexChanged.connect(self._persist)
         return box
 
@@ -641,9 +643,10 @@ class ScanWindow(QDialog):
         self._backlash.setValue(float(saved.get("backlash_um") or 0.0))
         self._select(self._approach, int(saved.get("backlash_approach") or 1))
         self._return_home.setChecked(bool(saved.get("return_to_start", True)))
-        self._fov_auto.setChecked(bool(saved.get("fov_auto", True)))
-        self._fov_x.setValue(float(saved.get("fov_x_um") or 700.0))
-        self._fov_y.setValue(float(saved.get("fov_y_um") or 390.0))
+        # The objective can be changed while this window is open, and the
+        # field of view and the plan are derived from it — so they follow.
+        self._state.sig_objective_changed.connect(
+            lambda _index: self._refresh_fov_label())
         self._export_mosaic.setChecked(bool(saved.get("export_mosaic", True)))
         self._export_candidates.setChecked(
             bool(saved.get("export_candidates", True)))
@@ -674,9 +677,6 @@ class ScanWindow(QDialog):
             "backlash_um": self._backlash.value(),
             "backlash_approach": self._approach.currentData(),
             "return_to_start": self._return_home.isChecked(),
-            "fov_auto": self._fov_auto.isChecked(),
-            "fov_x_um": self._fov_x.value(),
-            "fov_y_um": self._fov_y.value(),
             "export_mosaic": self._export_mosaic.isChecked(),
             "export_candidates": self._export_candidates.isChecked(),
             "export_overview": self._export_overview.isChecked(),
@@ -732,42 +732,40 @@ class ScanWindow(QDialog):
                                     um_per_px_y=um_per_px, source="pixel_pitch")
 
     def _fov(self) -> tuple[float, float]:
-        """The field of view in µm. From the calibration it is
-        resolution-independent (the stored value is per 4K-sensor pixel),
-        which is why a 1080p live frame and a 4K snapshot tile the same."""
-        if self._fov_auto.isChecked():
-            calib = self._canonical_calibration()
-            um_x = calib.um_per_px_x or 0.0
-            um_y = calib.um_per_px_y or 0.0
-            if um_x > 0 and um_y > 0:
-                return (um_x * SENSOR_WIDTH_PX, um_y * SENSOR_HEIGHT_PX)
-        return (self._fov_x.value(), self._fov_y.value())
+        """The field of view in µm, from the ACTIVE OBJECTIVE's calibration.
 
-    def _on_fov_auto(self) -> None:
-        """Switching the FOV source re-labels and re-plans; the manual
-        values stay where they were, so the operator can flip back."""
-        self._refresh_fov_label()
-        self._persist()
+        Resolution-independent by construction: the stored value is µm per
+        4K-sensor pixel, so a 1080p live frame and a 4K snapshot tile the
+        same. Always derived, never entered — see the FOV card's comment."""
+        calib = self._canonical_calibration()
+        um_x = calib.um_per_px_x or 0.0
+        um_y = calib.um_per_px_y or 0.0
+        if um_x > 0 and um_y > 0:
+            return (um_x * SENSOR_WIDTH_PX, um_y * SENSOR_HEIGHT_PX)
+        # No calibration at all: a nominal field for the nosepiece, so the
+        # preview still draws something and the note can say what it is.
+        mag = 5.0 * (2.0 ** int(self._state.objective))
+        um_per_px = 2.0 / mag
+        return (um_per_px * SENSOR_WIDTH_PX, um_per_px * SENSOR_HEIGHT_PX)
 
     def _refresh_fov_label(self) -> None:
-        auto = self._fov_auto.isChecked()
-        self._fov_x.setEnabled(not auto)
-        self._fov_y.setEnabled(not auto)
+        """Show the field of view and, more importantly, WHERE IT CAME
+        FROM: an estimate must never pass for a measurement."""
+        calib = self._canonical_calibration()
+        source = getattr(calib, "source", "none")
         fov_x, fov_y = self._fov()
-        if auto:
-            calib = self._canonical_calibration()
-            source = getattr(calib, "source", "none")
-            note = {"talos_measured": "measured in TALOS",
-                    "labscope": "imported from Labscope",
-                    "none": "NO CALIBRATION — the values below are guesses",
-                    "pixel_pitch": "estimated from the sensor pitch"}.get(
-                        source, source)
+        self._fov_value.setText(f"{fov_x:.0f} × {fov_y:.0f} µm")
+        if source in ("talos_measured", "labscope"):
+            where = ("measured in TALOS" if source == "talos_measured"
+                     else "imported from Labscope")
             self._fov_note.setText(
-                f"{fov_x:.0f} × {fov_y:.0f} µm from the objective "
-                f"({note}).")
+                f"From the objective ({where}), {calib.um_per_px_x:.4f} "
+                f"µm/px.")
         else:
             self._fov_note.setText(
-                f"{fov_x:.0f} × {fov_y:.0f} µm — entered by hand.")
+                "ESTIMATED from the sensor pitch — set the real value in "
+                "Preferences → Objectives & Calibration, where it also fixes "
+                "the scale bar and the measured areas.")
         self._refresh_plan()
 
     def _params_for(self, origin: StagePosition | None) -> ScanParams:
@@ -1102,13 +1100,9 @@ class ScanWindow(QDialog):
         for widget in (self._width, self._height, self._overlap, self._path,
                        self._serpentine, self._start_axis, self._x_dir,
                        self._y_dir, self._speed, self._settle,
-                       self._backlash, self._approach, self._return_home,
-                       self._fov_auto, self._fov_x, self._fov_y):
+                       self._backlash, self._approach, self._return_home):
             widget.setEnabled(not busy)
-        if busy:
-            self._fov_x.setEnabled(False)      # the FOV is locked mid-run
-            self._fov_y.setEnabled(False)
-        else:
+        if not busy:
             self._refresh_fov_label()
 
     # ------------------------------------------------------------------
