@@ -46,6 +46,103 @@ class FlakeDetector(Protocol):
              cfg: FlakeConfig) -> list[FlakeCandidate]: ...
 
 
+# ----------------------------------------------------------------------
+# Shared pieces, used by this detector AND by the stage pipeline in
+# ``talos.cv.identify`` — one implementation of each, so a fix (or a
+# behaviour change) cannot land in only one of the two paths.
+# ----------------------------------------------------------------------
+
+def flatten_contrast(img: np.ndarray,
+                     blur_sigma: float) -> tuple[np.ndarray, np.ndarray]:
+    """(contrast_u8, binary mask): the illumination-flattened contrast image
+    and its Otsu threshold. One blur pass serves both — the classic detector
+    scores candidates on the contrast, the stage pipeline only needs the mask.
+    """
+    gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY).astype(np.float32)
+    background = cv2.GaussianBlur(gray, (0, 0), float(blur_sigma))
+    flat = gray / (background + 1e-6)
+    contrast = np.abs(flat - 1.0)
+    contrast_u8 = np.clip(contrast * 255.0, 0, 255).astype(np.uint8)
+    _, binary = cv2.threshold(contrast_u8, 0, 255,
+                              cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    return contrast_u8, binary
+
+
+def merge_fragments(candidates: list[FlakeCandidate], gap_px: float,
+                    um2_per_px2: float) -> list[FlakeCandidate]:
+    """Union boxes within ``gap_px`` — a single flake often fragments into
+    several adjacent contrast blobs."""
+    if len(candidates) <= 1:
+        return list(candidates)
+    merged: list[FlakeCandidate] = []
+    rest = sorted(candidates, key=lambda c: c.area_px2, reverse=True)
+    while rest:
+        base = rest.pop(0)
+        bx, by, bw, bh = base.bbox
+        absorbed = [base]
+        i = 0
+        while i < len(rest):
+            other = rest[i]
+            ox, oy, ow, oh = other.bbox
+            gap_x = max(bx, ox) - min(bx + bw, ox + ow)
+            gap_y = max(by, oy) - min(by + bh, oy + oh)
+            if gap_x <= gap_px and gap_y <= gap_px:
+                absorbed.append(other)
+                rest.pop(i)
+                # Grow the union box.
+                nx0, ny0 = min(bx, ox), min(by, oy)
+                nx1, ny1 = max(bx + bw, ox + ow), max(by + bh, oy + oh)
+                bx, by, bw, bh = nx0, ny0, nx1 - nx0, ny1 - ny0
+            else:
+                i += 1
+        if len(absorbed) == 1:
+            merged.append(base)
+        else:
+            total_area = sum(c.area_px2 for c in absorbed)
+            merged.append(FlakeCandidate(
+                x_px=bx + bw / 2.0, y_px=by + bh / 2.0,
+                area_px2=total_area,
+                area_um2=total_area * um2_per_px2,
+                score=max(c.score for c in absorbed),
+                bbox=(bx, by, bw, bh)))
+    return merged
+
+
+def region_mean_hsv(hsv: np.ndarray, contour) -> tuple[float, float] | None:
+    """Mean (hue, saturation) inside a contour, or None when it is empty."""
+    mask = np.zeros(hsv.shape[:2], np.uint8)
+    cv2.drawContours(mask, [contour], -1, 255, -1)
+    hue = hsv[:, :, 0][mask > 0]
+    sat = hsv[:, :, 1][mask > 0]
+    if hue.size == 0:
+        return None
+    return float(np.mean(hue)), float(np.mean(sat))
+
+
+def is_red_annotation(hsv: np.ndarray, contour, sat_min: float) -> bool:
+    """Pure-red overlays (scale bar text/bar) — mean hue at the red
+    extremes with strong saturation. Wrap-around band: <10 or >168."""
+    mean = region_mean_hsv(hsv, contour)
+    if mean is None:
+        return False
+    mean_hue, mean_sat = mean
+    if mean_sat < sat_min:
+        return False
+    return mean_hue < 10 or mean_hue > 168
+
+
+def is_rejected_colour(hsv: np.ndarray, contour, cfg: FlakeConfig) -> bool:
+    """Reject strongly yellow-green regions (organic residue) while keeping
+    the purple/blue interference fringes of real flakes."""
+    mean = region_mean_hsv(hsv, contour)
+    if mean is None:
+        return False
+    mean_hue, mean_sat = mean
+    if mean_sat > cfg.reject_sat_max:
+        return False
+    return cfg.reject_hue_lo <= mean_hue <= cfg.reject_hue_hi
+
+
 class ClassicFlakeDetector:
     """Threshold + contour + size + color gate (see module docstring)."""
 
@@ -53,13 +150,8 @@ class ClassicFlakeDetector:
              cfg: FlakeConfig) -> list[FlakeCandidate]:
         h, w = img.shape[:2]
         gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY).astype(np.float32)
-        # Illumination flatten: divide by a heavily blurred copy.
-        background = cv2.GaussianBlur(gray, (0, 0), cfg.blur_sigma)
-        flat = gray / (background + 1e-6)
-        contrast = np.abs(flat - 1.0)
-        contrast_u8 = np.clip(contrast * 255.0, 0, 255).astype(np.uint8)
-        _, binary = cv2.threshold(contrast_u8, 0, 255,
-                                  cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        # Illumination flatten: contrast against a heavily blurred copy.
+        contrast_u8, binary = flatten_contrast(img, cfg.blur_sigma)
         kernel = np.ones((cfg.morph_kernel, cfg.morph_kernel), np.uint8)
         binary = cv2.morphologyEx(binary, cv2.MORPH_OPEN, kernel)
         binary = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel)
@@ -125,79 +217,20 @@ class ClassicFlakeDetector:
         merged.sort(key=lambda c: c.score, reverse=True)
         return merged
 
-    @staticmethod
-    def _merge_fragments(candidates: list[FlakeCandidate],
-                         cfg: FlakeConfig,
-                         um2_per_px2: float) -> list[FlakeCandidate]:
-        """Union boxes within ``merge_gap_px`` — a single flake often
-        fragments into several adjacent contrast blobs."""
-        if len(candidates) <= 1:
-            return list(candidates)
-        merged: list[FlakeCandidate] = []
-        rest = sorted(candidates, key=lambda c: c.area_px2, reverse=True)
-        while rest:
-            base = rest.pop(0)
-            bx, by, bw, bh = base.bbox
-            absorbed = [base]
-            i = 0
-            while i < len(rest):
-                other = rest[i]
-                ox, oy, ow, oh = other.bbox
-                gap_x = max(bx, ox) - min(bx + bw, ox + ow)
-                gap_y = max(by, oy) - min(by + bh, oy + oh)
-                if gap_x <= cfg.merge_gap_px and gap_y <= cfg.merge_gap_px:
-                    absorbed.append(other)
-                    rest.pop(i)
-                    # Grow the union box.
-                    nx0, ny0 = min(bx, ox), min(by, oy)
-                    nx1, ny1 = max(bx + bw, ox + ow), max(by + bh, oy + oh)
-                    bx, by, bw, bh = nx0, ny0, nx1 - nx0, ny1 - ny0
-                else:
-                    i += 1
-            if len(absorbed) == 1:
-                merged.append(base)
-            else:
-                total_area = sum(c.area_px2 for c in absorbed)
-                merged.append(FlakeCandidate(
-                    x_px=bx + bw / 2.0, y_px=by + bh / 2.0,
-                    area_px2=total_area,
-                    area_um2=total_area * um2_per_px2,
-                    score=max(c.score for c in absorbed),
-                    bbox=(bx, by, bw, bh)))
-        return merged
+    # The shared implementations live at module level (see above) so the
+    # stage pipeline in talos.cv.identify cannot drift from this detector.
 
     @staticmethod
-    def _is_red_annotation(hsv: np.ndarray, contour, cfg: FlakeConfig) -> bool:
-        """Pure-red overlays (scale bar text/bar) — mean hue at the red
-        extremes with strong saturation."""
-        mask = np.zeros(hsv.shape[:2], np.uint8)
-        cv2.drawContours(mask, [contour], -1, 255, -1)
-        hue = hsv[:, :, 0][mask > 0]
-        sat = hsv[:, :, 1][mask > 0]
-        if hue.size == 0:
-            return False
-        mean_hue = float(np.mean(hue))
-        mean_sat = float(np.mean(sat))
-        if mean_sat < cfg.annotation_sat_min:
-            return False
-        # Wrap-around red band: hue < 10 or > 168 (OpenCV 0-179).
-        return mean_hue < 10 or mean_hue > 168
+    def _merge_fragments(candidates, cfg, um2_per_px2):
+        return merge_fragments(candidates, cfg.merge_gap_px, um2_per_px2)
 
     @staticmethod
-    def _rejected_color(hsv: np.ndarray, contour, cfg: FlakeConfig) -> bool:
-        """Reject strongly yellow-green regions (organic residue) while
-        keeping the purple/blue interference fringes of real flakes."""
-        mask = np.zeros(hsv.shape[:2], np.uint8)
-        cv2.drawContours(mask, [contour], -1, 255, -1)
-        hue = hsv[:, :, 0][mask > 0]
-        sat = hsv[:, :, 1][mask > 0]
-        if hue.size == 0:
-            return False
-        mean_hue = float(np.mean(hue))
-        mean_sat = float(np.mean(sat))
-        if mean_sat > cfg.reject_sat_max:
-            return False
-        return cfg.reject_hue_lo <= mean_hue <= cfg.reject_hue_hi
+    def _is_red_annotation(hsv, contour, cfg):
+        return is_red_annotation(hsv, contour, cfg.annotation_sat_min)
+
+    @staticmethod
+    def _rejected_color(hsv, contour, cfg):
+        return is_rejected_colour(hsv, contour, cfg)
 
 
 def flake_to_stage(x_px: float, y_px: float, img_shape: tuple[int, ...],
@@ -217,7 +250,9 @@ def flake_to_stage(x_px: float, y_px: float, img_shape: tuple[int, ...],
 
 
 __all__ = ["FlakeConfig", "FlakeDetector", "ClassicFlakeDetector",
-           "find_flakes", "flake_to_stage"]
+           "find_flakes", "flake_to_stage", "flatten_contrast",
+           "merge_fragments", "region_mean_hsv", "is_red_annotation",
+           "is_rejected_colour"]
 
 
 def find_flakes(img: np.ndarray, calib: ObjectiveCalibration,
