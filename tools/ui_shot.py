@@ -93,6 +93,15 @@ def main() -> int:
 
     tag = f"_{args.size[0]}x{args.size[1]}" if args.size else "_1080p"
 
+    # Point the output folders somewhere neutral BEFORE any grab: these
+    # images are published, and the default path is under the operator's
+    # home directory. The Narrative workspace's field elides it by luck of
+    # its width; the scan panel's does not.
+    app.settings.section("capture")["dir"] = "D:/data/TALOS/snapshots"
+    app.settings.section("scan")["dir"] = "D:/data/TALOS/scans"
+    window._navigation.capture_group._dir.setText("D:/data/TALOS/snapshots")
+    window._sample_finding.scan_panel._dir.setText("D:/data/TALOS/scans")
+
     # The AF measurement region: a deliberately off-centre box so the
     # overlay style (dashed outline, "AF ROI" tag, no fill) is visible and
     # the ROI numbers in both settings instances are non-default.

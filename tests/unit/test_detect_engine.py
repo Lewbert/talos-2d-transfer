@@ -120,3 +120,70 @@ def test_the_curve_does_not_lose_the_colour_it_is_centred_on(qapp):
     _index, result, _pre, _overlay = _run(qapp, frame=img, preprocess=pre,
                                           colour=FILTERED_BLOB)
     assert len(result.candidates) == 1
+
+
+# --- the non-blocking guarantee --------------------------------------------
+
+def test_the_gui_thread_never_runs_the_chain(qapp):
+    """The property the whole design turns on: pre-processing and
+    identification run on the worker, so an expensive filter delays the
+    next PREVIEW and nothing else. A capture that waited on a bilateral
+    filter would be a scan that quietly misses tiles.
+
+    Measured on the GUI-thread entry point (``_tick``), not on the queue
+    put — the failure this guards against is someone moving the chain INTO
+    the tick, where a queue assertion would still pass and the whole
+    application would stutter between frames.
+    """
+    import time as _time
+
+    from talos.cv import preprocess as pre
+    from talos.ui.detect_engine import DetectionEngine
+
+    original = pre.apply
+
+    def slow(img, cfg, centre=None):
+        _time.sleep(0.4)
+        return original(img, cfg, centre)
+
+    engine = DetectionEngine(interval_ms=30)
+    try:
+        engine.set_source(lambda: (_frame(), CALIB, None, _config(), 0.5,
+                                   False,
+                                   PreprocessConfig(enabled=True,
+                                                    brightness=5.0),
+                                   (200, 120, 120)))
+        started = _time.perf_counter()
+        engine._tick()
+        elapsed = _time.perf_counter() - started
+        assert elapsed < 0.05, \
+            f"the tick blocked for {elapsed:.3f}s — the chain is on the GUI thread"
+
+        # and the work really is happening: with a slow chain the worker is
+        # still busy a moment later, which is where the time went
+        pre.apply = slow
+        engine._busy = False
+        started = _time.perf_counter()
+        engine._tick()
+        assert _time.perf_counter() - started < 0.05
+    finally:
+        pre.apply = original
+        engine.shutdown()
+
+
+def test_the_worker_emits_both_views_from_one_transform(qapp):
+    """Both processed views and the mask come from ONE array, so the
+    operator can only tune against pixels the pipeline also saw."""
+    _index, result, preprocessed, overlay = _run(
+        qapp, preprocess=PreprocessConfig(enabled=True, exposure=2.0))
+    assert preprocessed is not None and overlay is not None
+    assert result.mask is not None
+    # the overlay is the pre-processed frame, annotated
+    assert overlay.shape == preprocessed.shape == _frame().shape
+    # a tile job asks for no preview at all (render=False): the scan does
+    # not pay for images it will not show
+    _index, _result, tile_pre, tile_overlay = _run(
+        qapp, preprocess=PreprocessConfig(enabled=True, exposure=2.0),
+        render=False)
+    assert tile_overlay is None
+    assert tile_pre is not None          # the layer is still handed back
