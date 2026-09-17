@@ -282,10 +282,26 @@ class MainWindow(QMainWindow):
         self._scan_action.setCheckable(True)
         self._scan_action.toggled.connect(self._scan_window.setVisible)
         self._scan_window.set_toggle_action(self._scan_action)
+        # ONE live view for the whole application: the Sample Finding tab's.
+        # The scan console hands it the processed overlay and borrows it for
+        # the colour dropper (which samples the ORIGINAL frame either way).
+        self._scan_window.sig_processed_frame.connect(
+            self._sample_finding.set_processed_frame)
+        self._sample_finding.sig_processed_view.connect(
+            self._scan_window.set_preview_wanted)
+        self._scan_window.sig_pick_requested.connect(self._arm_colour_pick)
+        self._sample_finding.live_view.sig_frame_clicked.connect(
+            self._scan_window.on_pick)
 
         help_menu = menu_bar.addMenu("&Help")
         about_action = help_menu.addAction("&About TALOS")
         about_action.triggered.connect(self._on_about)
+
+    def _arm_colour_pick(self) -> None:
+        """The dropper works on the live view, so show it: the Sample
+        Finding tab is where the stream is."""
+        self._tabs.setCurrentWidget(self._sample_finding)
+        self._sample_finding.live_view.set_pick_mode(True)
 
     def _build_display_menu(self, menu) -> None:
         """Display → live-view overlays (persisted to display.*).
@@ -432,9 +448,6 @@ class MainWindow(QMainWindow):
         second = getattr(self._sample_finding, "live_view", None)
         if second is not None:
             views.append(second)
-        scan = getattr(self, "_scan_window", None)
-        if scan is not None:
-            views.append(scan.live_view)
         return views
 
     # ------------------------------------------------------------------

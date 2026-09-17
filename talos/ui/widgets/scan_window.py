@@ -1,9 +1,13 @@
 """ScanWindow: the grid scan and the sample-identification chain, in one
 place, until they are proven enough to fold back into the workspace.
 
-Layout is the workflow: the live view (with its Live/Processed/Pick bar)
-and the scan map on top, then the three columns that decide what happens —
-the scan, the identification chain, and what was found.
+The window has a MAP, not a live view. The camera stream belongs to the
+Sample Finding tab, which shows it once with a Live/Processed switch over
+it — driving that one view beats a second copy of the same pixels, and it
+keeps the picture the operator judges in the same place whatever the scan
+console is doing. This window computes the processed frame and hands it
+over (`sig_processed_frame`), and asks the tab to arm the colour dropper
+when the operator wants to pick (`sig_pick_requested`).
 
 Contracts it inherits from the other detail windows: Esc hides it AND
 still issues the global STOP ALL (the MainWindow's shortcut cannot fire
@@ -35,7 +39,6 @@ import numpy as np
 from PySide6.QtCore import QThread, Qt, Signal
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
-    QButtonGroup,
     QCheckBox,
     QColorDialog,
     QComboBox,
@@ -43,7 +46,6 @@ from PySide6.QtWidgets import (
     QDoubleSpinBox,
     QFormLayout,
     QFrame,
-    QGraphicsOpacityEffect,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -70,7 +72,6 @@ from talos.models import (FlakeCandidate, ObjectiveCalibration, ScanParams,
 from talos.ui.detect_engine import DetectionEngine
 from talos.ui.widgets.scan_map import (ScanMapMarker, ScanMapPlan,
                                        ScanMapTile, ScanMapWidget)
-from talos.ui.widgets.live_view import LiveViewWidget
 
 #: Settings keys the window owns (all under the "scan" section).
 SCAN_KEYS = ("width_um", "height_um", "overlap", "serpentine", "slow_speed",
@@ -151,49 +152,14 @@ class _Worker(QThread):
             self.sig_done.emit(None)
 
 
-class _HoverBar(QFrame):
-    """The Live / Processed / Pick buttons floating over the live view.
-
-    Translucent until the pointer is on it — it must be reachable without
-    covering the image the operator is judging."""
-
-    def __init__(self, parent: QWidget):
-        super().__init__(parent)
-        self.setObjectName("hoverbar")
-        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
-        layout = QHBoxLayout(self)
-        layout.setContentsMargins(6, 3, 6, 3)
-        layout.setSpacing(4)
-        self.live_btn = QPushButton("Live")
-        self.processed_btn = QPushButton("Processed")
-        self.pick_btn = QPushButton("Pick colour")
-        self.group = QButtonGroup(self)
-        self.group.setExclusive(True)
-        for button in (self.live_btn, self.processed_btn):
-            button.setCheckable(True)
-            button.setObjectName("hoverbar_btn")
-            self.group.addButton(button)
-            layout.addWidget(button)
-        self.pick_btn.setObjectName("hoverbar_btn")
-        layout.addWidget(self.pick_btn)
-        self.live_btn.setChecked(True)
-        self._effect = QGraphicsOpacityEffect(self)
-        self._effect.setOpacity(0.6)
-        self.setGraphicsEffect(self._effect)
-
-    def enterEvent(self, event) -> None:  # noqa: N802
-        self._effect.setOpacity(1.0)
-        super().enterEvent(event)
-
-    def leaveEvent(self, event) -> None:  # noqa: N802
-        self._effect.setOpacity(0.6)
-        super().leaveEvent(event)
-
-
 class ScanWindow(QDialog):
     """The scan console: plan, run, watch, and what it found."""
 
     sig_settings_changed = Signal()
+    #: The processed frame (or None) for the Sample Finding live view.
+    sig_processed_frame = Signal(object)
+    #: The operator wants the colour dropper armed on the live view.
+    sig_pick_requested = Signal()
 
     def __init__(self, manager, settings, state, calibration_context=None,
                  input_system=None, autofocus_service=None,
@@ -219,6 +185,7 @@ class ScanWindow(QDialog):
         self._pending_export: dict | None = None
         self._export_worker: _Worker | None = None
         self._live_candidates: list[FlakeCandidate] = []
+        self._preview_wanted = False
 
         self._engine = DetectionEngine(parent=self)
         self._engine.sig_result.connect(self._on_detected)
@@ -242,29 +209,11 @@ class ScanWindow(QDialog):
         outer = QSplitter(Qt.Orientation.Vertical)
         top = QSplitter(Qt.Orientation.Horizontal)
 
-        view = QWidget()
-        view_layout = QVBoxLayout(view)
-        view_layout.setContentsMargins(0, 0, 0, 0)
-        self.live_view = LiveViewWidget()
-        self.live_view.setMinimumSize(360, 240)
-        self.live_view.sig_frame_clicked.connect(self._on_pick)
-        view_layout.addWidget(self.live_view)
-        self._bar = _HoverBar(self.live_view)
-        self._bar.live_btn.toggled.connect(
-            lambda on: on and self.live_view.set_view_mode("live"))
-        self._bar.processed_btn.toggled.connect(
-            lambda on: on and self.live_view.set_view_mode("processed"))
-        self._bar.pick_btn.clicked.connect(self._arm_pick)
-        self._bar.raise_()
-        # the bar follows the live view's OWN resizes (splitter drags), not
-        # just the window's
-        self.live_view.installEventFilter(self)
-        top.addWidget(view)
-
+        # The MAP takes the whole top row: this window has no live view of
+        # its own. It drives the Sample Finding tab's — one stream, one
+        # place to look, and the Live/Processed switch lives there.
         self.map = ScanMapWidget()
         top.addWidget(self.map)
-        top.setStretchFactor(0, 3)
-        top.setStretchFactor(1, 2)
         outer.addWidget(top)
 
         bottom = QSplitter(Qt.Orientation.Horizontal)
@@ -503,12 +452,19 @@ class ScanWindow(QDialog):
                 edit.setMaxLength(7)
                 swatch = QLabel()
                 swatch.setFixedSize(18, 18)
-                pick = QPushButton("Pick")
+                pick = QPushButton("Dropper")
                 pick.setObjectName("compact")
+                pick.setToolTip("Click the live view to sample a colour "
+                                "from the camera frame")
+                eyedrop = QPushButton("…")
+                eyedrop.setObjectName("compact")
+                eyedrop.setFixedWidth(24)
+                eyedrop.setToolTip("Choose the colour from a dialog")
                 row_layout.addWidget(edit, 1)
                 row_layout.addWidget(swatch)
                 row_layout.addWidget(pick)
-                editors[name] = ("hex", edit, swatch, pick)
+                row_layout.addWidget(eyedrop)
+                editors[name] = ("hex", edit, swatch, pick, eyedrop)
                 form.addRow("Colour", row)
             elif isinstance(value, bool):
                 check = QCheckBox()
@@ -551,10 +507,12 @@ class ScanWindow(QDialog):
             self._on_identify_changed()
 
         if "hex_color" in editors:
-            _kind, edit, _swatch, pick = editors["hex_color"]
+            _kind, edit, _swatch, pick, eyedrop = editors["hex_color"]
             refresh_swatch()
             edit.editingFinished.connect(on_changed)
-            pick.clicked.connect(lambda: self._pick_colour_from_dialog(stage))
+            pick.clicked.connect(self._arm_pick)
+            eyedrop.clicked.connect(
+                lambda: self._pick_colour_from_dialog(stage))
         enable.toggled.connect(on_changed)
         for name, spec in editors.items():
             if spec[0] == "num":
@@ -727,20 +685,23 @@ class ScanWindow(QDialog):
         self._settings.save()
         self.sig_settings_changed.emit()
 
+    def _camera_flip(self) -> bool:
+        """The camera flip, which decides how the image axes sit relative
+        to the stage — the map, the mosaic and the px→µm mapping all follow
+        it (cv/orientation.py)."""
+        return bool(self._settings.device("camera").get("flip", True))
+
     def refresh_settings(self) -> None:
-        """Re-read the camera flip (the map draws tiles the way the live
-        view shows them) and re-plan."""
-        self.map.set_flip_tiles(
-            bool(self._settings.device("camera").get("flip", True)))
+        """Re-read what the panel derives from settings and re-plan."""
+        self.map.set_flip(self._camera_flip())
         self._refresh_fov_label()
 
     def on_camera_flip_changed(self) -> None:
         """The flip rotates every frame 180°: tiles already placed on the
         map, and any sample centroid computed from them, belong to the old
         orientation — "go to" would command a mirrored move."""
-        self.refresh_settings()
         self._live_candidates = []
-        self.live_view.set_processed_frame(None)
+        self.sig_processed_frame.emit(None)
         if self._scan_tiles:
             self.map.clear_tiles()
             self._scan_tiles.clear()
@@ -855,7 +816,6 @@ class ScanWindow(QDialog):
         keeps its own reference: the picker and the live detection both
         need the pixel data, and neither may block the stream."""
         self._latest_frame = frame
-        self.live_view.show_frame(frame)
 
     def update_telem(self, key: str, payload: dict) -> None:
         if key != "zolix" or not payload:
@@ -885,7 +845,8 @@ class ScanWindow(QDialog):
         if frame is None:
             return None
         return (frame, self._live_calibration(), self._stage_position(),
-                self._identify_config(), float(self._preview.currentData()))
+                self._identify_config(), float(self._preview.currentData()),
+                self._camera_flip())
 
     def _on_detected(self, index: int, result, preview) -> None:
         if result is None:
@@ -893,7 +854,7 @@ class ScanWindow(QDialog):
         if index < 0:                       # the live feed
             self._live_candidates = list(result.candidates)
             if preview is not None:
-                self.live_view.set_processed_frame(preview)
+                self.sig_processed_frame.emit(preview)
             self._counts.setText(result.summary)
             if self._job is None and not self._scan_hits:
                 self._show_candidates(self._live_candidates, "live view")
@@ -946,10 +907,19 @@ class ScanWindow(QDialog):
     # --- the dropper -----------------------------------------------------
 
     def _arm_pick(self) -> None:
-        self.live_view.set_pick_mode(True)
-        self._set_status("Click the image to sample a colour")
+        """Ask for the dropper on the SAMPLE FINDING live view — the only
+        one there is."""
+        self.sig_pick_requested.emit()
+        self._set_status("Click the live view to sample a colour")
 
-    def _on_pick(self, x_px: int, y_px: int) -> None:
+    def on_pick(self, x_px: int, y_px: int) -> None:
+        """A click on the live view, in FRAME pixels.
+
+        The colour comes from the ORIGINAL frame, never from what is on
+        screen: in processed mode the display is darkened outside the match
+        and outlined, so sampling it would return a colour the sample does
+        not have.
+        """
         frame = self._latest_frame
         if frame is None:
             return
@@ -1074,7 +1044,7 @@ class ScanWindow(QDialog):
         self._engine.submit_tile(
             index, frame, self._live_calibration(),
             StagePosition(x_um=x_um, y_um=y_um, r_deg=0.0),
-            self._identify_config(), scale=1.0)
+            self._identify_config(), scale=1.0, flip=self._camera_flip())
 
     def _on_scan_done(self, payload) -> None:
         if self._state.mode == "SCAN":
@@ -1163,6 +1133,7 @@ class ScanWindow(QDialog):
         payload["hits"] = {index: list(items)
                            for index, items in self._scan_hits.items()}
         payload["tiles"] = dict(self._scan_tiles)
+        payload["flip"] = self._camera_flip()
         payload["exports"] = {
             "mosaic": self._export_mosaic.isChecked(),
             "candidates": self._export_candidates.isChecked(),
@@ -1221,7 +1192,8 @@ class ScanWindow(QDialog):
                 x_um, y_um = tiles.get(index, (0.0, 0.0))
                 mosaic_tiles.append(
                     (x_um, y_um, cv2.cvtColor(image, cv2.COLOR_BGR2RGB)))
-            mosaic = build_mosaic(mosaic_tiles, payload["fov"])
+            mosaic = build_mosaic(mosaic_tiles, payload["fov"],
+                                  flip=payload.get("flip", False))
             if mosaic is not None:
                 path = out_dir / "mosaic.png"
                 cv2.imwrite(str(path), cv2.cvtColor(mosaic,
@@ -1297,34 +1269,32 @@ class ScanWindow(QDialog):
     def set_toggle_action(self, action) -> None:
         self._toggle_action = action
 
+    def set_preview_wanted(self, wanted: bool) -> None:
+        """The Sample Finding tab is showing the processed view: it wants
+        the overlay even while this window is hidden. The live preview runs
+        while EITHER consumer is interested."""
+        self._preview_wanted = bool(wanted)
+        self._update_preview()
+
+    def _update_preview(self) -> None:
+        self._engine.set_live(self._preview_wanted or self.isVisible())
+
     def _hide_and_uncheck(self) -> None:
-        self._engine.set_live(False)
         self.hide()
         if self._toggle_action is not None:
             self._toggle_action.setChecked(False)
 
     def showEvent(self, event) -> None:  # noqa: N802
         super().showEvent(event)
-        self._place_bar()
         self.refresh_settings()
         self._refresh_plan()
-        self._engine.set_live(True)
-
-    def eventFilter(self, obj, event):  # noqa: N802
-        if obj is self.live_view and event.type() == event.Type.Resize:
-            self._place_bar()
-        return super().eventFilter(obj, event)
-
-    def _place_bar(self) -> None:
-        """Keep the Live/Processed/Pick bar at the top of the image."""
-        hint = self._bar.sizeHint()
-        x = max(8, (self.live_view.width() - hint.width()) // 2)
-        self._bar.setGeometry(x, 8, hint.width(), hint.height())
-        self._bar.raise_()
+        self._update_preview()
 
     def hideEvent(self, event) -> None:  # noqa: N802
-        self._engine.set_live(False)      # a hidden window burns no CPU
         super().hideEvent(event)
+        # a hidden window burns no CPU — unless the tab still shows the
+        # processed overlay it is fed from here
+        self._update_preview()
 
     def reject(self) -> None:  # Esc
         # The window hides, but Esc stays the global STOP ALL — the main

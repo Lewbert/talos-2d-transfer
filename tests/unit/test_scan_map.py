@@ -114,6 +114,37 @@ def test_tiles_are_placed_at_their_readback_position(qapp):
     assert set(widget._images) == {0, 1}
 
 
+def test_the_map_follows_the_camera_flip(qapp):
+    """The map is drawn in the sample frame AS THE FRAMES SHOW IT: with the
+    flip on the whole layout mirrors, so a tile taken further along +X is
+    drawn further along −x. Without that the operator sees a map whose
+    orientation disagrees with the live view beside it (and a mosaic whose
+    tiles land twice — the bug this mirrors).
+    """
+    widget = ScanMapWidget()
+    widget.resize(800, 400)
+    widget.set_plan(_plan())
+
+    def drawn(x_um, y_um):
+        """Where the map draws a stage coordinate (the drawing rule)."""
+        return widget._to_widget(*widget._at(x_um, y_um))
+
+    widget.set_flip(False)
+    right_of_start = drawn(3000.0, 0.0).x() > drawn(0.0, 0.0).x()
+    widget.set_flip(True)
+    left_of_start = drawn(3000.0, 0.0).x() < drawn(0.0, 0.0).x()
+    assert right_of_start and left_of_start, \
+        "a stage +X offset must change sides with the flip"
+
+    # the tile, the marker and the footprint all mirror together
+    widget.set_markers([ScanMapMarker(x_um=3000.0, y_um=0.0, label="1")])
+    assert widget._marker_at(drawn(3000.0, 0.0)) == 0
+
+    # and the planned area keeps its size, only its side of the origin
+    x0, y0, x1, y1 = plan_bounds(widget._effective_plan())
+    assert (x1 - x0, y1 - y0) == pytest.approx((5000.0, 2500.0))
+
+
 def test_a_marker_can_be_hit_and_selected(qapp):
     widget = ScanMapWidget()
     widget.resize(800, 400)

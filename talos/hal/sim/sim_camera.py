@@ -1,6 +1,15 @@
 """Simulated camera: synthesizes a scene with a bright flake-like blob on
 a textured background, optional defocus blur, and a moving target.
 
+With ``wafer: True`` it images a WAFER instead: a large synthetic sample
+that the stage carries, so the scene genuinely moves with the stage. That
+is what makes a scan's stitching checkable — a static scene renders the
+same picture at every waypoint, and a mosaic built from it looks correct
+even when the tiles are placed backwards or mirrored. The wafer's
+illumination ramps and its feature field are functions of WAFER
+coordinates, so a correct mosaic is continuous and a wrong one is visibly
+doubled.
+
 Used for closed-loop autofocus/scan tests and UI development.
 """
 
@@ -14,6 +23,15 @@ import cv2
 import numpy as np
 
 from talos.hal.base import Camera
+from talos.hal.sim import bench
+
+#: The wafer's features, in µm from the wafer origin: (x, y, radius, rgb).
+#: The magenta beacon is unique — a test can find it in a mosaic and check
+#: where it landed. The rest is a field dense enough that any tile the scan
+#: visits contains several features.
+_WAFER_BEACON = (0.0, 0.0, 150.0, (255, 0, 255))
+_WAFER_PITCH_UM = 500.0
+_WAFER_FIELD_UM = 3000.0
 
 
 class SimCamera(Camera):
@@ -30,6 +48,13 @@ class SimCamera(Camera):
         self.target_x = float(config.get("target_x", self.width / 2))
         self.target_y = float(config.get("target_y", self.height / 2))
         self.target_radius = float(config.get("target_radius", 30.0))
+        # The wafer mode: a sample that moves with the stage (see the module
+        # docstring). Off unless asked for, so every closed-loop suite keeps
+        # the scene it was calibrated against.
+        self.wafer = bool(config.get("wafer", False))
+        self.wafer_um_per_px = float(config.get("wafer_um_per_px", 0.0)) \
+            or (float(config.get("wafer_fov_um", 1400.0)) / max(1, self.width))
+        self._wafer_features = self._build_wafer_features()
         self._props: dict[str, Any] = {
             "exposure_us": int(config.get("exposure_us", 5000)),
             "gain": float(config.get("gain", 1.0)),
@@ -103,8 +128,63 @@ class SimCamera(Camera):
             self._base_scenes[(h, w)] = cached
         return cached
 
+    @staticmethod
+    def _build_wafer_features() -> list[tuple[float, float, float, tuple]]:
+        """The wafer's features in µm: a beacon plus a colour field."""
+        features = [_WAFER_BEACON]
+        palette = ((70, 90, 210), (90, 200, 120), (210, 150, 60),
+                   (150, 110, 200), (60, 170, 200))
+        steps = int(_WAFER_FIELD_UM / _WAFER_PITCH_UM) + 1
+        for ix in range(-steps, steps + 1):
+            for iy in range(-steps, steps + 1):
+                if (ix, iy) == (0, 0):
+                    continue
+                colour = palette[(ix * 7 + iy * 3) % len(palette)]
+                features.append((ix * _WAFER_PITCH_UM, iy * _WAFER_PITCH_UM,
+                                 70.0, colour))
+        return features
+
+    def _wafer_scene(self, h: int, w: int) -> np.ndarray:
+        """The frame the wafer shows at the CURRENT stage position.
+
+        Everything is a function of wafer coordinates: the illumination
+        ramps and the feature field both pan with the stage, so two tiles
+        that overlap agree in the overlap — which is what makes a wrong
+        mosaic visible (and testable) instead of looking plausible.
+        """
+        x_um, y_um = bench.get_xy()
+        spp = self.wafer_um_per_px
+        left = x_um - (w * spp) / 2.0
+        top = y_um - (h * spp) / 2.0
+        xs = left + np.arange(w) * spp
+        ys = top + np.arange(h) * spp
+        # illumination ramps in WAFER coordinates (a smooth, non-repeating
+        # pattern over the few mm a scan covers)
+        base = (128.0
+                + 26.0 * np.sin(xs / 2200.0 * 2.0 * np.pi)[None, :]
+                + 20.0 * np.cos(ys / 1700.0 * 2.0 * np.pi)[:, None])
+        img = np.empty((h, w, 3), np.uint8)
+        img[:, :, 0] = np.clip(base, 0, 255).astype(np.uint8)
+        img[:, :, 1] = np.clip(base * 0.96, 0, 255).astype(np.uint8)
+        img[:, :, 2] = np.clip(base * 1.04, 0, 255).astype(np.uint8)
+        for fx, fy, radius_um, colour in self._wafer_features:
+            cx = int(round((fx - left) / spp))
+            cy = int(round((fy - top) / spp))
+            r = max(1, int(round(radius_um / spp)))
+            if -r <= cx < w + r and -r <= cy < h + r:
+                cv2.circle(img, (cx, cy), r, colour, -1)
+        return img
+
     def _render_scene(self) -> np.ndarray:
         h, w = self.height, self.width
+        if self.wafer:
+            img = self._wafer_scene(h, w)
+            if self.blur_sigma > 0:
+                k = max(1, int(self.blur_sigma) * 2 + 1)
+                img = cv2.GaussianBlur(img, (k, k), self.blur_sigma)
+            if self.noise > 0:
+                img = self._add_noise(img)
+            return img
         # The caller owns the returned array, so hand out a fresh copy.
         img = self._base_scene(h, w).copy()
         # Moving target: bright disc, sharpest when blur_sigma == 0.

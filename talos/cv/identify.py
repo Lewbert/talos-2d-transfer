@@ -379,9 +379,25 @@ class IdentifyConfig:
 
 
 @dataclass
+class Region:
+    """One blob the sources found, and whether it survived the chain.
+
+    The processed view draws these: the operator needs to see not only what
+    passed but what DIDN'T, because "why is this flake missing" is answered
+    by the dim outline sitting on it. Rectangles are not drawn — a box round
+    a shapeless blob says less than the blob's own outline.
+    """
+
+    contour: np.ndarray
+    passed: bool = True
+
+
+@dataclass
 class IdentifyResult:
     candidates: list[FlakeCandidate] = field(default_factory=list)
     mask: np.ndarray | None = None            # full-frame size, uint8
+    #: Every source region with its verdict (see Region).
+    regions: list = field(default_factory=list)
     #: (label, in, out) per enabled stage, in pipeline order.
     counts: list = field(default_factory=list)
     scale: float = 1.0
@@ -406,6 +422,8 @@ class _Ctx:
         self._hsv = None
         self._grad = None
         self._contours: dict[int, Any] = {}
+        self._regions: list = []          # (candidate id, contour)
+        self._failed: set[int] = set()
 
     @property
     def hsv(self) -> np.ndarray:
@@ -423,10 +441,28 @@ class _Ctx:
         return self._grad
 
     def attach_contour(self, cand: FlakeCandidate, contour) -> None:
-        self._contours[id(cand)] = contour
+        """Keyed by id AND holding the candidate: a dropped candidate is
+        only referenced from here, so without the reference its id could be
+        recycled by the next object allocated — and a later lookup would
+        hand back somebody else's contour."""
+        self._contours[id(cand)] = (cand, contour)
 
     def contour_for(self, cand: FlakeCandidate):
-        return self._contours.get(id(cand))
+        entry = self._contours.get(id(cand))
+        return entry[1] if entry is not None else None
+
+    def attach_region(self, cand: FlakeCandidate, contour) -> None:
+        """Record the blob and the candidate that stands for it, so a gate
+        that drops the candidate can mark the blob as failed — the
+        processed view draws both verdicts."""
+        self._regions.append((id(cand), contour))
+
+    def mark_failed(self, cand: FlakeCandidate) -> None:
+        self._failed.add(id(cand))
+
+    def regions(self) -> list:
+        return [Region(contour=contour, passed=key not in self._failed)
+                for key, contour in self._regions]
 
     def edge_strength(self, cand: FlakeCandidate) -> float:
         """Mean gradient magnitude on the candidate's own boundary.
@@ -472,6 +508,7 @@ def _candidates_from_mask(mask: np.ndarray, ctx: _Ctx) -> list[FlakeCandidate]:
             area_um2=area_px2 * ctx.um2_per_px2,   # physical: scale-free
             bbox=tuple(int(v) for v in cv2.boundingRect(contour)))
         ctx.attach_contour(cand, contour)
+        ctx.attach_region(cand, contour)
         out.append(cand)
     return out
 
@@ -486,13 +523,16 @@ class IdentifyPipeline:
             calib: ObjectiveCalibration | None = None,
             config: IdentifyConfig | None = None,
             stage_pos: StagePosition | None = None,
-            scale: float = 1.0) -> IdentifyResult:
+            scale: float = 1.0,
+            flip: bool = False) -> IdentifyResult:
         """Identify samples in ``img`` (RGB uint8).
 
         ``scale`` < 1 processes a downscaled copy (the live preview) while
         every result comes back in FULL-frame pixels and µm. ``stage_pos``
         (the position the frame was taken at) additionally fills each
-        candidate's ``x_um``/``y_um`` through the px→stage mapping.
+        candidate's ``x_um``/``y_um`` through the px→stage mapping, which
+        needs ``flip`` (the camera flip — it decides which way the image
+        axes point relative to the stage).
         """
         config = config or self.config
         scale = float(scale)
@@ -532,21 +572,43 @@ class IdentifyPipeline:
                 if stage.KIND == "merge":
                     candidates = stage.merge(candidates, ctx)
                 else:
-                    candidates = [c for c in candidates if stage.keep(c, ctx)]
+                    kept = [c for c in candidates if stage.keep(c, ctx)]
+                    for dropped in candidates:
+                        if dropped not in kept:
+                            ctx.mark_failed(dropped)
+                    candidates = kept
                 counts.append((stage.LABEL, before, len(candidates)))
 
         if candidates is None:              # no source enabled at all
             candidates = []
 
+        regions = ctx.regions()
         _to_full_frame(candidates, 1.0 / scale)
+        _regions_to_full_frame(regions, 1.0 / scale)
+        if mask is not None and mask.shape[:2] != img.shape[:2]:
+            # The mask is handed to whoever draws it, and they draw over
+            # the CALLER's frame — a mask left at preview resolution is not
+            # just mis-sized, it silently disables whatever tests it
+            # (the darkening did exactly that for every preview-scaled run).
+            mask = cv2.resize(mask, (img.shape[1], img.shape[0]),
+                              interpolation=cv2.INTER_NEAREST)
         if stage_pos is not None and calib is not None:
             for cand in candidates:
                 cand.x_um, cand.y_um = flake_to_stage(
-                    cand.x_px, cand.y_px, img.shape, calib, stage_pos)
+                    cand.x_px, cand.y_px, img.shape, calib, stage_pos, flip)
         candidates.sort(key=lambda c: c.area_um2, reverse=True)
 
         return IdentifyResult(candidates=candidates, mask=mask,
-                              counts=counts, scale=scale)
+                              regions=regions, counts=counts, scale=scale)
+
+
+def _regions_to_full_frame(regions: list, inv: float) -> None:
+    """The region contours are in the processed frame too (they are drawn
+    over the caller's frame), so they take the same trip back."""
+    if inv == 1.0:
+        return
+    for region in regions:
+        region.contour = (region.contour * inv).astype(np.int32)
 
 
 def _to_full_frame(candidates: list[FlakeCandidate], inv: float) -> None:
@@ -567,36 +629,52 @@ def _to_full_frame(candidates: list[FlakeCandidate], inv: float) -> None:
 def identify(img: np.ndarray, calib: ObjectiveCalibration | None = None,
              config: IdentifyConfig | None = None,
              stage_pos: StagePosition | None = None,
-             scale: float = 1.0) -> IdentifyResult:
+             scale: float = 1.0, flip: bool = False) -> IdentifyResult:
     """Convenience wrapper (one-shot pipeline)."""
     return IdentifyPipeline(config).run(img, calib, config=config,
-                                        stage_pos=stage_pos, scale=scale)
+                                        stage_pos=stage_pos, scale=scale,
+                                        flip=flip)
+
+
+#: The processed view's two verdicts. The bright outline is what survived
+#: the chain; the dim one is what a gate threw away. Both are drawn on the
+#: DARKENED part of the frame, so "dimmer" is still clearly visible.
+PASS_COLOUR = (0, 255, 160)
+FAIL_COLOUR = (0, 130, 95)
 
 
 def render_overlay(img: np.ndarray, result: IdentifyResult,
-                   alpha: float = 0.45,
-                   colour: tuple[int, int, int] = (0, 200, 255)) -> np.ndarray:
-    """The processed view: matched regions tinted, SURVIVORS outlined.
+                   darken: float = 0.75,
+                   pass_colour: tuple = PASS_COLOUR,
+                   fail_colour: tuple = FAIL_COLOUR) -> np.ndarray:
+    """The processed view: everything except the matched regions darkened,
+    every region outlined by its verdict.
 
-    The tint is what the sources matched; the boxes are what made it
-    through every gate. Watching one change as the other is edited is the
-    whole point of the processed view.
+    Deliberately NOT rectangles. A box round a shapeless blob says little
+    and, worse, boxes from neighbouring regions overlap and read as one
+    object; the blob's own outline is the shape the operator is judging,
+    and its brightness carries the verdict. The darkened background is what
+    makes that readable at a glance — and it keeps the sample's own pixels
+    visible inside the match, so the operator still sees the material, not
+    a mask poster.
     """
     out = img.copy()
     mask = result.mask
     if mask is not None and mask.shape[:2] == out.shape[:2] and mask.any():
-        selected = mask > 0
-        tint = np.array(colour, np.float32)
-        blended = (out[selected].astype(np.float32) * (1.0 - alpha)
-                   + tint * alpha)
-        out[selected] = np.clip(blended, 0, 255).astype(np.uint8)
-    for cand in result.candidates:
-        x, y, w, h = cand.bbox
-        cv2.rectangle(out, (x, y), (x + w, y + h), colour, 1)
+        outside = mask == 0
+        darkened = out[outside].astype(np.float32) * (1.0 - float(darken))
+        out[outside] = np.clip(darkened, 0, 255).astype(np.uint8)
+    for region in result.regions:
+        contour = region.contour
+        if contour is None or not len(contour):
+            continue
+        colour = pass_colour if region.passed else fail_colour
+        cv2.drawContours(out, [contour], -1, colour, 2)
     return out
 
 
 __all__ = ["CANONICAL_STAGES", "ColourStage", "ContrastStage", "IdentifyConfig",
+           "Region",
            "IdentifyPipeline", "IdentifyResult", "MorphologyStage",
            "AnnotationStage", "BorderStage", "MergeStage", "SharpnessStage",
            "SizeStage", "Stage", "colour_mask", "hex_to_hsv", "hex_to_rgb",

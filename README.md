@@ -155,38 +155,54 @@ rotates the image and never touches an axis.
   foldable right-panel groups for Capture / Camera / Autofocus / Temperature.
   Manual jogging is on the gamepad (the recommended route), the keyboard, or in
   the Stage Control window.
-- **Sample Finding** — the largest live view, with the scan camera profile
-  (manual exposure and white balance: identification needs a stable image, not
-  an auto-adjusted one). The scan panels have moved to their own window while
-  they are being developed, and will come back here once they have bench miles.
+- **Sample Finding** — the largest live view, with a **Live / Processed** switch
+  over it, and the scan camera profile (manual exposure and white balance:
+  identification needs a stable image, not an auto-adjusted one). *Processed*
+  shows what the identification chain makes of the frame: everything it did not
+  match darkened, every match outlined — brightly for what survived the chain,
+  dimly for what a filter threw away. It is a display choice only: the stream,
+  the autofocus and a running scan never wait on it. The scan settings panels
+  have moved to their own window while they are being developed, and will come
+  back here once they have bench miles.
 
-**Windows ▸ Scan** is the console for the two new functions. It has its own
-live view with a floating **Live / Processed / Pick** bar (the processed view is
-a display choice — the stream, the autofocus and the scan never wait on it), the
-**scan map**, and three columns:
+![The Sample Finding live view in processed mode](docs/images/processed_view.png)
+
+*The Sample Finding tab with **Processed** selected: the identification chain
+has matched one sample, so everything else is darkened and the match keeps its
+own pixels and takes a bright outline. A region that matched but failed a filter
+is outlined dimly instead — which is how "why is this one missing" gets answered
+without a dialog.*
+
+**Windows ▸ Scan** is the console for the two new functions. It has the
+**scan map** and three columns:
 
 - **Scan** — the area (a corner-sized rectangle grown from wherever the stage is
   now, in the direction you pick), the path (serpentine bi- or uni-directional,
   or a spiral/Hilbert order marked experimental), overlap, speed, settle time
-  and an optional backlash take-up. The field of view comes from the objective's
-  calibration, so the tile count follows the objective rather than a typed-in
-  guess. *Scan from here* starts from the current position and returns there
-  when it finishes.
-- **Identification** — a filter chain: colour match (pick a colour off the
-  image or type a hex) and/or contrast produce a mask, then clean-up, size,
+  and an optional backlash take-up. The field of view is taken from the
+  objective's calibration data — the values set in Preferences → Objectives &
+  Calibration — so the tile count follows the objective rather than a typed-in
+  guess, and the window names the source (`measured in TALOS`, `imported from
+  Labscope`, `estimated from the sensor pitch`) so an estimate is never mistaken
+  for a measurement. *Scan from here* starts from the current position and
+  returns there when it finishes.
+- **Identification** — a filter chain: colour match (use the dropper on the
+  live view, or type a hex) and/or contrast produce a mask, then clean-up, size,
   frame-edge, sharpness, scale-bar and merge stages decide what survives. Every
   stage switches off independently, and the chain reports what each one let
-  through (`Colour match 812 → Size 12 → Sharpness 2`).
+  through (`Colour match 812 → Size 12 → Sharpness 2`). The dropper always
+  samples the camera frame, never the processed display — in processed mode the
+  display is darkened and outlined, so the colours on screen are not the
+  sample's.
 - **Samples** — the finds with their stage coordinates, a *go to* that brings
   one to the crosshair, and the per-scan exports.
 
 ![The Scan window](docs/images/scan_window.png)
 
-*The Scan console after a 3 × 3 scan in simulation: the live view with its
-Live/Processed/Pick bar, the map with the captured tiles, the planned area, the
-route and the camera footprint, then the scan, the identification chain and the
-results. Every scan also writes `manifest.csv`, the raw frames, and optionally a
-mosaic, an overview sheet and the candidate list.*
+*The Scan console after a 3 × 3 scan in simulation: the map with the captured
+tiles, the planned area, the route and the camera footprint, then the scan, the
+identification chain and the results. Every scan also writes `manifest.csv`, the
+raw frames, and optionally a mosaic, an overview sheet and the candidate list.*
 
 A scan owns the axes while it runs: manual jogging is refused (the mode badge in
 the status bar says so), and **STOP ALL** — Esc or LB+RB — stops the stage and

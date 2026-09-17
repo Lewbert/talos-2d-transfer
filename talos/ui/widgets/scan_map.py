@@ -6,11 +6,17 @@ coordinates, though, the picture the operator wants falls out for free:
 the tiles sit where the stage read back, and the camera's footprint walks
 across them. Sample stable, camera scanning.
 
-Nothing here depends on the stage↔image sign convention, which has never
-been verified on this bench: tile POSITIONS are readback, and the only
-convention used is the camera flip, applied to the tile content so the map
-reads like the live view. If the mosaic ever looks mirrored, that is the
-unverified assumption showing itself, not a bug in the geometry.
+**Tiles are placed as the operator saw them.** Each tile is a frame from
+the same source the live view uses — the backend's own egress, camera flip
+already applied — so it is laid down at its readback position with NO
+content rotation. Rotating a tile to "correct" it would put its content
+180° from its neighbour's at every overlap, which is exactly what a
+glitched mosaic looks like: the same features twice, offset the wrong way.
+The map therefore follows the live view's orientation for free, whatever
+the camera flip and the axis settings are set to.
+
+The tile POSITIONS are the manifest readback, so no stage↔image sign
+convention is assumed anywhere here either.
 
 Wheel zooms, drag pans, Fit resets.
 """
@@ -72,6 +78,21 @@ class ScanMapPlan:
                 round(self.fov_x_um, 6), round(self.fov_y_um, 6),
                 tuple((round(x, 6), round(y, 6)) for x, y in self.waypoints))
 
+    def mirrored(self) -> "ScanMapPlan":
+        """The same plan drawn in the flipped camera's coordinates.
+
+        The map is laid out in the sample frame AS THE FRAMES SHOW IT, so
+        with the flip on the whole layout mirrors about the origin — the
+        same rule the mosaic uses, and the reason a flipped scan's tiles
+        line up instead of appearing twice (cv/orientation.py).
+        """
+        return ScanMapPlan(
+            x0_um=-self.x0_um, y0_um=-self.y0_um,
+            width_um=self.width_um, height_um=self.height_um,
+            x_dir=-self.x_dir, y_dir=-self.y_dir,
+            fov_x_um=self.fov_x_um, fov_y_um=self.fov_y_um,
+            waypoints=[(-x, -y) for x, y in self.waypoints])
+
 
 def plan_bounds(plan: ScanMapPlan) -> tuple[float, float, float, float]:
     """(x_min, y_min, x_max, y_max) in µm, padded by half a FOV so the
@@ -115,7 +136,7 @@ class ScanMapWidget(QWidget):
         self._images: dict[int, QImage] = {}
         self._markers: list[ScanMapMarker] = []
         self._footprint: tuple[float, float] | None = None
-        self._flip_tiles = True
+        self._flip = False
         self._zoom = 1.0
         self._pan = QPointF(0.0, 0.0)
         self._drag_from = None
@@ -123,6 +144,26 @@ class ScanMapWidget(QWidget):
         self._caption = ""
 
     # --- data in ------------------------------------------------------
+
+    def set_flip(self, flip: bool) -> None:
+        """Follow the camera flip. The map is drawn in the sample frame as
+        the FRAMES show it — the layout mirrors with the flip, exactly as
+        the mosaic does, so a flipped scan's tiles line up instead of
+        landing twice (cv/orientation.py)."""
+        flip = bool(flip)
+        if flip == self._flip:
+            return
+        self._flip = flip
+        self.update()
+
+    def _effective_plan(self) -> ScanMapPlan:
+        """The plan in the coordinates this map draws in."""
+        return self._plan.mirrored() if self._flip else self._plan
+
+    def _at(self, x_um: float, y_um: float) -> tuple[float, float]:
+        """A stage coordinate in the map's own coordinates."""
+        return (-float(x_um), -float(y_um)) if self._flip \
+            else (float(x_um), float(y_um))
 
     def set_plan(self, plan: ScanMapPlan) -> None:
         """A NEW plan: the tiles and markers belong to the old one and are
@@ -166,10 +207,6 @@ class ScanMapWidget(QWidget):
     def set_footprint(self, x_um: float, y_um: float) -> None:
         """Where the camera is looking right now (stage readback)."""
         self._footprint = (float(x_um), float(y_um))
-        self.update()
-
-    def set_flip_tiles(self, flip: bool) -> None:
-        self._flip_tiles = bool(flip)
         self.update()
 
     def set_caption(self, text: str) -> None:
@@ -221,7 +258,7 @@ class ScanMapWidget(QWidget):
     # --- painting -----------------------------------------------------
 
     def _transform(self) -> tuple[float, QPointF]:
-        scale, offset = fit_view(plan_bounds(self._plan),
+        scale, offset = fit_view(plan_bounds(self._effective_plan()),
                                  (self.width(), self.height()))
         base = QPointF(self.width() / 2.0, self.height() / 2.0)
         offset = base + (offset - base) * self._zoom + self._pan
@@ -233,7 +270,7 @@ class ScanMapWidget(QWidget):
 
     def _marker_at(self, pos) -> int:
         for index, marker in enumerate(self._markers):
-            point = self._to_widget(marker.x_um, marker.y_um)
+            point = self._to_widget(*self._at(marker.x_um, marker.y_um))
             if (point - pos).manhattanLength() <= 12:
                 return index
         return -1
@@ -242,7 +279,7 @@ class ScanMapWidget(QWidget):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         painter.fillRect(self.rect(), QColor(theme.PANEL))
-        plan = self._plan
+        plan = self._effective_plan()
         if plan.width_um <= 0 or plan.height_um <= 0:
             painter.setPen(QColor(theme.TEXT_DIM))
             painter.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter,
@@ -263,7 +300,7 @@ class ScanMapWidget(QWidget):
     # --- pieces -------------------------------------------------------
 
     def _draw_area(self, painter: QPainter) -> None:
-        plan = self._plan
+        plan = self._effective_plan()
         # the rectangle grows from the start point along the direction
         # signs, so its corners are NOT necessarily (x0, y0) → (+w, +h)
         corner = self._to_widget(plan.x0_um, plan.y0_um)
@@ -283,11 +320,11 @@ class ScanMapWidget(QWidget):
         painter.drawEllipse(self._to_widget(plan.x0_um, plan.y0_um), 3.0, 3.0)
 
     def _draw_tiles(self, painter: QPainter, scale: float) -> None:
-        plan = self._plan
+        plan = self._effective_plan()
         for tile in self._tiles.values():
             rect = QRectF(0.0, 0.0, plan.fov_x_um * scale,
                           plan.fov_y_um * scale)
-            centre = self._to_widget(tile.x_um, tile.y_um)
+            centre = self._to_widget(*self._at(tile.x_um, tile.y_um))
             rect.moveCenter(centre)
             image = self._images.get(tile.index)
             if image is None:
@@ -295,11 +332,12 @@ class ScanMapWidget(QWidget):
                 painter.setBrush(Qt.BrushStyle.NoBrush)
                 painter.drawRect(rect)
                 continue
-            painter.drawImage(rect, image if not self._flip_tiles
-                              else image.flipped(Qt.Orientation.Horizontal | Qt.Orientation.Vertical))
+            # as captured, as displayed in the live view — see the module
+            # docstring for why this is deliberately unrotated
+            painter.drawImage(rect, image)
 
     def _draw_path(self, painter: QPainter) -> None:
-        waypoints = self._plan.waypoints
+        waypoints = self._effective_plan().waypoints
         if len(waypoints) < 2:
             return
         pen = QPen(QColor(0, 200, 255, 90), 1)
@@ -316,7 +354,7 @@ class ScanMapWidget(QWidget):
             return
         rect = QRectF(0.0, 0.0, self._plan.fov_x_um * scale,
                       self._plan.fov_y_um * scale)
-        rect.moveCenter(self._to_widget(*self._footprint))
+        rect.moveCenter(self._to_widget(*self._at(*self._footprint)))
         painter.setPen(QPen(QColor(theme.ACCENT), 2))
         painter.setBrush(Qt.BrushStyle.NoBrush)
         painter.drawRect(rect)
@@ -326,7 +364,7 @@ class ScanMapWidget(QWidget):
         font.setPixelSize(9)
         painter.setFont(font)
         for index, marker in enumerate(self._markers):
-            point = self._to_widget(marker.x_um, marker.y_um)
+            point = self._to_widget(*self._at(marker.x_um, marker.y_um))
             selected = index == self._selected
             colour = QColor(theme.ACCENT) if selected else QColor(255, 90, 90)
             painter.setPen(QPen(colour, 2))

@@ -14,6 +14,7 @@ from typing import Protocol
 import cv2
 import numpy as np
 
+from talos.cv.orientation import stage_offset
 from talos.models import FlakeCandidate, ObjectiveCalibration, StagePosition
 
 
@@ -234,18 +235,23 @@ class ClassicFlakeDetector:
 
 
 def flake_to_stage(x_px: float, y_px: float, img_shape: tuple[int, ...],
-                   calib: ObjectiveCalibration,
-                   stage_pos: StagePosition) -> tuple[float, float]:
-    """Map a pixel position to stage coordinates (µm).
+                   calib: ObjectiveCalibration, stage_pos: StagePosition,
+                   flip: bool = False) -> tuple[float, float]:
+    """Map a pixel position to the stage coordinate it images (µm).
 
     v1: orthotropic pixel scale (um_per_px_x/y) with the image center at
     the stage position. M7 upgrades to the measured 2×2 jacobian.
+
+    ``flip`` is the camera flip: the frame is rotated 180° about its centre,
+    so with the flip on a feature RIGHT of the centre is at a SMALLER stage
+    X. Ignoring it (all this function did before) sent "go to" to the
+    mirrored position — see cv/orientation.py.
     """
     h, w = img_shape[:2]
     um_per_px_x = calib.um_per_px_x or 1.0
     um_per_px_y = calib.um_per_px_y or 1.0
-    dx_um = (x_px - w / 2.0) * um_per_px_x
-    dy_um = (y_px - h / 2.0) * um_per_px_y
+    dx_um, dy_um = stage_offset((x_px - w / 2.0) * um_per_px_x,
+                                (y_px - h / 2.0) * um_per_px_y, flip)
     return stage_pos.x_um + dx_um, stage_pos.y_um + dy_um
 
 

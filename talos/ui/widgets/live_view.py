@@ -15,6 +15,9 @@ from PySide6.QtCore import QRectF, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QImage, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import QLabel, QVBoxLayout, QWidget
 
+from PySide6.QtWidgets import (QButtonGroup, QFrame, QGraphicsOpacityEffect,
+                               QHBoxLayout, QPushButton)
+
 from talos.cv.af_roi import letterbox_map, letterbox_rect, normalized_roi
 from talos.cv.calibration import SENSOR_WIDTH_PX
 from talos.ui.theme import OK
@@ -54,6 +57,52 @@ class _OverlaySurface(QWidget):
                                    QRectF(0.0, 0.0, float(self.width()),
                                           float(self.height())))
         painter.end()
+
+
+class LiveViewModeBar(QFrame):
+    """Live / Processed, floating over a live view.
+
+    Two buttons, because there are two things to look at: the camera's own
+    stream and the identification overlay computed from it. Translucent
+    until the pointer is on it — the operator is judging an image, and the
+    control must not be what they are looking at.
+    """
+
+    def __init__(self, parent: QWidget):
+        super().__init__(parent)
+        self.setObjectName("hoverbar")
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(6, 3, 6, 3)
+        layout.setSpacing(4)
+        self.live_btn = QPushButton("Live")
+        self.processed_btn = QPushButton("Processed")
+        self.group = QButtonGroup(self)
+        self.group.setExclusive(True)
+        for button in (self.live_btn, self.processed_btn):
+            button.setCheckable(True)
+            button.setObjectName("hoverbar_btn")
+            self.group.addButton(button)
+            layout.addWidget(button)
+        self.live_btn.setChecked(True)
+        self._effect = QGraphicsOpacityEffect(self)
+        self._effect.setOpacity(0.6)
+        self.setGraphicsEffect(self._effect)
+
+    def enterEvent(self, event) -> None:  # noqa: N802
+        self._effect.setOpacity(1.0)
+        super().enterEvent(event)
+
+    def leaveEvent(self, event) -> None:  # noqa: N802
+        self._effect.setOpacity(0.6)
+        super().leaveEvent(event)
+
+    def place(self, view: QWidget, top: int = 8) -> None:
+        """Centred over the view's image area."""
+        hint = self.sizeHint()
+        x = max(8, (view.width() - hint.width()) // 2)
+        self.setGeometry(x, top, hint.width(), hint.height())
+        self.raise_()
 
 
 class LiveViewWidget(QWidget):

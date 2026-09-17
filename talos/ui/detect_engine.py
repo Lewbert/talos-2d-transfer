@@ -41,6 +41,7 @@ class DetectJob:
     config: object
     scale: float = 1.0
     render: bool = True
+    flip: bool = False    # the camera flip, for the px→stage mapping
 
 
 class _DetectWorker(QThread):
@@ -73,7 +74,8 @@ class _DetectWorker(QThread):
             try:
                 result = IdentifyPipeline().run(
                     job.frame, job.calib, config=job.config,
-                    stage_pos=job.stage_pos, scale=job.scale)
+                    stage_pos=job.stage_pos, scale=job.scale,
+                    flip=job.flip)
                 preview = (render_overlay(job.frame, result)
                            if job.render else None)
             except Exception as exc:  # noqa: BLE001 - never kill the scan
@@ -107,7 +109,7 @@ class DetectionEngine(QObject):
 
     def set_source(self, fn) -> None:
         """``fn()`` returns the newest (frame, calib, stage_pos, config,
-        scale) or None. Called on the GUI thread, once per tick."""
+        scale, flip) or None. Called on the GUI thread, once per tick."""
         self._source = fn
 
     def set_live(self, on: bool) -> None:
@@ -133,25 +135,25 @@ class DetectionEngine(QObject):
             return
         if not item:
             return
-        frame, calib, stage_pos, config, scale = item
+        frame, calib, stage_pos, config, scale, flip = item
         if frame is None or config is None:
             return
         self._busy = True
         self._worker.submit(DetectJob(index=-1, frame=frame, calib=calib,
                                       stage_pos=stage_pos, config=config,
-                                      scale=scale, render=True))
+                                      scale=scale, render=True, flip=flip))
 
     # --- the scan feed --------------------------------------------------
 
     def submit_tile(self, index: int, frame, calib, stage_pos, config,
-                    scale: float = 1.0) -> None:
+                    scale: float = 1.0, flip: bool = False) -> None:
         """One captured tile. Queued unconditionally: a scan must not be
         able to outrun the detector and silently lose a sample."""
         self._tiles_outstanding += 1
         self._worker.submit(DetectJob(index=int(index), frame=frame,
                                       calib=calib, stage_pos=stage_pos,
                                       config=config, scale=scale,
-                                      render=False))
+                                      render=False, flip=flip))
 
     @property
     def busy(self) -> bool:

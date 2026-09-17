@@ -294,17 +294,38 @@ caller's pixels and µm — pixel-unit gates are scaled with it), and **the
 pipeline never sees a half-edited config** (the panel rebuilds the whole config
 per job; the worker never reads a widget).
 
+**The camera flip is a coordinate transform, not a display tweak**
+(`cv/orientation.py` is the one place it lives). A flipped frame is the scene
+rotated 180° about the frame centre, so with the flip on a feature RIGHT of
+the centre is at a SMALLER stage X — and a mosaic must therefore MIRROR its
+layout (place a tile taken at `+p` at `−p`) or every feature lands once per
+tile, a mosaic that looks doubled. Both the px→µm mapping
+(`flake_to_stage(..., flip=…)`, used by the identification pipeline and "go
+to sample") and the mosaic/map layout follow it. Placing tiles and rotating
+their content instead — which is what shipped first — produced exactly that
+doubling, and a map that read upside down against the live view.
+
 **The map is drawn in the sample's frame** (`ui/widgets/scan_map.py`): tiles at
-their readback positions, the camera footprint walking across them, the route,
-and a marker per find. No geometry depends on the stage↔image sign convention
-— still the unverified mounting assumption — so the only convention applied is
-the camera flip, to the tile content.
+their readback positions (mirrored with the flip, as above), the camera
+footprint walking across them, the route, and a marker per find. Tiles are
+drawn AS CAPTURED — they come from the same frame slot the live view does, so
+the camera flip is already in the pixels.
+
+**The processed view is a verdict, not a decoration.** Every region the sources
+found is drawn with its own OUTLINE — bright for what survived the chain, dim
+for what a gate threw away — over a frame darkened everywhere the sources did
+not match. Deliberately not rectangles: boxes round shapeless blobs overlap and
+read as one object, and they hide the shape the operator is judging. The
+darkening keeps the sample's own pixels visible inside the match, so it reads
+as "this part of the wafer", not as a mask poster.
 
 **Nothing here blocks.** Capture runs on the scan thread; identification runs
 on a detection thread fed by a queue (tiles queue — a tile not examined is a
 sample not found; live preview frames drop instead — a preview lagging the
 stream is worse than one that skips). Detection outlives the capture by design,
-so the exports wait for the queue to drain.
+so the exports wait for the queue to drain. The scan console has no live view
+of its own: it drives the Sample Finding tab's, which is the one place the
+stream is shown, and hands it the processed frame.
 
 ## Testing model
 

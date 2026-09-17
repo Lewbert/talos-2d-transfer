@@ -8,7 +8,7 @@ import cv2
 import numpy as np
 import pytest
 
-from talos.cv.identify import (AnnotationStage, BorderStage, ColourStage,
+from talos.cv.identify import (FAIL_COLOUR, PASS_COLOUR, AnnotationStage, BorderStage, ColourStage,
                                ContrastStage, IdentifyConfig, IdentifyPipeline,
                                MergeStage, MorphologyStage, SharpnessStage,
                                SizeStage, colour_mask, hex_to_hsv,
@@ -291,6 +291,25 @@ def test_x_um_y_um_come_from_the_stage_position():
     assert cand.y_um == pytest.approx(2000.0 + (100 - 240) * 0.2, abs=1.0)
 
 
+def test_the_camera_flip_mirrors_the_stage_mapping():
+    """With the flip on, the frame is rotated 180° about its centre, so a
+    feature RIGHT of the centre is at a SMALLER stage X. Ignoring the flip
+    (which this mapping did) sent "go to sample" to the mirrored position.
+    """
+    img = scene([(100, 80, 60, 40, MAGENTA)], shape=(480, 640))
+    stage_pos = StagePosition(x_um=1000.0, y_um=2000.0)
+    cfg = config(colour=ColourStage(hex_color=hex_of(MAGENTA), tolerance=20.0))
+    straight = IdentifyPipeline().run(img, CALIB, config=cfg,
+                                      stage_pos=stage_pos, flip=False)
+    flipped = IdentifyPipeline().run(img, CALIB, config=cfg,
+                                     stage_pos=stage_pos, flip=True)
+    a, b = straight.candidates[0], flipped.candidates[0]
+    assert b.x_um == pytest.approx(2 * 1000.0 - a.x_um, abs=0.5)
+    assert b.y_um == pytest.approx(2 * 2000.0 - a.y_um, abs=0.5)
+    # the pixel position is the same; only the stage coordinate mirrors
+    assert (b.x_px, b.y_px) == pytest.approx((a.x_px, a.y_px))
+
+
 # --- config round-trip -----------------------------------------------------
 
 def test_config_round_trips_through_a_settings_dict():
@@ -335,13 +354,61 @@ def test_hex_to_hsv_agrees_with_the_frame_conversion():
 
 # --- the processed view ----------------------------------------------------
 
-def test_render_overlay_tints_the_mask_and_boxes_the_survivors():
+def test_render_overlay_darkens_everything_but_the_match():
+    """The processed view: the frame is darkened EXCEPT where the sources
+    matched, so the sample keeps its own pixels inside the match."""
     img = scene([(100, 80, 60, 40, MAGENTA)])
     result = IdentifyPipeline().run(
         img, CALIB, config=config(colour=ColourStage(hex_color=hex_of(MAGENTA),
                                                      tolerance=20.0)))
-    out = render_overlay(img, result)
+    out = render_overlay(img, result, darken=0.75)
     assert out.shape == img.shape and out.dtype == np.uint8
-    # the matched region moved toward the tint; the substrate did not
-    assert not np.array_equal(out[100, 130], img[100, 130])
-    assert np.array_equal(out[5, 5], img[5, 5])
+    # outside the match: darkened
+    assert int(out[5, 5, 0]) < int(img[5, 5, 0])
+    assert int(out[5, 5, 0]) == pytest.approx(int(img[5, 5, 0]) * 0.25, abs=3)
+    # inside it: the frame's own pixels, so the material is still visible
+    assert np.array_equal(out[100, 130], img[100, 130])
+
+
+def test_render_overlay_outlines_pass_and_fail_differently():
+    """Rectangles are gone on purpose: the blob's own outline carries the
+    verdict, bright for what survived the chain and dim for what a gate
+    threw away."""
+    big = (60, 60, 90, 60, MAGENTA)
+    small = (240, 60, 14, 14, MAGENTA)      # below the size floor
+    img = scene([big, small])
+    cfg = config(colour=ColourStage(hex_color=hex_of(MAGENTA), tolerance=20.0))
+    result = IdentifyPipeline().run(img, CALIB, config=cfg)
+    assert len(result.candidates) == 1
+    assert len(result.regions) == 2
+    assert sum(1 for r in result.regions if r.passed) == 1
+
+    out = render_overlay(img, result)
+    # the surviving blob's boundary is the bright colour, the rejected
+    # blob's is the dim one — both ON the darkened background
+    passed = [r for r in result.regions if r.passed][0]
+    failed = [r for r in result.regions if not r.passed][0]
+    px, py = passed.contour[0][0]
+    fx, fy = failed.contour[0][0]
+    assert tuple(int(v) for v in out[py, px]) == PASS_COLOUR
+    assert tuple(int(v) for v in out[fy, fx]) == FAIL_COLOUR
+
+
+def test_regions_survive_a_preview_downscale():
+    """The contours are drawn over the CALLER's frame, so they take the
+    same trip back from the preview resolution as the candidates."""
+    img = scene([(100, 80, 60, 40, MAGENTA)], shape=(480, 640))
+    result = IdentifyPipeline().run(
+        img, CALIB, config=config(colour=ColourStage(hex_color=hex_of(MAGENTA),
+                                                     tolerance=20.0)),
+        scale=0.5)
+    assert len(result.regions) == 1
+    xs = result.regions[0].contour[:, 0, 0]
+    cand = result.candidates[0]
+    bx, by, bw, bh = cand.bbox
+    # the contour straddles the candidate's box, in the CALLER's pixels
+    # (at 0.5 scale it would sit at half these coordinates)
+    assert xs.min() == pytest.approx(bx, abs=3)
+    assert xs.max() == pytest.approx(bx + bw, abs=3)
+    out = render_overlay(img, result)
+    assert out.shape == img.shape

@@ -13,6 +13,8 @@ from __future__ import annotations
 import cv2
 import numpy as np
 
+from talos.cv.orientation import mosaic_offset
+
 #: Longest edge of the stitched mosaic. The tiles live on disk at full
 #: resolution; this is a summary, and 2048 px keeps it a few MB.
 DEFAULT_MAX_PX = 2048
@@ -21,13 +23,47 @@ DEFAULT_MAX_PX = 2048
 DEFAULT_THUMB_W = 240
 
 
+def mosaic_geometry(tiles, fov_um: tuple[float, float],
+                    max_px: int = DEFAULT_MAX_PX,
+                    flip: bool = False) -> tuple[float, float, float]:
+    """``(px_per_um, x0_um, y0_um, shrink)`` — where a sample point lands.
+
+    The single source of the mosaic's layout: ``build_mosaic`` places tiles
+    with it, and a caller that wants to draw on top of a mosaic (or check
+    where a feature ended up) uses it instead of re-deriving the arithmetic.
+
+    Tiles are laid out in the coordinates of the SAMPLE as the frames show
+    it, so with the camera flip on the layout is mirrored (see
+    cv/orientation.py for why that is what makes the seams line up).
+    """
+    items = [(float(x), float(y), np.asarray(img))
+             for x, y, img in tiles if img is not None and img.size]
+    items = [(mosaic_offset(x, y, flip)[0], mosaic_offset(x, y, flip)[1], img)
+             for x, y, img in items]
+    fov_x, fov_y = float(fov_um[0]), float(fov_um[1])
+    tile_w = min(img.shape[1] for _x, _y, img in items)
+    tile_h = min(img.shape[0] for _x, _y, img in items)
+    px_per_um = min(tile_w / fov_x, tile_h / fov_y)
+    xs = [x for x, _y, _img in items]
+    ys = [y for _x, y, _img in items]
+    x0, y0 = min(xs) - fov_x / 2.0, min(ys) - fov_y / 2.0
+    span_x = max(max(xs) + fov_x / 2.0 - x0, 1e-6)
+    span_y = max(max(ys) + fov_y / 2.0 - y0, 1e-6)
+    out_w = max(1, int(round(span_x * px_per_um)))
+    out_h = max(1, int(round(span_y * px_per_um)))
+    shrink = min(1.0, float(max_px) / float(max(out_w, out_h)))
+    return px_per_um, x0, y0, shrink
+
+
 def build_mosaic(tiles, fov_um: tuple[float, float],
-                 max_px: int = DEFAULT_MAX_PX) -> np.ndarray | None:
+                 max_px: int = DEFAULT_MAX_PX,
+                 flip: bool = False) -> np.ndarray | None:
     """Stitch ``tiles`` into one image, placed by their readback positions.
 
     ``tiles``: ``[(x_um, y_um, rgb_uint8)]`` where (x_um, y_um) is the stage
     position the frame was taken at — i.e. the CENTRE of that tile in the
     sample frame. ``fov_um`` is the field of view those frames cover.
+    ``flip`` is the camera flip, which mirrors the layout (cv/orientation.py).
 
     Overlapping pixels are averaged rather than overwritten, so a tile that
     is slightly offset (or a few µm out because of backlash) blends instead
@@ -43,20 +79,13 @@ def build_mosaic(tiles, fov_um: tuple[float, float],
 
     tile_w = min(img.shape[1] for _x, _y, img in items)
     tile_h = min(img.shape[0] for _x, _y, img in items)
-    px_per_um = min(tile_w / fov_x, tile_h / fov_y)
-
-    xs = [x for x, _y, _img in items]
-    ys = [y for _x, y, _img in items]
-    x0, x1 = min(xs) - fov_x / 2.0, max(xs) + fov_x / 2.0
-    y0, y1 = min(ys) - fov_y / 2.0, max(ys) + fov_y / 2.0
-    span_x, span_y = max(x1 - x0, 1e-6), max(y1 - y0, 1e-6)
-
-    out_w = max(1, int(round(span_x * px_per_um)))
-    out_h = max(1, int(round(span_y * px_per_um)))
-    shrink = min(1.0, float(max_px) / float(max(out_w, out_h)))
-    if shrink < 1.0:
-        out_w = max(1, int(round(out_w * shrink)))
-        out_h = max(1, int(round(out_h * shrink)))
+    px_per_um, x0, y0, shrink = mosaic_geometry(items, fov_um, max_px, flip)
+    items = [(mosaic_offset(x, y, flip)[0], mosaic_offset(x, y, flip)[1], img)
+             for x, y, img in items]
+    out_w = max(1, int(round((max(x for x, _y, _i in items) + fov_x / 2.0 - x0)
+                             * px_per_um * shrink)))
+    out_h = max(1, int(round((max(y for _x, y, _i in items) + fov_y / 2.0 - y0)
+                             * px_per_um * shrink)))
 
     # Accumulate as integers and divide at the end: with a 1-9 tile overlap
     # the sum cannot overflow uint16, and it is a third of float32's memory.

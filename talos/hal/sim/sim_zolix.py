@@ -15,6 +15,7 @@ from talos.hal.base import (
     StageSpeed,
     XYRStage,
 )
+from talos.hal.sim import bench
 from talos.hal.sim._common import move_duration, now
 from talos.models import StagePosition, StageStatus
 
@@ -84,10 +85,21 @@ class SimZolixXYRStage(XYRStage):
                 self._moving[axis] = False
                 self._started_at.pop(axis, None)
                 self._start_pos.pop(axis, None)
+        self._publish()
 
-    def _position_now(self, axis: str) -> int:
-        """The axis position AT THIS INSTANT: the target once the move has
-        finished, a linear interpolation while it is still travelling."""
+    def _publish(self) -> None:
+        """Tell the simulated bench where the stage is, so the simulated
+        camera can image a wafer that moves under it (sim/bench.py).
+
+        Published from every read path — the camera reads the bench, and a
+        stale bench means the wafer does not move with the stage, which is
+        exactly the blind spot this exists to close."""
+        bench.set_xy(self._interp("x") * self.um_per_pulse_xy,
+                     self._interp("y") * self.um_per_pulse_xy)
+
+    def _interp(self, axis: str) -> int:
+        """The axis position AT THIS INSTANT, side-effect free: the target
+        once the move has finished, linear while it is still travelling."""
         if self._moving.get(axis) is not True:
             return int(getattr(self, f"_{axis}"))
         started = self._started_at.get(axis)
@@ -96,11 +108,14 @@ class SimZolixXYRStage(XYRStage):
             return int(getattr(self, f"_{axis}"))
         fraction = (now() - started) / (done_at - started)
         if fraction >= 1.0:
-            self._tick()
             return int(getattr(self, f"_{axis}"))
         begin = self._start_pos.get(axis, int(getattr(self, f"_{axis}")))
         span = int(getattr(self, f"_{axis}")) - begin
         return int(round(begin + span * max(0.0, fraction)))
+
+    def _position_now(self, axis: str) -> int:
+        self._tick()
+        return self._interp(axis)
 
     def _ensure_idle(self) -> None:
         self._tick()
@@ -111,9 +126,13 @@ class SimZolixXYRStage(XYRStage):
 
     def _start_move(self, axis: str, steps: int, speed_pps: int) -> None:
         start = now()
+        # Read the current position BEFORE the moving flag flips: a tick
+        # taken while "moving" is true and this move's deadline is not yet
+        # recorded sees a deadline of 0 and ends the move on the spot.
+        begin = self._interp(axis)
         self._moving[axis] = True
         self._started_at[axis] = start
-        self._start_pos[axis] = self._position_now(axis)
+        self._start_pos[axis] = begin
         self._done_at[axis] = start + self.latency_s + move_duration(steps, speed_pps)
 
     def move_abs_pulses(self, x: int, y: int, r: int | None = None,
@@ -203,6 +222,7 @@ class SimZolixXYRStage(XYRStage):
         # would make a settled axis indistinguishable from a travelling one.
         x, y, r = (self._position_now("x"), self._position_now("y"),
                    self._position_now("r"))
+        bench.set_xy(x * self.um_per_pulse_xy, y * self.um_per_pulse_xy)
         return StagePosition(
             x_pulses=x, y_pulses=y, r_pulses=r,
             x_um=x * self.um_per_pulse_xy,
