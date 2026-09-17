@@ -39,11 +39,28 @@ def flush(ms: int) -> None:
     loop.exec()
 
 
-def synthetic_frame(app: TALOSApplication) -> None:
+def synthetic_frame(app: TALOSApplication, flecks: bool = False) -> None:
     """Emit one 16:9 synthetic frame (the sim camera's own pattern is
-    square — this keeps the live view letterboxed like real 1080p)."""
+    square — this keeps the live view letterboxed like real 1080p).
+
+    ``flecks`` plants a few blobs of the colour the Sample Finding tab is
+    currently looking for, so the processed and sample views have
+    something to find. Without it the chain correctly finds nothing and
+    the doc images show an empty overlay, which reads as a broken tab.
+    """
     rng = np.random.default_rng(7)
     frame = (rng.integers(10, 90, (1080, 1920, 3))).astype(np.uint8)
+    if flecks:
+        try:
+            from talos.cv.identify import hex_to_rgb
+
+            colour = hex_to_rgb(app.window._sample_finding.colour_group
+                                .hex_color())
+        except Exception:  # noqa: BLE001 - a shot must never fail on this
+            colour = (200, 162, 200)
+        for x, y, w, h in ((520, 300, 260, 170), (1180, 620, 190, 130),
+                           (900, 220, 120, 90), (330, 700, 150, 110)):
+            frame[y:y + h, x:x + w] = colour
     app.manager.camera.sig_frame.emit(frame)
 
 
@@ -174,14 +191,46 @@ def main() -> int:
     window._strip.grab().save(str(path))
     print(f"saved {path}")
 
-    # The Sample Finding workspace (tab 1), grabbed while it is active.
+    # The Sample Finding workspace (tab 1), grabbed while it is active and
+    # with its filters on and its chain finding something — an empty
+    # overlay would read as a broken tab rather than as a quiet one.
     window._tabs.setCurrentIndex(1)
-    flush(600)
-    synthetic_frame(app)
-    window.repaint()
+    flush(400)
+    # Silence the sim camera's own stream first: it would overwrite every
+    # synthetic frame between the emit and the grab, and the tab would be
+    # showing the simulator's scene rather than the one being posed.
+    window._sample_finding._engine.set_live(False)
+    try:
+        app.manager.camera.set_streaming(False)
+    except Exception:  # noqa: BLE001 - the shot is worth more than the API being there
+        pass
+    flush(200)
+    finding = window._sample_finding
+    finding._engine.set_live(True)
+    finding.preprocess_group.enable.setChecked(True)
+    finding.preprocess_group.local.enable.setChecked(True)
+    finding.preprocess_group.local.gain.setValue(4.0)
+    finding.preprocess_group.local.width.setValue(24.0)
+    flush(300)
+    for _ in range(6):
+        synthetic_frame(app, flecks=True)
+        flush(260)                      # let the detection worker catch up
     path = args.out / f"scan{tag}.png"
     window.grab().save(str(path))
     print(f"saved {path}")
+
+    # ...and the same tab in each of the other two view modes, for the
+    # documentation: what the filters make of the frame, and what the
+    # chain found in it.
+    for mode in ("preprocessed", "samples"):
+        finding.set_view_mode(mode)
+        for _ in range(3):
+            synthetic_frame(app, flecks=True)
+            flush(260)
+        path = args.out / f"scan_{mode}{tag}.png"
+        window.grab().save(str(path))
+        print(f"saved {path}")
+    finding.set_view_mode("original")
     window._tabs.setCurrentIndex(0)
     flush(200)
 

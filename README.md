@@ -155,64 +155,66 @@ rotates the image and never touches an axis.
   foldable right-panel groups for Capture / Camera / Autofocus / Temperature.
   Manual jogging is on the gamepad (the recommended route), the keyboard, or in
   the Stage Control window.
-- **Sample Finding** — the largest live view, with a **Live / Processed** switch
-  over it, and the scan camera profile (manual exposure and white balance:
-  identification needs a stable image, not an auto-adjusted one). *Processed*
-  shows what the identification chain makes of the frame: everything it did not
-  match darkened, every match outlined — brightly for what survived the chain,
-  dimly for what a filter threw away. It is a display choice only: the stream,
-  the autofocus and a running scan never wait on it. The scan settings panels
-  have moved to their own window while they are being developed, and will come
-  back here once they have bench miles.
+- **Sample Finding** — three columns: the camera and the computer vision on the
+  left, the live view in the middle, and the scan on the right.
 
-![The Sample Finding live view in processed mode](docs/images/processed_view.png)
+  **Left.** The sample colour is pinned at the top, because it is the one
+  control that is touched constantly — it is both the mask's target and the
+  centre of the local-contrast curve. Below it, foldable groups for the camera's
+  manual profile (identification needs a stable image, not an auto-adjusted
+  one), the **pre-processing** chain and the **identification** chain.
 
-*The Sample Finding tab with **Processed** selected: the identification chain
-has matched one sample, so everything else is darkened and the match keeps its
-own pixels and takes a bright outline. A region that matched but failed a filter
-is outlined dimly instead — which is how "why is this one missing" gets answered
-without a dialog.*
+  **Centre.** The live view, with a floating **Original / Pre-processed /
+  Samples** switch. *Pre-processed* is what the filters make of the frame — and
+  it is the layer the dropper samples. *Samples* shows the identification
+  result: everything the chain did not match darkened, every match outlined —
+  brightly for what survived the chain, dimly for what a gate threw away. Both
+  are display choices only: the stream, the autofocus and a running scan never
+  wait on them.
 
-**Windows ▸ Scan** is the console for the two new functions. It has the
-**scan map** and three columns:
+  **Right.** The scan map, the run card, the settings worth changing at the
+  microscope, and the samples that were found.
 
-- **Scan** — the area (a corner-sized rectangle grown from wherever the stage is
-  now, in the direction you pick), the path (serpentine bi- or uni-directional,
-  or a spiral/Hilbert order marked experimental), overlap, speed, settle time
-  and an optional backlash take-up. The field of view is **read from the
-  objective's calibration** — the values set in Preferences → Objectives &
-  Calibration — with no manual override, so the tile count follows the objective
-  and there is only one number for the two to disagree about. The window states
-  where that number came from (`measured in TALOS`, `imported from Labscope`) and
-  says so plainly if it is only an estimate, pointing at where to fix it.
-  *Scan from here* starts from the current position and returns there when it
-  finishes.
-- **Identification** — a filter chain: colour match (use the dropper on the
-  live view, or type a hex) and/or contrast produce a mask, then clean-up, size,
-  frame-edge, sharpness, scale-bar and merge stages decide what survives. Every
-  stage switches off independently, and the chain reports what each one let
-  through (`Colour match 812 → Size 12 → Sharpness 2`). The dropper always
-  samples the camera frame, never the processed display — in processed mode the
-  display is darkened and outlined, so the colours on screen are not the
-  sample's.
-- **Samples** — the finds with their stage coordinates, a *go to* that brings
-  one to the crosshair, and the per-scan exports. Identification runs on each
-  captured frame on its own, at full resolution; the mosaic is an overview for
-  the eye, and nothing measures from it.
+**Pre-processing** is what makes a thin sample visible: shade correction for
+uneven illumination, an edge-preserving denoise, the ordinary tone controls,
+and a **local-contrast curve** that steepens the tone curve at the colour you
+picked and flattens it everywhere else. A monolayer and a bilayer a few levels
+apart become a difference you can see, while the picked colour itself does not
+move — it is the same hex the colour mask searches for, so the sample cannot
+disappear the moment you switch the filter on.
 
-![The Scan window](docs/images/scan_window.png)
+![The Sample Finding workspace](docs/images/sample_finding.png)
 
-*The Scan console after a 3 × 3 scan in simulation: the map with the captured
-tiles, the planned area, the route and the camera footprint, then the scan, the
-identification chain and the results. Every scan also writes `manifest.csv`, the
-raw frames, and optionally a mosaic, an overview sheet and the candidate list.*
+*The Sample Finding tab in **Samples** mode, with pre-processing on and a
+local-contrast curve at ×4: the colour and the camera/CV groups on the left
+(with the filter's three channel curves plotted against the identity), the live
+view in the middle, and on the right the scan map, the run card, the scan
+settings and the list of what the chain found. Everything the chain did not
+match is darkened; each match keeps its own pixels and takes a bright outline.*
+
+**The scan** covers a rectangle of the sample and records where every frame was
+taken. You choose what the start position *means* — the centre of the first
+tile, or a **corner** of the area (which covers the region with the fewest
+frames and lands on the far edge to the micron) — plus the area, the
+directions, the path order and the start axis. The field of view is **read from
+the objective's calibration**, with no manual override: the tile count follows
+the objective, and there is one number for the panel to state — `measured in
+TALOS` or `imported from Labscope`, or a plain warning when it can only
+estimate. *Scan from here* starts at the current position and returns there
+when it finishes. Overlap, settle, scan speed, backlash and which extra files a
+run writes live in **Preferences → Scan**.
+
+Identification runs on each captured frame on its own, at full resolution; the
+mosaic is an overview for the eye, and nothing measures from it. Every scan
+writes `manifest.csv` and the raw frames, and optionally a mosaic, an overview
+sheet and the candidate list.
 
 A scan owns the axes while it runs: manual jogging is refused (the mode badge in
 the status bar says so), and **STOP ALL** — Esc or LB+RB — stops the stage and
 aborts the run.
 
 Menus: **File**, **Edit → Preferences** (`Ctrl+,`), **Display** (overlays, scale
-bar), **Windows** (Scan, AF Detail, Stage Control, Log), **Help**. Display
+bar), **Windows** (AF Detail, Stage Control, Log), **Help**. Display
 toggles the live-view overlays: scale bar (with optional burn-in for snapshots),
 the AF status pill, crosshairs (inverse-video, so they stay visible on any
 image) with an optional calibrated tick reticle, and a µm tick ruler on all four

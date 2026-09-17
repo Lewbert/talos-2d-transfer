@@ -165,7 +165,7 @@ The plan was written before any hardware was touched. These are the places where
   closed-loop simulation suites.
 - **Absolute Zolix moves became composed relative moves**, with readback verification.
 - **Gamepad input moved off the `inputs` package** to raw XInput.
-- **The settings schema is at version 7**, not the planned 2 — each bump is a migration in
+- **The settings schema is at version 8**, not the planned 2 — each bump is a migration in
   `talos/config.py`, which is also where removed keys are recorded.
 - **The px→µm mapping is orthotropic, and the jacobian upgrade is kept in reserve.** The plan had it
   upgrade to a measured 2×2 jacobian once the calibration wizard existed. Two things now say "not
@@ -176,10 +176,27 @@ The plan was written before any hardware was touched. These are the places where
   column stay exactly where they are: if a future upgrade ever needs merged-image accuracy, applying
   the off-diagonal terms is a change to one function, not to its callers.
 - **Flake identification arrived as a filter chain, not a classifier.** The plan left it open; what
-  shipped is a stack of stages the operator switches on and off (colour match, contrast, size,
-  sharpness, and so on) whose parameters are judged by eye against a processed live view. It finds
-  what the operator points at and does not rank material — a deliberate limit, and the one most
-  likely to be revisited.
+  shipped is a stack of stages the operator switches on and off (colour match, clean-up, size,
+  frame edge, sharpness, merge) whose parameters are judged by eye against the three live views. It
+  finds what the operator points at and does not rank material — a deliberate limit, and the one
+  most likely to be revisited. The chain has since narrowed: its contrast source was removed, and
+  the half of it that earned its keep — flattening the illumination — became a **pre-processing**
+  stage, where it prepares the frame instead of trying to segment it.
+- **Pre-processing is its own layer, not part of identification.** The distinction is what makes
+  the two honest: a filter is applied once, to the single frame everything downstream then agrees
+  about — the mask, the display, and the colour the dropper reads off it. The layer's centrepiece
+  is a local-contrast curve that steepens the tone curve at the picked colour, which is the
+  operator's own suggestion and the reason thin samples are visible at all. Building it pinned
+  three things that a tone curve is useless without: the picked colour must not move, the curve must
+  never fold back on itself, and a gain that cannot be delivered must say so rather than quietly
+  deliver less.
+- **The scan's area origin became a choice**, and the first version's coverage was wrong. Anchoring
+  the grid at the operator's position as the centre of the first tile is a reasonable thing to want
+  ("scan around what I am looking at"), but `ceil(area / pitch)` tiles left the far edge short
+  whenever the remainder fell in the half-frame behind the origin — 88 µm of a 2000 µm area, on the
+  bench objective. A corner origin covers the area with the fewest frames and lands on the far edge
+  to the micron, so both ship and the coverage is asserted for both. The lesson is the one that
+  recurs here: the argument that justified the arithmetic was true and irrelevant.
 - **The scan captures through the frame slot, not a camera handle.** The first implementation took a
   camera object, which cannot work in an application where the camera belongs to its own worker
   thread; the mailbox the autofocus controller already used turned out to be the right seam, and the

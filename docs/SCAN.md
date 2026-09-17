@@ -3,8 +3,10 @@
 Companion documents: [IDENTIFICATION.md](IDENTIFICATION.md) for what happens to
 the frames afterwards, [ARCHITECTURE.md](ARCHITECTURE.md) for the job model and
 the threading, [DESIGN.md](DESIGN.md) for the bench and the design decisions.
-The console that drives it is `Windows ▸ Scan` (`ui/widgets/scan_window.py`);
-the map is `ui/widgets/scan_map.py`.
+The panel that drives it is the right-hand column of the **Sample Finding**
+tab (`ui/widgets/scan_panel.py`); the map is `ui/widgets/scan_map.py`, and
+double-clicking it opens the same widget in its own window
+(`ui/widgets/map_window.py`).
 
 ## What a scan is, and what it deliberately is not
 
@@ -47,15 +49,40 @@ Objectives & Calibration, where correcting it fixes everything else too. The
 field of view and the planned grid follow the objective selector live, so
 changing objectives updates the tile count rather than leaving a stale plan.
 
-The grid is `ceil(area / pitch)` tiles per axis, anchored at the **first
-waypoint** — the operator jogs to a feature they can see and presses *Scan from
-here*, so the origin is wherever the stage is at that moment. Coverage is
-guaranteed rather than exact: `(n−1)·pitch + FOV ≥ area` holds for any
-`n = ceil(area/pitch)` because `FOV > pitch`, so the last column or row simply
-overhangs the requested rectangle. The overhang is what makes the run robust to
-a slightly optimistic area; the alternative (stretching the pitch to land
-exactly on the far corner) would silently lose coverage whenever the calibration
-is a little off.
+The operator jogs to a feature they can see and presses *Scan from here*, so
+the start is wherever the stage is at that moment — and `origin` says what
+that position **means**. `plan_geometry()` is the one function that turns the
+area, the origin and the pitch into a grid, and both the run and every
+preview of it call it: a preview that disagrees with the plan is worse than
+none, and the corner modes make that easy to get wrong by hand (the tile
+count depends on the field of view, not just on the area).
+
+| Origin | The start position is | Tiles per axis | Coverage |
+|---|---|---|---|
+| **Centre** *(default)* | the middle of the first tile | `ceil((area − FOV/2) / pitch) + 1` | half a frame behind the start, the far edge covered |
+| **Corner** | a corner of the area | `ceil((area − FOV) / pitch) + 1`, then the step is re-divided to `(area − FOV)/(n−1)` | lands on the far edge **exactly**, and it is the fewest tiles that can |
+| **Corner (pitch)** | a corner of the area | `ceil((area − FOV/2) / pitch) + 1` | the last tile's *centre* on the far edge; the union overhangs by up to one step |
+
+*Centre* is what the first version did, and it stays the default because
+"scan around what I am looking at" is a real thing to want. *Corner* is for
+covering a region: it spends no frame on the space behind the start point
+and lands on the far edge to the micron. *Corner (pitch)* is for when the
+area typed is the path the stage walks rather than the region the frames
+cover — the requested overlap is respected exactly, and the last tile
+overhangs.
+
+An area smaller than one frame gets one tile, centred on it.
+
+**The coverage argument was wrong once, and the fix is worth recording.**
+The first implementation used `ceil(area / pitch)` tiles from a centre
+origin and justified it with `(n−1)·pitch + FOV ≥ area` — true, and
+irrelevant: it measures the covered *span*, and half of that span lies
+behind the origin. On the bench 5×, a 2000 µm area was covered only to
+1912 µm, and the 88 µm strip nobody imaged was invisible until the test
+that checks the union against the rectangle was written
+(`test_scan_plan.py::test_every_origin_mode_covers_the_area_it_was_given`).
+Coverage is now a property of the plan, asserted for every mode, both
+directions, and a range of areas and overlaps.
 
 ## Path orders
 
@@ -65,12 +92,22 @@ preview, the map and the run are all the same arithmetic.
 
 | Path | Order | Notes |
 |---|---|---|
-| **Serpentine** | rows end-to-end, alternating direction | The default. `serpentine off` runs every row the same way |
+| **Serpentine** | rows end-to-end, alternating direction | The default. *Order: One-way* runs every row the same way |
 | **Spiral** | ring by ring, outermost first | Same tile centres, inward-working order |
 | **Hilbert** | the curve, clipped to the rectangle | Complete, but loses its locality on very asymmetric areas |
 
+"Serpentine" and "Serpentine, one-way" were never two paths — they are one
+order with a direction rule — so the panel asks the two questions
+separately: **Path** (Serpentine / Spiral / Hilbert) and **Order**
+(Serpentine / One-way). Spiral and Hilbert ship as experimental: complete by
+test, no bench history, and the serpentine's locality is what keeps the
+inter-tile moves short.
+
 `start_axis` chooses whether rows advance first along X or along Y, and
-`x_dir`/`y_dir` mirror the whole rectangle from the start point.
+`x_dir`/`y_dir` mirror the whole rectangle from the start point. Both are
+segmented buttons on the panel rather than drop-downs: a scan setting is
+changed while looking down the eyepieces, and a popup is a look away from
+the sample.
 
 **Every order is proven complete by test, not by inspection**: for a matrix of
 rectangle shapes — including the degenerate 1 × N and N × 1, where a spiral or a
@@ -79,10 +116,6 @@ the visited cells are a *permutation* of the grid. That is the property that
 matters: a missing corner in a scan is invisible until someone looks for a flake
 that was never imaged.
 
-Spiral and Hilbert are labelled experimental in the UI: they are complete by
-test, but they have no bench history and the serpentine's locality (each tile
-adjacent to the last) is what keeps the inter-tile moves short.
-
 ## Motion, settling and backlash
 
 Per waypoint, in order:
@@ -90,8 +123,14 @@ Per waypoint, in order:
 1. **Move** to the tile centre, composed of the driver's validated fixed-length
    moves through `ManagerStageAdapter` — the manager's own Zolix worker, never a
    second serial handle, so STOP ALL and the status polling still cover a run.
-   Speed is the configured pps scaled by the active objective's
-   `stage_speed_multiplier` (clamped to [0.05, 1.0], floor 10 pps).
+   The speed is `scan.speed_pps`, and **only** that: one number, set in
+   Preferences → Scan, used for the run and for *go to sample* alike. It is
+   not the manual jog speed and it is not scaled by the objective's
+   `stage_speed_multiplier` (that one is a jog preference and still applies
+   there, through `ActionResolver`). The reason a single speed is enough:
+   the scan drives the controller in fixed-steps mode, so the controller
+   generates its own acceleration and deceleration ramp. There is no
+   stability case left for a slow/fast pair to answer.
 2. **`wait_idle`** — position stable across three consecutive telemetry samples
    at 0.2 s, i.e. at least 0.6 s after the motion stops. This is the single
    largest *fixed* cost per tile: with the settle and the capture it comes to
@@ -131,7 +170,10 @@ camera outright, use `CameraFrameSource` and the same gate.
 
 ## What a scan writes
 
-`~/Documents/TALOS_scans/scan_<timestamp>/`:
+`~/Pictures/TALOS/scans/scan_<timestamp>/` — beside the snapshots, where
+the Capture group's folder is, rather than in a second tree under
+`Documents`. The folder is chosen on the panel, with the same field +
+browse + open row the Capture group uses: one editor for one path.
 
 | File | Contents |
 |---|---|
@@ -165,6 +207,15 @@ it** — which is the whole story of `cv/orientation.py`, and it has two parts:
 Tiles are drawn as captured, with no content rotation: they come from the same
 frames the live view shows, so the flip is already in the pixels.
 
+The **footprint** — the outlined box with a faint fill — is the field of
+view at the current stage position, and it is set only from a position that
+is actually known: `set_footprint(None)` means "no telemetry yet" and draws
+nothing. That distinction is not pedantic. The first version passed the
+whole device payload to `StagePosition.from_telemetry`, which reads a *flat*
+dict, so the position came back as `(0, 0, 0)` — and stage (0, 0) is a real
+place, so the box sat at origin on every idle frame, unrelated to the plan.
+A missing position and a position at the origin must not look the same.
+
 ## Accuracy, and why the mosaic is not a measurement
 
 **Nothing measures from the mosaic.** Identification runs on each frame
@@ -193,8 +244,25 @@ scan's own start sequence submits a *Zolix-only* stop rather than
 `manager.stop_all()`, so it cannot abort itself through that same signal.
 
 While a scan runs, `AppState.mode` is `SCAN` — the single gate every manual
-input source funnels through — so jogging is refused, with the mode badge in the
-status bar saying why. STOP ALL always works.
+input source funnels through — so jogging is refused, with the mode badge in
+the status bar saying why. STOP ALL always works, on the panel and in the
+map's own window alike: Esc does what it does everywhere else, so there is
+no window in this application where the panic key has been quietly
+repurposed.
+
+## What the operator changes, and what they set once
+
+The panel carries the settings that change *between* runs: the area, the
+origin, the directions, the path order, the start axis, whether to come
+back, and the output folder. Overlap, settle time, scan speed, backlash and
+which extra files a run writes are in **Preferences → Scan** — set once and
+then not thought about again.
+
+Which key belongs to which is pinned by a test
+(`test_preferences.py::test_the_scan_page_owns_what_the_panel_does_not`):
+the two sets must be disjoint and together cover the section. A key in
+neither is a value nothing can change; a key in both is somewhere for the
+two editors to disagree. Writing that test caught `scan.dir` on both sides.
 
 ## Bench status
 
@@ -203,6 +271,10 @@ status bar saying why. STOP ALL always works.
   would have shown up as visible gaps or double-coverage rather than a
   continuous image.
 - **Scale: verified separately** against a calibration glass slide.
+- **The origin modes have no bench history yet.** They are pure geometry with
+  the coverage proof asserted in `test_scan_plan.py`, and the properties that
+  matter at the bench — the tile count and the union landing on the far edge —
+  are visible on the map before the run starts.
 - **Still owed**: Esc mid-scan end-to-end, a deliberately stalled camera (the
   missing-frame path), and a first identification run on a real wafer. The full
-  checklist is in handoff #32 of the development journal.
+  checklist is in `docs/journal/BENCH_TODO.md`.

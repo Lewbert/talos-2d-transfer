@@ -133,6 +133,14 @@ class CurvePlot(QWidget):
 
         painter.setPen(QPen(QColor(theme.BORDER), 1))
         painter.drawRect(rect)
+        # Quarters, so a curve can be read rather than only recognised:
+        # without them "it rises about there" is the most the eye can say.
+        painter.setPen(QPen(QColor(theme.BORDER), 1))
+        for fraction in (0.25, 0.5, 0.75):
+            x = rect.left() + fraction * rect.width()
+            y = rect.top() + fraction * rect.height()
+            painter.drawLine(QPointF(x, rect.top()), QPointF(x, rect.bottom()))
+            painter.drawLine(QPointF(rect.left(), y), QPointF(rect.right(), y))
         # the identity, for reference — what "no change" looks like
         painter.setPen(QPen(QColor(theme.TEXT_DIM), 1, Qt.PenStyle.DashLine))
         painter.drawLine(QPointF(at(0, "x"), at(0, "y")),

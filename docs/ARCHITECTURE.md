@@ -16,7 +16,8 @@ talos/instruments.py InstrumentManager: the ONLY component that submits jobs
 talos/hal/proxies/   one worker QThread per device (serial I/O lives here)
 talos/hal/devices/   drivers: zolix, sigmakoki, focus, yudian, camera backends
 talos/hal/sim/       drop-in simulated devices (same interfaces)
-talos/cv/            autofocus strategies, flake detection, scan, metrics
+talos/cv/            autofocus strategies, flake detection, scan, metrics,
+                     pre-processing
 talos/config.py      settings: defaults + user file + migrations
 talos/calibration_store.py  SQLite objective/calibration table
 ```
@@ -33,6 +34,7 @@ Dependencies point downwards only: UI → input → manager → proxies → driv
 | one QThread (`CameraProxy`) | the camera backend, frame fetch loop | publishes frames and properties |
 | focus worker (same thread as the focus proxy) | also runs the autofocus job inline | see below |
 | scan `_Worker` QThread | a `GridScanner` run | submitted jobs, waits for completions |
+| detection `_DetectWorker` QThread | the pre-processing chain and the identification pipeline, plus the scan's exports | one queue: live preview frames drop, scan tiles never do. Owned by the Sample Finding tab |
 
 **Rules that keep this safe**
 
@@ -114,8 +116,10 @@ camera flip is likewise independent — it rotates the image, never an axis.
   frame's true centre. `_frame_pixmap` stays CLEAN; `_compose` copies it.
 - **On the overlay surface** (a mouse-transparent child stacked above the frame
   label — Qt paints children after the parent): the AF ROI outline + tag, the
-  drag rubber band, the scale bar, the AF status pill and the scan-path panel.
-  These are UI chrome, and their geometry is mapped through
+  drag rubber band, the scale bar and the AF status pill. The three-view
+  switch is a sibling of the live view rather than part of this stack, and it
+  is repositioned over the view's top edge on every resize. None of these is
+  ever in the pixels the pipeline sees. Their geometry is mapped through
   `fit_transform`/`roi_for_resolution` so they stay frame-anchored at any
   window size.
 
@@ -283,14 +287,32 @@ counted **missing**; nothing is ever filed under a position it did not come
 from. The CLI benches, which own their camera, use `CameraFrameSource` and the
 same gate.
 
-**Identification is a chain of stages** (`cv/identify.py`), not a mode: two
-source stages (colour match, contrast) produce a mask, one cleans it, then
-gates — size in µm², frame edge, boundary sharpness, scale-bar annotation —
-decide what survives, and a merge stage joins fragments. Each stage carries its
-own parameters, switches off independently, and reports how many candidates it
-let through. The engine is order-respecting and kind-dispatched (`source` /
-`mask` / `gate` / `merge`), so a new stage is a dataclass and a `RANGES` entry
-— no UI code and no pipeline change.
+**Identification is a chain of stages** (`cv/identify.py`), not a mode: a
+colour-match source stage produces a mask, one stage cleans it, then gates —
+size in µm², frame edge, boundary sharpness — decide what survives, and a
+merge stage joins fragments. Each stage carries its own parameters, switches
+off independently, and reports how many candidates it let through. The engine
+is order-respecting and kind-dispatched (`source` / `mask` / `gate` /
+`merge`), so a new stage is a dataclass and a `RANGES` entry — no UI code and
+no pipeline change.
+
+**In front of the chain is pre-processing** (`cv/preprocess.py`): shade
+correction, an edge-preserving denoise, the tone operations and the
+local-contrast curve, in that order, off until switched on. It is a pure
+transform — it never draws and is never written to disk, so the raw capture is
+still what a snapshot, a scan tile and the mosaic contain. The point of it is
+that the operator tunes filters against the same pixels the mask segments: the
+dropper samples the pre-processed layer, the pipeline runs on it, and the curve
+is pinned at the picked colour so that switching it on cannot make the sample
+the operator pointed at disappear from the mask.
+
+**The pipeline is fed from the frame slot and from nothing that draws.** The
+live stream, the frame slot and every scan tile are raw; the only overlay burn
+in the application is the opt-in scale bar on a snapshot copy, applied inside
+the camera backend. That is worth stating as a rule rather than as a fact,
+because the rule is what a future overlay would have to be checked against —
+and it is why there is no longer a stage whose job was to reject the
+application's own annotation.
 
 **It always runs on ONE frame.** A scan's tiles are each identified on their
 own, at full resolution, and the mosaic is never an input: merging tens or
@@ -330,21 +352,26 @@ footprint walking across them, the route, and a marker per find. Tiles are
 drawn AS CAPTURED — they come from the same frame slot the live view does, so
 the camera flip is already in the pixels.
 
-**The processed view is a verdict, not a decoration.** Every region the sources
-found is drawn with its own OUTLINE — bright for what survived the chain, dim
-for what a gate threw away — over a frame darkened everywhere the sources did
-not match. Deliberately not rectangles: boxes round shapeless blobs overlap and
-read as one object, and they hide the shape the operator is judging. The
-darkening keeps the sample's own pixels visible inside the match, so it reads
-as "this part of the wafer", not as a mask poster.
+**The live view has three modes, and the last two are the worker's output.**
+*Original* is the stream. *Pre-processed* is the filter chain's result, which
+is also the layer the dropper samples. *Samples* is a verdict rather than a
+decoration: every region the source found is drawn with its own OUTLINE —
+bright for what survived the chain, dim for what a gate threw away — over a
+frame darkened everywhere it did not match. Deliberately not rectangles: boxes
+round shapeless blobs overlap and read as one object, and they hide the shape
+the operator is judging. The darkening keeps the sample's own pixels visible
+inside the match, so it reads as "this part of the wafer", not as a mask
+poster.
 
-**Nothing here blocks.** Capture runs on the scan thread; identification runs
-on a detection thread fed by a queue (tiles queue — a tile not examined is a
-sample not found; live preview frames drop instead — a preview lagging the
-stream is worse than one that skips). Detection outlives the capture by design,
-so the exports wait for the queue to drain. The scan console has no live view
-of its own: it drives the Sample Finding tab's, which is the one place the
-stream is shown, and hands it the processed frame.
+**Nothing here blocks.** Capture runs on the scan thread; pre-processing and
+identification run on ONE detection thread fed by a queue (tiles queue — a
+tile not examined is a sample not found; live preview frames drop instead — a
+preview lagging the stream is worse than one that skips). That is what makes an
+expensive filter acceptable: a denoise costing hundreds of milliseconds delays
+the next preview and nothing else. Detection outlives the capture by design, so
+the exports wait for the queue to drain. The Sample Finding tab is the only
+place the stream is shown, and the detection worker builds both of its
+processed views from the same array it fed the pipeline.
 
 ## Testing model
 

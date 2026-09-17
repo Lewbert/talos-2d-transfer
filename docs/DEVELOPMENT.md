@@ -55,7 +55,7 @@ confirmation flag. **Read-only unless stated otherwise.**
 | `focus_firmware_probe.py` | Raw-serial verification of the focus firmware's parser (junk, torn lines, floods) — the post-flash check | Yes |
 | `sigmakoki_latency.py --yes` | Continuous-jog ack/latency drill for the transfer stage; prints the raw first reply line | Yes |
 | `scan_manager_bench.py --yes` | The grid scan driven through the real manager, plus a mid-flight abort drill | Yes |
-| `hardware_scan.py` | Standalone serpentine scan (builds its own driver and camera — the app-accurate route is `scan_manager_bench.py`, or the Scan window itself). Takes `--settle-ms` and `--backlash-um` | Yes |
+| `hardware_scan.py` | Standalone serpentine scan (builds its own driver and camera — the app-accurate route is `scan_manager_bench.py`, or the Sample Finding tab itself). Takes `--settle-ms` and `--backlash-um` | Yes |
 | `autofocus_hardware.py` | Autofocus and backlash calibration from the command line — the tuning companion to the AF panel | Yes |
 | `af_bench3.py` | The current adaptive-v3 autofocus bench, including the σ measurement and the v2/v3 comparison | Yes |
 | `af_abort_bench.py` | Input-abort and stay-on-failure drill through the full stack (manager + service + proxies) | Yes |
@@ -71,7 +71,7 @@ confirmation flag. **Read-only unless stated otherwise.**
 | `smartcam_live.py` | The SmartCamApi verification ladder (baseline, exposure, colour, sweeps, WB, full resolution) | Yes |
 | `smartcam_decode_study.py` | Offline decode study: raw buffers against a ZEN snapshot as ground truth | No |
 | `validate_cv.py` | Flake and edge CV on recorded images; writes annotated PNGs and a report | No |
-| `ui_shot.py` | Screenshot rig for UI work and visual review — grabs each workspace and window at a chosen size (run it against a real display; offscreen renders placeholder glyphs) | No (sim) |
+| `ui_shot.py` | Screenshot rig for UI work and visual review — grabs each workspace and window at a chosen size (run it against a real display; offscreen renders placeholder glyphs). It also poses the Sample Finding tab in all three view modes with the filters on and blobs planted for the chain to find — those three are the doc images, and an empty overlay would read as a broken tab rather than a quiet one | No (sim) |
 | `ui_scale_check.py` | End-to-end scale-bar pixel check across the three render paths | No (sim) |
 | `make_qss_assets.py` | Regenerates the bundled stylesheet glyph PNGs into `resources/qss/` | No |
 | `migrate_settings.py` | Imports the precursor projects' settings into `%APPDATA%\TALOS\settings.json` (idempotent, `--dry-run`) | No |

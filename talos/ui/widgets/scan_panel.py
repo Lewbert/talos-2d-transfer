@@ -281,7 +281,9 @@ class ScanPanel(QWidget):
         box.setObjectName("card")
         layout = QVBoxLayout(box)
         layout.setContentsMargins(6, 6, 6, 6)
-        layout.setSpacing(4)
+        # Six, not four: these rows are the ones the operator hits with a
+        # gloved hand between scans, and the segmented rows are 20 px tall.
+        layout.setSpacing(6)
 
         # --- where it goes (the Capture group's shape) -------------------
         where = QLabel("Save to")

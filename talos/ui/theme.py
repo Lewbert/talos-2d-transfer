@@ -214,14 +214,16 @@ QFrame#card {{
 QWidget#segmented {{
     border: 1px solid {BORDER};
     border-radius: 4px;
-    background: {BG};
+    /* A surface, like the hover bar: on the panel's near-black the
+       unselected segments read as gaps rather than as options. */
+    background: {PANEL_ALT};
 }}
 QPushButton#segmented_btn {{
     background: transparent;
     border: none;
     border-right: 1px solid {BORDER};
     border-radius: 0;
-    padding: 3px 8px;
+    padding: 4px 8px;
     min-width: 0;
 }}
 QPushButton#segmented_btn:last-child {{ border-right: none; }}

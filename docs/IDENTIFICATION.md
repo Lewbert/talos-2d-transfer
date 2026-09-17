@@ -3,17 +3,18 @@
 Companion documents: [SCAN.md](SCAN.md) for how the frames are captured,
 [ARCHITECTURE.md](ARCHITECTURE.md) for the threading and the job model,
 [DESIGN.md](DESIGN.md) for why the bench is built the way it is. The code is
-`cv/identify.py` (the chain) with shared helpers in `cv/flakes.py`; the panel
-and the processed view are in `ui/widgets/scan_window.py` and
+`cv/identify.py` (the chain) with shared helpers in `cv/flakes.py`; the
+pre-processing chain that runs in front of it is `cv/preprocess.py`, and the
+panels and the three live-view modes are in `ui/widgets/identify_panel.py` and
 `ui/widgets/live_view.py`.
 
 ## What it is for, and what it refuses to do
 
 The operator points at a colour — a dropper click on the live view, or a typed
 hex — and the chain finds regions of the frame that match it, filtering out the
-things that are not samples: speckle, the frame edge, diffuse smudges, the
-application's own red scale bar. It answers *"where are the flakes that look like
-this?"*, which is the question a transfer workflow actually starts from.
+things that are not samples: speckle, the frame edge, diffuse smudges. It
+answers *"where are the flakes that look like this?"*, which is the question a
+transfer workflow actually starts from.
 
 It does **not** judge thickness, rank materials, or decide whether a flake is
 worth transferring. Colour is not thickness — interference colours overlap
@@ -28,31 +29,55 @@ and the per-frame result is what *go to* needs. A consequence worth stating:
 the mosaic may have a small gap or an imperfect seam without affecting anything
 that matters (see [SCAN.md](SCAN.md#accuracy-and-why-the-mosaic-is-not-a-measurement)).
 
+**The frames it runs on are prepared, never composited.** The input is the raw
+camera frame with the operator's pre-processing chain applied — no scale bar,
+no crosshair, no annotation of any kind. There used to be a stage here whose
+job was to reject the application's own red scale bar; tracing the burn-in
+showed it only ever touched snapshot copies inside the camera backend, so
+there was nothing on this path to reject. The rule that stage stood for is
+kept in its place, and it is now structural: the pipeline is fed from the
+frame slot and from nothing that draws.
+
 ## The chain
 
-Eight stages, in a fixed order. Each has `enabled` plus its own parameters,
+Six stages, in a fixed order. Each has `enabled` plus its own parameters,
 reports how many candidates it let through, and is described to the UI by the
 stage itself (`LABEL`, `RANGES`), so a new stage needs no UI code.
 
 | # | Stage | Kind | Default | What it does |
 |---|---|---|---|---|
 | 1 | **Colour match** | source | **on** | Pixels within a tolerance of the picked colour |
-| 2 | **Contrast** | source | off | Illumination-flattened contrast, Otsu-thresholded — see [Contrast, and what it is not for](#contrast-and-what-it-is-not-for) |
-| 3 | **Clean up** | mask | **on** | Open then close: removes speckle, joins broken edges |
-| 4 | **Size** | gate | **on** | Area in µm², min and max |
-| 5 | **Frame edge** | gate | **on** | Rejects blobs touching the field of view's edge |
-| 6 | **Sharpness** | gate | **on** | Mean boundary gradient: crystals are sharp, smudges are diffuse |
-| 7 | **Scale bar** | gate | **on** | Rejects the app's own saturated red annotation |
-| 8 | **Merge fragments** | merge | **on** | Joins boxes within a gap — one sample often segments as several blobs |
+| 2 | **Clean up** | mask | **on** | Open then close: removes speckle, joins broken edges |
+| 3 | **Size** | gate | **on** | Area in µm², min and max |
+| 4 | **Frame edge** | gate | **on** | Rejects blobs touching the field of view's edge |
+| 5 | **Sharpness** | gate | **on** | Mean boundary gradient: crystals are sharp, smudges are diffuse |
+| 6 | **Merge fragments** | merge | **on** | Joins boxes within a gap — one sample often segments as several blobs |
 
-The two sources are OR'd when both are enabled, so "colour **or** contrast" is a
-supported combination rather than a mode to choose between. With no source
-enabled the chain finds nothing, by construction.
+With the source disabled the chain finds nothing, by construction.
 
 Each stage reports `(in, out)`, and the panel renders the chain as the readout
 it is: `Colour match 812 → Size 12 → Sharpness 2`. That string is the fastest
 way to answer "why is my flake missing" — the stage whose count collapses is the
 one to change.
+
+### Two stages that used to be here, and why they are not
+
+**Contrast** was a second source: Otsu on an illumination-flattened frame. It
+answers *what is here at all* — dust, residue, the wafer edge — which is not
+the question a transfer workflow asks. On the thin samples this is built for
+it is worse than unhelpful: the threshold follows the bulk of the histogram
+rather than the object of interest, so one thick flake in the same frame can
+push a monolayer under it, and a monolayer's deviation from the substrate can
+sit at the flattening's own residual, where Otsu is segmenting texture rather
+than material. Its useful half — the flattening — is now a **pre-processing**
+stage, where it prepares the frame instead of segmenting it.
+
+**Scale bar** rejected saturated red blobs as the app's own annotation. The
+burn-in only ever touches snapshot copies inside the camera backend, so the
+pipeline never saw one; the stage was defending against something that could
+not arrive, which is a defence that quietly stops being checked. The
+prevention is structural now (see above). Both names are recorded in
+`_RETIRED_STAGES` and a stored config that mentions them loads without them.
 
 ## Three rules the implementation exists to keep
 
@@ -77,38 +102,73 @@ must yield the same µm at 1.0 and 0.5 scale.
 The pipeline also never sees a half-edited configuration: the panel rebuilds the
 whole config per job and hands it over, so the worker never reads a widget.
 
-## Contrast, and what it is not for
+## Pre-processing — the layer in front of the chain
 
-The contrast source divides the frame by a heavily blurred copy of itself and
-thresholds the *relative* deviation with Otsu (see `flatten_contrast`). Two
-things about that are worth knowing before it is switched on:
+Everything here runs on the detection worker, once per job, before the chain
+sees the frame. The stage order is fixed and stated on the panel:
+**shade → denoise → tone → curve**. It is not arbitrary: the local-contrast
+curve multiplies small differences around the picked colour, *including* the
+differences that illumination unevenness and sensor noise put there, so those
+two are removed first.
 
-**Otsu splits the histogram in two; it does not select "the most distinct".**
-It needs no absolute contrast level, so a frame containing only faint objects
-still gets segmented — but the split is driven by the bulk of the histogram, so
-one thick flake in the same frame can become the dominant foreground mode and
-push a faint one below the threshold. The mask then contains what is
-conspicuous and misses what is wanted, which is the opposite of a useful prior.
+| Stage | What it does | Default |
+|---|---|---|
+| **Shade correction** | Divide by a heavily blurred copy of the frame (each channel keeps its own mean). The useful half of the old Contrast stage. | off |
+| **Denoise** | Edge-preserving (bilateral) smoothing, for the noise the curve would otherwise amplify. It must not soften flake edges — they are what is being identified. | off |
+| **Tone** | Exposure, brightness, contrast, gamma. All four collapse into the same lookup tables as the curve. | identity |
+| **Local contrast** | The curve below. | off |
 
-**The floor, not the threshold, is what fails on thin samples.** The flattening
-division leaves a residual (blur mismatch, sensor noise, texture), and a
-monolayer's deviation from the substrate can sit at that residual. When it does,
-Otsu is splitting texture rather than material, and no threshold choice fixes it.
+**Pre-processing is a pure transform, and it is never written to disk.**
+Snapshots, scan tiles and the mosaic are all raw captures; the chain exists so
+that the operator can see — and the identification can segment — the same
+prepared frame, and for nothing else.
 
-So: **for monolayers and few-layer samples, use the colour source.** Layer count
-shifts the interference colour in hue and saturation at fixed illumination, so a
-picked colour with a narrow tolerance discriminates on the property that
-actually tracks thickness, rather than on "how different from the background" —
-which measures thickness, focus and illumination together. Contrast is the tool
-for *what is here at all* (dust, tape residue, the wafer edge, a target whose
-colour is unknown), and it is off by default for that reason.
+### The local-contrast curve
 
-A caveat for whoever tunes it: `blur_sigma` is in pixels of whatever frame it is
-given, so the preview's 50 % scale makes the same sigma cover **twice** the
-physical distance it covers in a full-resolution tile. The sharpness threshold is
-normalised for exactly this reason; the blur sigma is not, so a value tuned on
-the live preview is not the same filter on a captured tile. (Noted 2026-09-18;
-no test covers it, and the stage is off by default.)
+The idea is a *matched gain*: steepen the tone curve at the colour the operator
+picked, and flatten it everywhere else. The substrate plateau, which carries no
+layer information, is compressed into a narrow output band; the few levels that
+separate one layer from the next get the display's range instead. In 8-bit
+terms a monolayer and a bilayer might be five or ten levels apart — above the
+sensor's noise but below what the eye separates at a glance — so amplifying
+them recovers information that is genuinely there.
+
+Two properties make it usable rather than merely plausible, and both are
+asserted in `tests/unit/test_preprocess.py`:
+
+**The curve is pinned at 0, at the picked colour, and at 255.** The pick is
+the one that matters, and not for aesthetics: the *same hex* is the colour
+mask's target. A curve that moved the picked value would leave the mask
+searching for a colour the frame no longer contains — you would point at a
+flake, switch the filter on, and watch it disappear. That is why the curve is
+applied **last**, after the exposure and brightness stages: its fixed point
+lands on the value the dropper actually read, which is a value in output space.
+
+**The gain means the gain.** "×3" is the slope at the picked colour, solved for
+rather than assumed — the naive construction delivers about 2.9 and calls it 4,
+because pinning the endpoints has to take something back. Where a request
+cannot be honoured the *band* gives way rather than the gain: pinning three
+points fixes the total slope at 255 whatever the parameters, so a wide band
+boosted hard has to pay for itself with a shelf somewhere, and at ×8 over
+±32 DN that shelf was a hundred input levels collapsing onto one output,
+twenty DN from the colour under examination. The band is narrowed until no more
+than a few levels share an output, and the panel reports what it used
+(`band ±18 DN (asked ±32)`). Only when even the narrowest band cannot carry
+the gain does the delivered gain come out lower, and it says so.
+
+**What it does not fix.** It is a point operation, so it cannot tell a layer
+difference from a lighting difference — that is what shade correction is for,
+and shade correction does not fix a gradient that varies within a single flake.
+It also cannot separate two layers whose colour difference sits under the
+sensor's noise: it multiplies what is there, and if what is there is noise, the
+noise is what gets multiplied.
+
+A caveat for whoever tunes the shade correction: `sigma` is in pixels of
+whatever frame it is given, so the preview's 50 % scale makes the same sigma
+cover **twice** the physical distance it covers on a full-resolution tile. The
+sharpness threshold is normalised for exactly this reason; the shade sigma is
+not, so a value tuned on the live preview is not the same filter on a captured
+tile. (Recorded 2026-09-18; carried over from the stage it replaced.)
 
 ## Configuration
 
@@ -119,14 +179,19 @@ parameter with the wrong type falls back to its default, and a malformed hex
 falls back to a colour that works. A hand-edited settings file must not be able
 to stop the pipeline from running.
 
-## The processed view
+## The three views
 
-**Processed** in the live view's two-button switch shows what the chain makes of
-the frame: everything the sources did *not* match is darkened, and every region
-they did match is outlined by its verdict — **bright** for what survived the
-whole chain, **dim** for what a gate rejected. The operator sees not only what
-was found but what was thrown away and where, which is what makes tuning a
-parameter feel like tuning a filter chain rather than guessing.
+The live view's floating switch offers **Original**, **Pre-processed** and
+**Samples**.
+
+*Original* is the camera's own frame. *Pre-processed* is what the chain above
+makes of it — the layer the dropper samples. *Samples* is the identification
+result drawn over that same layer: everything the source did *not* match is
+darkened, and every region it did match is outlined by its verdict — **bright**
+for what survived the whole chain, **dim** for what a gate rejected. The
+operator sees not only what was found but what was thrown away and where, which
+is what makes tuning a parameter feel like tuning a filter chain rather than
+guessing.
 
 Deliberately not rectangles: a box round a shapeless blob says little, boxes
 from neighbouring regions overlap and read as one object, and a box hides the
@@ -134,20 +199,18 @@ shape the operator is judging. The darkening keeps the sample's own pixels
 visible inside the match, so the view reads as "this part of the wafer" rather
 than as a mask poster.
 
-The **dropper always samples the original frame**, never what is on screen: in
-processed mode the display is darkened and outlined, so picking from it would
-return a colour the sample does not have.
-
-The processed view is a **display choice**: the camera stream, the autofocus and
-a running scan never wait on it. The identification runs on its own thread, fed
-by the frames that were delivered anyway.
+**The dropper samples the pre-processed layer, never the display.** In Samples
+mode the screen is darkened and outlined, so picking from it would return a
+colour the sample does not have — and with pre-processing switched off that
+layer IS the raw frame, byte for byte. It is also the array the identification
+ran on, so a colour picked off the screen is a colour the mask will look for,
+by construction rather than by coincidence.
 
 ## Performance and scheduling
 
 - **Live preview**: one job in flight, newest wins — a frame that arrives while
   the previous one is still being processed is *dropped*, because a preview that
-  lags the stream is worse than one that skips frames. It runs only while the
-  console is on screen or the tab is showing Processed.
+  lags the stream is worse than one that skips frames.
 - **Scan tiles**: queued unconditionally. A tile that is not examined is a
   sample that was not found, so nothing is dropped; the queue drains while the
   scan runs and after it finishes, and the exports wait for it (detection
@@ -155,26 +218,40 @@ by the frames that were delivered anyway.
 - A failure inside the pipeline is logged and the next job runs: it can never
   stop a scan.
 
+**Everything here runs on one worker thread, and never on the GUI thread.**
+That is what makes an expensive pre-processing stage acceptable, and it is why
+the two processed views are slight previews rather than the live stream: they
+cost the worker's cadence, and the camera's capture sequence, the frame slot,
+the autofocus and a running scan never wait on them. A preview that lags is
+recoverable; a capture that waits on a bilateral filter is not.
+
 ## Tuning on the bench
 
-Start with colour alone, then add the chain one stage at a time and watch the
-counts — each stage's `(in, out)` says whether it is doing anything useful.
+Look at **Pre-processed** while setting the filters up, then switch to
+**Samples** to see what the chain made of it. Start with colour alone, then add
+the chain one stage at a time and watch the counts — each stage's `(in, out)`
+says whether it is doing anything useful.
 
-1. **Tolerance** until the flake family is caught without the substrate.
-2. **Min saturation** if the substrate (or the illumination gradient) comes in
+1. **Pre-processing**, if the sample needs it. Pick the colour first (the
+   dropper on the Pre-processed view), then try the local-contrast curve: the
+   gain is the slope at the picked colour, the band is how far either side it
+   stays steep. A wide band with a high gain will be narrowed automatically;
+   the readout under the controls says what it actually used. Shade correction
+   is worth trying when the illumination is visibly uneven — it removes a
+   gradient the curve would otherwise amplify as eagerly as a flake.
+2. **Tolerance** until the flake family is caught without the substrate.
+3. **Min saturation** if the substrate (or the illumination gradient) comes in
    with it — this is the parameter that does the most work on a real wafer.
-3. **Clean up**: raise the kernel if a flake fragments into speckle; it also
+4. **Clean up**: raise the kernel if a flake fragments into speckle; it also
    merges broken edges, so watch that it does not eat small samples.
-4. **Size**: the µm² floor is the honest filter, and it is in physical units, so
-   it means the same thing at every objective.
-5. **Sharpness**: raise it to reject defocused blobs. Its default (4.0) is
-   deliberately low — a colour-matched contour traces the colour boundary and
-   scores in the tens, while a contrast-matched one wanders through the noise
-   around the object and scores in single digits, so a threshold tuned on one
-   source will silently reject everything from the other.
-   If the target is a monolayer or few-layer flake, skip this ladder's contrast
-   branch entirely and tune the colour source instead (see the section above).
-6. **Merge**: raise the gap when one flake arrives as several boxes.
+5. **Size**: the µm² floor is the honest filter, and it is in physical units, so
+   it means the same thing at every objective. The µm² floor is the one filter
+   here whose threshold is a fact about the sample rather than about the image.
+6. **Sharpness**: raise it to reject defocused blobs. Its default (4.0) is
+   deliberately low, because a colour-matched contour traces the colour
+   boundary and scores in the tens — a threshold picked without measuring would
+   reject most real samples.
+7. **Merge**: raise the gap when one flake arrives as several boxes.
 
 The unit tests build synthetic frames with known truth (a blob of a known colour
 at a known place, and a substrate that is none of those), which is the fastest
@@ -183,8 +260,8 @@ PNGs for real frames.
 
 ## Bench status
 
-The thresholds have only ever met synthetic blobs. The chain is exercised
-end-to-end in simulation — a wafer that moves with the stage, per-tile
-identification, the exports — but the first real-wafer tuning session is still
-owed, and it is the next item after the scan's own bench campaign
-(handoff #32 in the development journal).
+The thresholds have only ever met synthetic blobs, and so has the curve: its
+properties are proven on synthetic level ramps, not on a real monolayer/bilayer
+pair. The first real-wafer tuning session is still owed — it is the next
+item after the scan's own bench campaign, and the checklist is
+`docs/journal/BENCH_TODO.md`.
