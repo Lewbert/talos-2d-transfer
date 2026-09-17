@@ -239,8 +239,12 @@ def flake_to_stage(x_px: float, y_px: float, img_shape: tuple[int, ...],
                    flip: bool = False) -> tuple[float, float]:
     """Map a pixel position to the stage coordinate it images (µm).
 
-    v1: orthotropic pixel scale (um_per_px_x/y) with the image center at
-    the stage position. M7 upgrades to the measured 2×2 jacobian.
+    Orthotropic pixel scale (um_per_px_x/y) with the image centre at the
+    stage position. The plan had this upgrade to a measured 2×2 jacobian;
+    the bench says not to bother — the X↔Y anisotropy is negligible and the
+    stage-to-image rotation is extremely small, so the off-diagonal terms
+    would add a calibration step and a matrix inversion for a correction
+    below the noise of everything downstream (2026-09-18).
 
     ``flip`` is the camera flip: the frame is rotated 180° about its centre,
     so with the flip on a feature RIGHT of the centre is at a SMALLER stage
