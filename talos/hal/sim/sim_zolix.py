@@ -171,12 +171,22 @@ class SimZolixXYRStage(XYRStage):
         )
 
     def move_rel_um(self, dx_um: float, dy_um: float, dr_deg: float | None = None,
-                    speed: StageSpeed = StageSpeed.SLOW) -> None:
+                    speed: StageSpeed = StageSpeed.SLOW,
+                    speed_pps: int | None = None) -> None:
+        """Same signature as the real driver, ``speed_pps`` included.
+
+        Keeping the two in step is not cosmetic: a caller that passes a
+        parameter the sim lacks gets a TypeError on the DEVICE thread,
+        where it surfaces as a failed job and a button that does nothing —
+        which is exactly how "go to sample" was broken (2026-09-18). The
+        signatures are pinned together by test.
+        """
         self.move_abs_um(
             self._x * self.um_per_pulse_xy + dx_um,
             self._y * self.um_per_pulse_xy + dy_um,
             self._r * self.um_per_pulse_r + dr_deg if dr_deg is not None else None,
             speed=speed,
+            speed_pps=speed_pps,
         )
 
     def move_continuous(self, axis: str, direction: int, speed_pps: int | None = None) -> None:

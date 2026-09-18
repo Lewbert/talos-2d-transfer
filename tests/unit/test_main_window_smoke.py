@@ -1035,3 +1035,97 @@ def test_preferences_reach_the_running_scan(window):
     assert params.speed_pps == 1234
     assert params.overlap == pytest.approx(0.33)
     assert load_scan_settings(window._settings)["speed_pps"] == 1234
+
+
+def _found_sample(window, x_um=1500.0, y_um=-250.0):
+    """Put one sample in the panel's table and select it."""
+    from talos.models import FlakeCandidate
+
+    scan = window._sample_finding.scan_panel
+    scan._show_candidates([FlakeCandidate(x_px=1.0, y_px=2.0, area_px2=10.0,
+                                          area_um2=42.0, x_um=x_um, y_um=y_um,
+                                          score=7.0)], "live view")
+    scan._table.selectRow(0)
+    return scan
+
+
+def test_go_to_sample_submits_arguments_the_driver_accepts(window):
+    """Regression: 'go to sample' did NOTHING.
+
+    The move was submitted with ``speed_pps=…`` as a KEYWORD, but
+    ``InstrumentManager.submit`` carries its arguments as a tuple and
+    takes no keyword arguments — so the call raised TypeError inside the
+    click handler and the stage never moved. Nothing caught it because
+    every test's manager stub accepted **kwargs.
+
+    The check that generalises: whatever the panel hands to ``submit``
+    must bind against the real driver's signature.
+    """
+    import inspect
+
+    from talos.hal.devices.zolix import ZolixXYRStage
+
+    scan = _found_sample(window)
+    assert scan._selected == 0
+
+    # answer the confirmation dialog with Ok
+    from PySide6.QtWidgets import QMessageBox
+
+    original = QMessageBox.question
+    QMessageBox.question = staticmethod(
+        lambda *a, **kw: QMessageBox.StandardButton.Ok)
+    try:
+        scan._on_go_to()
+    finally:
+        QMessageBox.question = original
+
+    device, method, *args = window._manager.submits[-1]
+    assert device == "zolix" and method == "move_rel_um"
+    # binds, or raises TypeError — the bug above
+    inspect.signature(getattr(ZolixXYRStage, method)).bind(None, *args)
+    dx, dy = args[0], args[1]
+    assert dx == pytest.approx(1500.0)      # from the stage origin
+    assert dy == pytest.approx(-250.0)
+    # the scan's speed, not the jog speed
+    assert args[4] == 500
+    assert "Moving to sample #1" in scan.status.text()
+
+
+def test_the_sample_move_refuses_while_a_job_owns_the_axes(window):
+    scan = _found_sample(window)
+    window._state.set_mode("SCAN")
+    from PySide6.QtWidgets import QMessageBox
+
+    seen: list = []
+    original = QMessageBox.information
+    QMessageBox.information = staticmethod(lambda *a, **kw: seen.append(a))
+    try:
+        scan._on_go_to()
+    finally:
+        QMessageBox.information = original
+    assert seen, "it must say why, not silently do nothing"
+    assert not any(s[1] == "move_rel_um" for s in window._manager.submits)
+
+
+def test_selecting_a_table_row_enables_go_to(window):
+    scan = _found_sample(window)
+    assert scan._go_to_btn.isEnabled()
+    scan._table.clearSelection()
+    assert not scan._go_to_btn.isEnabled()
+
+
+def test_the_samples_are_a_table_outside_the_settings_scroll(window):
+    """The samples are pinned below the settings, not buried inside them —
+    and they are a table, because the row IS the selection."""
+    from PySide6.QtWidgets import QScrollArea
+
+    scan = window._sample_finding.scan_panel
+    assert scan._table.rowCount() >= 0
+    assert [scan._table.horizontalHeaderItem(i).text() for i in range(5)] == \
+        ["#", "X µm", "Y µm", "Area µm²", "Edge"]
+    # not inside any scroll area
+    parent = scan._table.parentWidget()
+    while parent is not None and parent is not scan:
+        assert not isinstance(parent, QScrollArea), \
+            "the samples must not scroll with the scan settings"
+        parent = parent.parentWidget()

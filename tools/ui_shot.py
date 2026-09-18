@@ -14,12 +14,23 @@ so the real display is preferred for visual QA.
 Note: with the debug console enabled (default), a separate console
 window tails the log file (the app itself never detaches from the
 launching terminal).
+
+**It writes settings, so it does not use yours.** The rig poses the app —
+an area, a filter chain, a scan folder — and the app persists whatever it
+is posed with. Without an override that lands in the operator's real
+settings file, which is not hypothetical: a shot folder path overwrote a
+live snapshot path once, and the next launch would have written snapshots
+into a directory that does not exist. The rig now points ``TALOS_APPDATA``
+at a throwaway directory itself, unless one is already set, and says which
+it is using.
 """
 
 from __future__ import annotations
 
 import argparse
+import os
 import sys
+import tempfile
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -71,6 +82,14 @@ def main() -> int:
                         metavar=("W", "H"))
     args = parser.parse_args()
     args.out.mkdir(parents=True, exist_ok=True)
+
+    # Never the operator's settings (see the module docstring). An
+    # explicit TALOS_APPDATA still wins — that is how a caller asks for a
+    # particular scratch profile.
+    if not os.environ.get("TALOS_APPDATA"):
+        scratch = Path(tempfile.gettempdir()) / "talos-ui-shot-appdata"
+        os.environ["TALOS_APPDATA"] = str(scratch)
+        print(f"using a throwaway appdata: {scratch}")
 
     qapp = bootstrap()
     app = TALOSApplication(qapp, sim=True)

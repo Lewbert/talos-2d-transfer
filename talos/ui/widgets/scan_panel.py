@@ -33,7 +33,6 @@ from pathlib import Path
 import numpy as np
 from PySide6.QtCore import QThread, Qt, Signal
 from PySide6.QtWidgets import (
-    QButtonGroup,
     QDoubleSpinBox,
     QFileDialog,
     QFrame,
@@ -45,11 +44,14 @@ from PySide6.QtWidgets import (
     QPushButton,
     QScrollArea,
     QStackedWidget,
+    QTableWidget,
+    QTableWidgetItem,
     QVBoxLayout,
     QWidget,
 )
 
 from talos.cv.calibration import SENSOR_HEIGHT_PX, SENSOR_WIDTH_PX
+from talos.hal.base import StageSpeed
 from talos.cv.frame_source import LatestFrameSource
 from talos.cv.scan import (ORIGIN_LABELS, ORIGINS, PATHS, GridScanner,
                            plan_path, scan_speed_config)
@@ -164,8 +166,14 @@ class ScanPanel(QWidget):
         # and the sample list are what the operator is actually reading
         # while a run goes. The map is one double-click from being bigger.
         layout.addWidget(self._build_map_card(), 1)
+        # The run card and the samples are PINNED, top and bottom, the way
+        # Quick Actions is pinned on the Navigation tab: one is what you
+        # press, the other is what you read, and neither should be
+        # somewhere you have to scroll to find. Only the settings between
+        # them scroll.
         layout.addWidget(self._build_run_card())
         layout.addWidget(self._build_scroll(), 2)
+        layout.addWidget(self._build_samples_group())
 
     def _build_map_card(self) -> QWidget:
         card = QFrame()
@@ -369,6 +377,14 @@ class ScanPanel(QWidget):
         return box
 
     def _build_samples_group(self) -> QWidget:
+        """The found samples: a table, pinned below the settings scroll.
+
+        A table rather than a stack of buttons. The buttons read like a
+        menu of actions and only one of them was ever "selected", which is
+        a state the eye could not see; a table row *is* the selection, the
+        columns line up so coordinates can be compared at a glance, and
+        the same rows are what the CSV export writes.
+        """
         box = QFrame()
         box.setObjectName("card")
         layout = QVBoxLayout(box)
@@ -383,20 +399,29 @@ class ScanPanel(QWidget):
         self._samples_note.setObjectName("dim")
         self._samples_note.setWordWrap(True)
         layout.addWidget(self._samples_note)
-        # A scrollable list of labels rather than a table: the panel is
-        # narrow, and four numbers per row do not fit without eliding the
-        # one that matters (where it is).
-        self._sample_list = QVBoxLayout()
-        self._sample_list.setSpacing(0)
-        holder = QWidget()
-        holder.setLayout(self._sample_list)
-        list_scroll = QScrollArea()
-        list_scroll.setWidgetResizable(True)
-        list_scroll.setFrameShape(QFrame.Shape.NoFrame)
-        list_scroll.setMinimumHeight(90)
-        list_scroll.setWidget(holder)
-        layout.addWidget(list_scroll, 1)
-        self._buttons: list[QPushButton] = []
+
+        self._table = QTableWidget(0, 5)
+        self._table.setHorizontalHeaderLabels(
+            ["#", "X µm", "Y µm", "Area µm²", "Edge"])
+        self._table.setEditTriggers(
+            QTableWidget.EditTrigger.NoEditTriggers)
+        self._table.setSelectionBehavior(
+            QTableWidget.SelectionBehavior.SelectRows)
+        self._table.setSelectionMode(
+            QTableWidget.SelectionMode.SingleSelection)
+        self._table.verticalHeader().setVisible(False)
+        # Tall enough for about six samples, and no taller: this card is
+        # pinned, so every pixel it takes comes off the settings above it.
+        # More than six scroll inside the table.
+        self._table.setMinimumHeight(110)
+        self._table.setMaximumHeight(180)
+        header = self._table.horizontalHeader()
+        for column in range(5):
+            header.setSectionResizeMode(column, header.ResizeMode.Stretch)
+        self._table.itemSelectionChanged.connect(self._on_row_changed)
+        self._table.doubleClicked.connect(lambda _index: self._on_go_to())
+        layout.addWidget(self._table, 1)
+
         row = QHBoxLayout()
         row.setSpacing(4)
         self._go_to_btn = QPushButton("Go to")
@@ -417,7 +442,6 @@ class ScanPanel(QWidget):
         layout.addLayout(row)
         self._candidates: list[FlakeCandidate] = []
         self._selected = -1
-        self._rows = QButtonGroup(self)
         return box
 
     def set_flip(self, flip: bool) -> None:
@@ -666,30 +690,18 @@ class ScanPanel(QWidget):
         return out
 
     def _show_candidates(self, candidates, source: str) -> None:
-        """Rebuild the list. The rows come from the same formatter the CSV
+        """Rebuild the table. The rows come from the same formatter the CSV
         export uses, so what is exported is what was shown."""
         self._candidates = list(candidates)
         self._selected = -1
-        self._rows = QButtonGroup(self)
-        self._rows.setExclusive(True)
-        while self._sample_list.count():
-            item = self._sample_list.takeAt(0)
-            widget = item.widget()
-            if widget is not None:
-                widget.deleteLater()
-        for index, cand in enumerate(self._candidates):
-            row = QPushButton(
-                f"{index + 1}.  {cand.x_um:.1f}, {cand.y_um:.1f} µm · "
-                f"{cand.area_um2:.1f} µm²")
-            row.setObjectName("sample_row")
-            row.setCheckable(True)
-            row.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-            row.setToolTip("Select, then Go to, to bring it under the "
-                           "crosshair")
-            row.clicked.connect(
-                lambda _checked=False, index=index: self._select(index))
-            self._rows.addButton(row)
-            self._sample_list.addWidget(row)
+        rows = candidate_rows(self._candidates)
+        self._table.blockSignals(True)
+        self._table.setRowCount(len(rows))
+        for row, cells in enumerate(rows):
+            for column, text in enumerate(cells):
+                self._table.setItem(row, column, QTableWidgetItem(text))
+        self._table.clearSelection()
+        self._table.blockSignals(False)
         count = len(self._candidates)
         self._samples_note.setText(
             f"{count} sample(s) from the {source}." if count
@@ -698,12 +710,23 @@ class ScanPanel(QWidget):
         # is a button that lies
         self._go_to_btn.setEnabled(count > 0 and self._job is None)
 
+    def _on_row_changed(self) -> None:
+        """Follow the SELECTION, not the current index.
+
+        ``currentRow()`` outlives a ``clearSelection()`` — the current
+        index stays where it was — so reading it here left "Go to" enabled
+        after the table had visibly emptied, pointing at a row nothing was
+        highlighting.
+        """
+        rows = self._table.selectionModel().selectedRows()
+        self._selected = rows[0].row() if rows else -1
+        self._go_to_btn.setEnabled(self._selected >= 0 and self._job is None)
+
     def _select(self, index: int) -> None:
+        """Select a row from elsewhere (the map's markers)."""
         if not 0 <= index < len(self._candidates):
             return
-        self._selected = index
-        self._rows.button(index).setChecked(True)
-        self._go_to_btn.setEnabled(self._job is None)
+        self._table.selectRow(index)
 
     def _on_marker_selected(self, index: int) -> None:
         self._select(index)
@@ -722,11 +745,10 @@ class ScanPanel(QWidget):
         self._live_candidates = []
         self._candidates = []
         self._selected = -1
-        while self._sample_list.count():
-            item = self._sample_list.takeAt(0)
-            widget = item.widget()
-            if widget is not None:
-                widget.deleteLater()
+        self._table.blockSignals(True)
+        self._table.setRowCount(0)
+        self._table.clearSelection()
+        self._table.blockSignals(False)
         self.map.set_markers([])
         self.map.set_caption("")
         self._samples_note.setText("Results cleared.")
@@ -1002,8 +1024,15 @@ class ScanPanel(QWidget):
             return
         # The same speed the scan runs at, for the same reason: this is a
         # scan move, not a jog.
-        self._manager.submit("zolix", "move_rel_um", dx, dy,
-                             speed_pps=int(self._prefs["speed_pps"]))
+        #
+        # POSITIONAL, all five of them: ``InstrumentManager.submit`` carries
+        # its arguments as a tuple and accepts no keyword arguments, so
+        # ``speed_pps=…`` raised a TypeError inside this slot and the move
+        # never happened — the button looked dead. The signature is
+        # ``move_rel_um(dx, dy, dr_deg, speed, speed_pps)``; the stage
+        # adapter fills the same parameter the same way.
+        self._manager.submit("zolix", "move_rel_um", dx, dy, None,
+                             StageSpeed.SLOW, int(self._prefs["speed_pps"]))
         self.set_status(f"Moving to sample #{self._selected + 1}")
 
     # ------------------------------------------------------------------
