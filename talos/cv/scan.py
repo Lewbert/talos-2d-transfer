@@ -55,6 +55,15 @@ ORIGIN_LABELS = {
 #: The slowest the scan will be asked to run, in pulses per second.
 SCAN_SPEED_MIN_PPS = 10
 
+#: Waypoints that may lose their POSITION READBACK in a row before the run
+#: gives up. The bench's serial link drops and corrupts the odd frame (a
+#: truncated reply, a CRC mismatch — the driver retries both), and one that
+#: survives the retries should cost a single tile rather than the whole
+#: scan: the tile is recorded honestly as missing and the run carries on.
+#: Several in a row is not a blip, it is a dead link, and walking the rest
+#: of the plan would produce nothing.
+MAX_CONSECUTIVE_LOSSES = 3
+
 
 def scan_speed_config(stage_cfg: dict, speed_pps: float) -> dict:
     """A COPY of the stage config carrying ONE speed for the scan.
@@ -341,9 +350,10 @@ class ScanResult:
     manifest_path: Path | None = None
     aborted: bool = False
     message: str = ""
-    # Waypoints the stage visited but for which no frame was captured
-    # (no frame source, or the fetch failed). Kept separate so a scan
-    # can never report frames it does not have.
+    # Waypoints the stage visited but for which nothing could be recorded:
+    # no frame (no frame source, or the fetch failed), or no position to
+    # file a frame under (the readback failed after the driver's retries).
+    # Kept separate so a scan can never report frames it does not have.
     missing: int = 0
     #: How many waypoints the plan had, and how many the loop got through.
     #: Together they are what makes "did this run finish?" answerable: a
@@ -450,6 +460,7 @@ class GridScanner(QObject):
         speed = StageSpeed.SLOW
         frame_shape: tuple | None = None
         prev: tuple[float, float] | None = None
+        lost_in_a_row = 0
         try:
             for waypoint in waypoints:
                 if self.abort_requested:
@@ -468,7 +479,34 @@ class GridScanner(QObject):
                 self._stage.move_abs_um(target[0], target[1], speed=speed)
                 prev = target
                 self._stage.wait_idle(timeout_s=120.0)
-                pos = self._stage.get_position()  # READBACK, not commanded
+                try:
+                    pos = self._stage.get_position()  # READBACK, not commanded
+                except DeviceError as exc:
+                    # The stage is where it should be, but the controller
+                    # did not say so — and the manifest may not invent a
+                    # position. The row is written with an EMPTY position
+                    # and no frame (the same honesty as the missing-frame
+                    # case) and the run carries on: one bad exchange costs
+                    # one tile, not the dataset.
+                    lost_in_a_row += 1
+                    result.missing += 1
+                    self.sig_log.emit(
+                        f"waypoint {waypoint.index}: no position readback "
+                        f"({exc}) — recorded as missing")
+                    writer.writerow(["", "", "", "", f"{time.time():.3f}",
+                                     meta.get("objective_id", ""),
+                                     meta.get("focus_pos", "")])
+                    manifest.flush()
+                    result.visited = waypoint.index + 1
+                    self.sig_progress.emit(waypoint.index + 1, len(waypoints))
+                    if lost_in_a_row >= MAX_CONSECUTIVE_LOSSES:
+                        result.message = (
+                            f"{lost_in_a_row} waypoints in a row could not be "
+                            f"read back ({exc})")
+                        self.sig_log.emit(f"scan stopped: {result.message}")
+                        break
+                    continue
+                lost_in_a_row = 0
                 frame = self._grab(settle_s)
                 frame_path = frames_dir / f"frame_{waypoint.index:05d}.png"
                 if frame is not None:

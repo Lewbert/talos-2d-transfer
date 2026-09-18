@@ -460,57 +460,44 @@ class ZolixXYRStage(XYRStage):
             raise ValueError("Need 2 registers for a float")
         return unpack_f32(regs[0], regs[1])
 
-    def _transact(self, frame: bytes, allow_retry: bool) -> bytes:
-        """Send one request; return one COMPLETE response.
+    def _transact(self, frame: bytes) -> bytes:
+        """Send one request; return whatever came back.
 
-        A reply that stops short of the length its function code promises
-        is a bad EXCHANGE, not an answer. On this bench one arrived as two
-        bytes — the slave address and the function code, then silence —
-        from a controller that was perfectly healthy; the driver passed
-        the fragment to the parser, the parser raised, and the job failed.
+        ONE exchange, deliberately: retrying is the READ path's business
+        (:meth:`_read_registers`), because the two ways a frame goes bad
+        are only visible at different depths — a truncated reply never
+        reaches the length its function code promises, while a CRC mismatch
+        only shows up once the bytes are validated. A single retry policy
+        in one place beats two half-policies that quietly multiply.
 
-        Reads retry such an exchange, because a read has no side effects
-        and the next attempt usually completes. Writes do not: a truncated
-        *write* response means we cannot know whether the write landed, and
-        re-sending a motion command on a guess is how the controller gets
-        the same move twice (the "no silent retries on motion" invariant).
-        So ``allow_retry`` is set by the caller, and a write returns the
-        fragment for the parser to reject.
+        The caller gets the bytes it got; validating them is the parser's
+        job, and the read loop's job is to decide whether to ask again.
         """
-        attempts = 2 if allow_retry else 1
-        for attempt in range(1, attempts + 1):
-            try:
-                self._ser.reset_input_buffer()
-                self._ser.reset_output_buffer()
-                self._ser.write(frame)
-                self._ser.flush()
-                time.sleep(0.01)
-                response = bytearray()
-                deadline = time.monotonic() + self.timeout_s * 4
-                while time.monotonic() < deadline:
-                    chunk = self._ser.read(256)
-                    if chunk:
-                        response.extend(chunk)
-                        total = self._response_len(frame[1], response)
-                        if total is not None and len(response) >= total:
-                            return bytes(response[:total])
-                    elif response:
-                        break        # the line went quiet mid-frame
-                    else:
-                        time.sleep(0.005)
-                if response:
-                    if attempt < attempts:
-                        time.sleep(0.02)
-                        continue
-                    return bytes(response)
-                if attempt < attempts:
-                    time.sleep(0.02)
-                    continue
-                raise DeviceTimeoutError(f"No Modbus reply on {self.port_name}")
-            except OSError as exc:
-                self._connected = False
-                raise NotConnectedError(f"Zolix serial error: {exc}") from exc
-        raise DeviceTimeoutError(f"No Modbus reply on {self.port_name}")
+        try:
+            self._ser.reset_input_buffer()
+            self._ser.reset_output_buffer()
+            self._ser.write(frame)
+            self._ser.flush()
+            time.sleep(0.01)
+            response = bytearray()
+            deadline = time.monotonic() + self.timeout_s * 4
+            while time.monotonic() < deadline:
+                chunk = self._ser.read(256)
+                if chunk:
+                    response.extend(chunk)
+                    total = self._response_len(frame[1], response)
+                    if total is not None and len(response) >= total:
+                        return bytes(response[:total])
+                elif response:
+                    break            # the line went quiet mid-frame
+                else:
+                    time.sleep(0.005)
+            if response:
+                return bytes(response)
+            raise DeviceTimeoutError(f"No Modbus reply on {self.port_name}")
+        except OSError as exc:
+            self._connected = False
+            raise NotConnectedError(f"Zolix serial error: {exc}") from exc
 
     @staticmethod
     def _response_len(fn: int, buf: bytearray) -> int | None:
@@ -528,38 +515,69 @@ class ZolixXYRStage(XYRStage):
         error_cls = _EXC_TO_ERROR.get(exc.code, CommandRejectedError)
         raise error_cls(f"{context}: {exc}")
 
+    #: Attempts for one register READ. A serial link on a bench with three
+    #: motor drives on it drops and corrupts the odd frame — the bench saw
+    #: a truncated reply and, later, a CRC mismatch — and neither is a
+    #: reason to fail a caller that only wanted to know where the stage is.
+    #: Writes are never retried, so this is reads only.
+    READ_ATTEMPTS = 3
+
+    def _read_registers(self, fn: int, reg: int, count: int) -> list[int]:
+        """One register read, retried on a BAD FRAME.
+
+        Retrying belongs here rather than in :meth:`_transact` because the
+        two ways a frame goes bad are caught at different depths: a
+        truncated reply is visible in `_transact` (it never reaches the
+        promised length), while a CRC mismatch is only visible once the
+        bytes are validated. Both are the same thing to the caller — "the
+        answer did not arrive" — so both are retried in one place.
+
+        What is NOT retried: an exception response. `DeviceBusyError`,
+        `LimitHitError`, `EStopError` and friends are the controller
+        ANSWERING, and asking again does not change a limit switch.
+        """
+        from talos.protocols.modbus_rtu import READ_HOLDING
+
+        label = "holding" if fn == READ_HOLDING else "input"
+        last: Exception | None = None
+        for attempt in range(1, self.READ_ATTEMPTS + 1):
+            resp = self._transact(build_read(self.slave, fn, reg, count))
+            try:
+                return parse_read_response(resp, self.slave, fn)
+            except (FrameError, DeviceTimeoutError) as exc:
+                # No usable answer: truncated, CRC, wrong slave, wrong
+                # function, or nothing at all. All the same to the caller.
+                last = exc
+                if attempt < self.READ_ATTEMPTS:
+                    logger.debug("Read %s reg %d: %s — retrying (%d/%d)",
+                                 label, reg, exc, attempt, self.READ_ATTEMPTS)
+                    time.sleep(0.02)
+                    continue
+            except ModbusException as exc:
+                self._raise_for_exception(
+                    exc, f"Read {label} reg {reg}")
+            except ValueError as exc:
+                raise DeviceTimeoutError(
+                    f"Read {label} reg {reg}: {exc}") from exc
+        # A malformed frame is a PROTOCOL error and leaves the driver as a
+        # DeviceError like everything else. Left raw it broke the HAL's
+        # contract at every caller catching DeviceError — ``check_estop``
+        # would have let it through instead of reporting "unknown", and the
+        # scan saw a failure with no category at all (2026-09-18).
+        raise ProtocolError(
+            f"Read {label} reg {reg}: {last} "
+            f"({self.READ_ATTEMPTS} attempts)") from last
+
     def _read_input_regs(self, reg: int, count: int) -> list[int]:
-        resp = self._transact(build_read(self.slave, READ_INPUT, reg, count), allow_retry=True)
-        try:
-            return parse_read_response(resp, self.slave, READ_INPUT)
-        except FrameError as exc:
-            # A malformed frame is a PROTOCOL error and must leave the
-            # driver as a DeviceError like everything else. Left raw it
-            # broke the HAL's contract at every caller that catches
-            # DeviceError — ``check_estop`` would have let it through
-            # instead of reporting "unknown", and it reached the scan as a
-            # failure with no category at all (2026-09-18).
-            raise ProtocolError(f"Read input reg {reg}: {exc}") from exc
-        except ModbusException as exc:
-            self._raise_for_exception(exc, f"Read input reg {reg}")
-        except ValueError as exc:
-            raise DeviceTimeoutError(f"Read input reg {reg}: {exc}") from exc
+        return self._read_registers(READ_INPUT, reg, count)
 
     def _read_holding_regs(self, reg: int, count: int) -> list[int]:
         from talos.protocols.modbus_rtu import READ_HOLDING
 
-        resp = self._transact(build_read(self.slave, READ_HOLDING, reg, count), allow_retry=True)
-        try:
-            return parse_read_response(resp, self.slave, READ_HOLDING)
-        except FrameError as exc:
-            raise ProtocolError(f"Read holding reg {reg}: {exc}") from exc
-        except ModbusException as exc:
-            self._raise_for_exception(exc, f"Read holding reg {reg}")
-        except ValueError as exc:
-            raise DeviceTimeoutError(f"Read holding reg {reg}: {exc}") from exc
+        return self._read_registers(READ_HOLDING, reg, count)
 
     def _write_single(self, reg: int, value: int) -> None:
-        resp = self._transact(build_write_single(self.slave, reg, value), allow_retry=False)
+        resp = self._transact(build_write_single(self.slave, reg, value))
         self._check_write_ack(resp, 0x06, f"Write reg {reg}")
 
     def _write_floats(self, reg: int, values: list[float]) -> None:
@@ -572,7 +590,7 @@ class ZolixXYRStage(XYRStage):
         self._write_multiple(reg, regs)
 
     def _write_multiple(self, reg: int, values: list[int]) -> None:
-        resp = self._transact(build_write_multiple(self.slave, reg, values), allow_retry=False)
+        resp = self._transact(build_write_multiple(self.slave, reg, values))
         self._check_write_ack(resp, 0x10, f"Write multiple reg {reg}")
 
     def _check_write_ack(self, resp: bytes, fn: int, context: str) -> None:

@@ -5,7 +5,8 @@ import struct
 import pytest
 
 from talos.hal.base import (CommandRejectedError, DeviceBusyError,
-                        DeviceError, EStopError, ProtocolError)
+                        DeviceError, EStopError, LimitHitError,
+                        ProtocolError)
 from talos.hal.devices.zolix import (
     AXIS_SEL,
     DIR_NEG,
@@ -307,7 +308,7 @@ def test_a_reply_that_never_completes_still_fails_the_read():
     driver, fake = make_connected(extra_script={request: b"\x01\x04"})
     with pytest.raises(DeviceError):
         driver.get_position()
-    assert fake.writes.count(request) == 2      # tried, then gave up
+    assert fake.writes.count(request) == ZolixXYRStage.READ_ATTEMPTS,         "every attempt used, and then the read fails honestly"
 
 
 def test_a_truncated_WRITE_reply_is_not_retried():
@@ -323,3 +324,50 @@ def test_a_truncated_WRITE_reply_is_not_retried():
         driver._write_single(REG_ENABLE_X, 1)
     assert fake.writes.count(build_write_single(1, REG_ENABLE_X, 1)) == 1
     del req
+
+
+def test_a_crc_mismatch_is_retried():
+    """The second shape of the same fault, from the bench an hour after the
+    first: `move_abs_um failed: Read input reg 30012: CRC mismatch`.
+
+    A corrupted frame arrives at the RIGHT LENGTH, so the transport cannot
+    see anything wrong with it — only the parser can, which is why the
+    retry lives at the read level where both shapes meet.
+    """
+    values = [*pack_f32(100.0), *pack_f32(-50.0), *pack_f32(90.0)]
+    request = build_read(1, READ_INPUT, REG_POS_X, 6)
+    good = read_resp(1, READ_INPUT, values)
+    corrupt = bytearray(good)
+    corrupt[5] ^= 0xFF                      # same length, wrong bytes
+    driver, fake = make_connected(extra_script={
+        request: [bytes(corrupt), good],
+    })
+    pos = driver.get_position()
+    assert pos.x_pulses == 100
+    assert fake.writes.count(request) == 2
+
+
+def test_a_read_gives_up_after_the_configured_attempts():
+    values = [*pack_f32(1.0), *pack_f32(2.0), *pack_f32(3.0)]
+    request = build_read(1, READ_INPUT, REG_POS_X, 6)
+    good = read_resp(1, READ_INPUT, values)
+    corrupt = bytearray(good)
+    corrupt[5] ^= 0xFF
+    driver, fake = make_connected(extra_script={request: bytes(corrupt)})
+    with pytest.raises(ProtocolError) as caught:
+        driver.get_position()
+    assert "attempts" in str(caught.value)
+    assert fake.writes.count(request) == ZolixXYRStage.READ_ATTEMPTS
+
+
+def test_a_device_ANSWER_is_not_retried():
+    """An exception response is the controller answering, not a bad link.
+    Asking again does not change a limit switch, and a busy axis stays busy
+    for a reason the caller needs to see immediately."""
+    request = build_read(1, READ_INPUT, REG_POS_X, 6)
+    # exception 0x07 = limit hit
+    exc_frame = bytes([1, 0x84, 0x07]) + crc16(bytes([1, 0x84, 0x07])).to_bytes(2, "little")
+    driver, fake = make_connected(extra_script={request: exc_frame})
+    with pytest.raises(LimitHitError):
+        driver.get_position()
+    assert fake.writes.count(request) == 1, "an answer must not be re-asked"

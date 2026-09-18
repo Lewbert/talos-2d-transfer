@@ -230,3 +230,89 @@ def test_a_completed_run_is_complete_and_not_stopped_early(qapp, rig, tmp_path):
     assert result.complete
     assert not result.stopped_early
     assert result.visited == result.planned == len(result.frames)
+
+
+def test_one_bad_readback_costs_one_tile_not_the_run(qapp, rig, tmp_path):
+    """The bench's serial link drops and corrupts the odd frame. The driver
+    retries a bad exchange three times; one that survives all three must
+    cost a single tile, not the dataset.
+
+    The tile is recorded honestly — an empty position and an empty frame in
+    the manifest, counted in ``missing`` — because the manifest may not
+    invent a position, and the run walks on to the end.
+    """
+    from talos.hal.base import ProtocolError
+
+    stage, _camera, slot, _worker = rig
+    scanner = GridScanner(stage, LatestFrameSource(slot))
+    params = _params(width_um=300.0, height_um=200.0, settle_ms=60)
+    planned = len(scanner.plan(params, (100.0, 100.0)))
+
+    real_get = stage.get_position
+    calls = {"n": 0}
+
+    def flaky():
+        calls["n"] += 1
+        if calls["n"] == 4:                 # one waypoint, mid-run
+            raise ProtocolError("Read input reg 30016: CRC mismatch")
+        return real_get()
+
+    stage.get_position = flaky
+    result = scanner.run(params, tmp_path, meta={"fov_um": (100.0, 100.0)})
+    stage.get_position = real_get
+
+    assert result.complete, "one bad readback must not end the run"
+    assert not result.stopped_early
+    assert result.missing == 1
+    assert len(result.frames) == planned - 1
+    with open(result.manifest_path, encoding="utf-8") as fh:
+        rows = list(csv.DictReader(fh))
+    assert len(rows) == planned
+    lost = [row for row in rows if row["frame"] == ""]
+    assert len(lost) == 1
+    assert lost[0]["x_um"] == "" and lost[0]["y_um"] == "", \
+        "a lost readback must not be recorded as a position"
+    # the other rows are intact and in order
+    kept = [row for row in rows if row["frame"]]
+    assert [row["frame"] for row in kept] == [p.name for p in result.frames]
+
+
+def test_a_dead_link_stops_the_run_rather_than_walking_the_plan(
+        qapp, rig, tmp_path):
+    """Three losses in a row is not a blip. Grinding through the remaining
+    tiles would take two seconds each and produce nothing, so the run stops
+    — and says so."""
+    from talos.hal.base import ProtocolError
+    from talos.cv.scan import MAX_CONSECUTIVE_LOSSES
+
+    stage, _camera, slot, _worker = rig
+    scanner = GridScanner(stage, LatestFrameSource(slot))
+    params = _params(width_um=500.0, height_um=400.0, settle_ms=40)
+    planned = len(scanner.plan(params, (100.0, 100.0)))
+
+    real_get = stage.get_position
+    state = {"dead": False}
+
+    def flaky():
+        if state["dead"]:
+            raise ProtocolError("Read input reg 30016: CRC mismatch")
+        return real_get()
+
+    stage.get_position = flaky
+    stage.move_abs_um_orig = stage.move_abs_um
+    calls = {"n": 0}
+
+    def move(x_um, y_um, r_deg=None, speed=None, speed_pps=None):
+        calls["n"] += 1
+        if calls["n"] == 4:
+            state["dead"] = True            # the link dies mid-run
+        return stage.move_abs_um_orig(x_um, y_um, r_deg, speed, speed_pps)
+
+    stage.move_abs_um = move
+    result = scanner.run(params, tmp_path, meta={"fov_um": (100.0, 100.0)})
+    stage.get_position = real_get
+
+    assert result.stopped_early, "a dead link is not a completed scan"
+    assert result.missing >= MAX_CONSECUTIVE_LOSSES
+    assert result.visited < planned, "it must not walk the whole plan"
+    assert "read back" in result.message
