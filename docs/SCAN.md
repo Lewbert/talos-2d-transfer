@@ -255,12 +255,19 @@ carried in a field nothing displayed.
 
 Three fixes, at three layers:
 
-1. **The exchange is retried.** A reply that stops short of the length its
-   function code promises is a bad *exchange*, not an answer, and a read has no
-   side effects — so `_transact` asks again. Writes do **not** retry: a
-   truncated write response means we cannot know whether the write landed, and
-   re-sending a motion command on a guess is how the controller gets the same
-   move twice.
+1. **The exchange is retried — three times, at the read level.** Two ways a
+   frame goes bad are only visible at different depths: a *truncated* reply
+   never reaches the length its function code promises (visible in
+   `_transact`), while a *CRC mismatch* arrives at the right length with
+   corrupted bytes (visible only once the parser validates it). Both mean one
+   thing to the caller — the answer did not arrive — so both are retried in
+   the same place, `_read_registers`, which is the layer that knows the
+   request and the answer together. Writes do **not** retry: a truncated write
+   response means we cannot know whether the write landed, and re-sending a
+   motion command on a guess is how the controller gets the same move twice.
+   A device's *answer* is not retried either — `LimitHitError`,
+   `DeviceBusyError` and `EStopError` are the controller replying, and asking
+   again does not change a limit switch.
 2. **A malformed frame leaves the driver as a `ProtocolError`.** `FrameError`
    is not a `DeviceError`, so it used to break the HAL's contract at every
    caller that catches one (`check_estop` would have let it through instead of
@@ -274,6 +281,16 @@ Three fixes, at three layers:
 A run that finishes while capturing nothing is called out too ("is the camera
 streaming?"): the geometry is recorded and the scan did complete, but "done"
 alone would send the operator looking for images that were never taken.
+
+**A waypoint that survives the retries costs a tile, not the run.** If the
+position readback fails after all three attempts, there is no position to file
+a frame under — so the manifest row is written with an **empty position and an
+empty frame**, the waypoint is counted in `missing`, and the scan walks on.
+That is the same honesty as the missing-frame case: the manifest may not
+invent a position, but it may say it does not have one, and the rest of the
+dataset is still worth having. Three losses *in a row* is not a blip — it is a
+dead link, and grinding through the remaining tiles at two seconds each would
+produce nothing — so the run stops there and says so.
 
 While a scan runs, `AppState.mode` is `SCAN` — the single gate every manual
 input source funnels through — so jogging is refused, with the mode badge in
