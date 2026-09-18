@@ -173,7 +173,9 @@ rotates the image and never touches an axis.
   wait on them.
 
   **Right.** The scan map, the run card, the settings worth changing at the
-  microscope, and the samples that were found.
+  microscope (the only part that scrolls), and — pinned below them, always
+  visible — the table of samples that were found, with *go to* to bring one
+  under the crosshair.
 
 **Pre-processing** is what makes a thin sample visible: shade correction for
 uneven illumination, an edge-preserving denoise, the ordinary tone controls,
