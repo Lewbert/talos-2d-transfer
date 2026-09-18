@@ -243,6 +243,38 @@ made Esc look like it had done nothing. The reverse case is handled too: the
 scan's own start sequence submits a *Zolix-only* stop rather than
 `manager.stop_all()`, so it cannot abort itself through that same signal.
 
+## Three ways a run can end, and why they must not be confused
+
+A scan ends because the operator aborted it, because it finished, or because
+something **failed** part-way. The third one used to be reported as the second,
+which is the worst possible confusion: on 2026-09-18 a single truncated Modbus
+reply — two bytes and then silence, from a perfectly healthy controller, during
+one `get_position()` readback — stopped a run at tile 3 of 9 and the panel said
+**"Scan done"**. A third of a dataset looked complete, and the reason was
+carried in a field nothing displayed.
+
+Three fixes, at three layers:
+
+1. **The exchange is retried.** A reply that stops short of the length its
+   function code promises is a bad *exchange*, not an answer, and a read has no
+   side effects — so `_transact` asks again. Writes do **not** retry: a
+   truncated write response means we cannot know whether the write landed, and
+   re-sending a motion command on a guess is how the controller gets the same
+   move twice.
+2. **A malformed frame leaves the driver as a `ProtocolError`.** `FrameError`
+   is not a `DeviceError`, so it used to break the HAL's contract at every
+   caller that catches one (`check_estop` would have let it through instead of
+   reporting "unknown").
+3. **The result knows whether it finished.** `ScanResult` carries `planned` and
+   `visited`; `aborted` means the operator asked for it, `stopped_early` means
+   something else did, and the panel reports each in its own words, in its own
+   colour, with the reason. The export summary *appends* its file list to that
+   verdict rather than replacing it — it was the message actually on screen.
+
+A run that finishes while capturing nothing is called out too ("is the camera
+streaming?"): the geometry is recorded and the scan did complete, but "done"
+alone would send the operator looking for images that were never taken.
+
 While a scan runs, `AppState.mode` is `SCAN` — the single gate every manual
 input source funnels through — so jogging is refused, with the mode badge in
 the status bar saying why. STOP ALL always works, on the panel and in the
