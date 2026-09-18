@@ -415,6 +415,8 @@ QScrollBar::add-line, QScrollBar::sub-line {{ width: 0; height: 0; }}
 QScrollBar::add-page, QScrollBar::sub-page {{ background: transparent; }}
 QLabel#dim {{ color: {TEXT_DIM}; }}
 QLabel#ok {{ color: {OK}; }}
+QLabel#warn {{ color: {WARN}; }}
+QLabel#error {{ color: {DANGER}; }}
 QLabel#hint {{ color: {TEXT_DIM}; }}
 QLabel#mode_badge {{
     background: {PANEL_ALT};

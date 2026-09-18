@@ -4,7 +4,8 @@ import struct
 
 import pytest
 
-from talos.hal.base import CommandRejectedError, DeviceBusyError, EStopError, ProtocolError
+from talos.hal.base import (CommandRejectedError, DeviceBusyError,
+                        DeviceError, EStopError, ProtocolError)
 from talos.hal.devices.zolix import (
     AXIS_SEL,
     DIR_NEG,
@@ -274,3 +275,51 @@ def test_stop_escalates_when_axes_keep_moving():
         ],
     })
     driver.stop()  # must not raise, must not hang
+
+
+# --- transient link faults --------------------------------------------------
+
+def test_a_truncated_read_reply_is_retried():
+    """Bench, 2026-09-18: a `get_position()` came back as two bytes and
+    then silence — the slave address and the function code, nothing else —
+    from a controller that was healthy. That ONE bad exchange failed the
+    read, the adapter wrapped it as a device error, and the scan stopped
+    halfway through.
+
+    A read has no side effects, so the honest response to a fragment is to
+    ask again.
+    """
+    values = [*pack_f32(100.0), *pack_f32(-50.0), *pack_f32(90.0)]
+    request = build_read(1, READ_INPUT, REG_POS_X, 6)
+    driver, fake = make_connected(extra_script={
+        # first exchange: header only; second: the real reply
+        request: [b"\x01\x04", read_resp(1, READ_INPUT, values)],
+    })
+    pos = driver.get_position()
+    assert pos.x_pulses == 100
+    assert fake.writes.count(request) == 2, "the read must be re-sent once"
+
+
+def test_a_reply_that_never_completes_still_fails_the_read():
+    """Retrying is not the same as inventing an answer: a link that keeps
+    truncating must fail, so the caller knows the position is unknown."""
+    request = build_read(1, READ_INPUT, REG_POS_X, 6)
+    driver, fake = make_connected(extra_script={request: b"\x01\x04"})
+    with pytest.raises(DeviceError):
+        driver.get_position()
+    assert fake.writes.count(request) == 2      # tried, then gave up
+
+
+def test_a_truncated_WRITE_reply_is_not_retried():
+    """The other half of the rule, and the more important one: a truncated
+    write response means we do not know whether the write landed, so the
+    driver must NOT send it again (a motion command issued twice is a
+    second move). The fragment goes to the parser and the command fails."""
+    driver, fake = make_connected()
+    req = fake.writes
+    with pytest.raises(DeviceError):
+        # enable X: scripted to answer with a fragment
+        fake._script[build_write_single(1, REG_ENABLE_X, 1)] = b"\x01\x06"
+        driver._write_single(REG_ENABLE_X, 1)
+    assert fake.writes.count(build_write_single(1, REG_ENABLE_X, 1)) == 1
+    del req

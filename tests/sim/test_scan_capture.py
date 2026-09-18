@@ -179,3 +179,54 @@ def test_no_return_to_start_on_an_abort(qapp, rig, tmp_path):
     thread.join(timeout=30.0)
     assert box["result"].aborted
     assert not stage.get_status().any_moving
+
+
+def test_a_device_fault_stops_the_run_and_says_so(qapp, rig, tmp_path):
+    """The bench bug of 2026-09-18, in the shape it arrived.
+
+    A single truncated Modbus reply during a readback raised a device
+    error mid-scan. The run stopped there — correctly — but ``aborted``
+    stayed False (the operator asked for nothing), so the UI reported
+    **"Scan done"** over a third of a dataset. A fault has to be
+    distinguishable from a finish, and from an abort.
+    """
+    from talos.hal.base import ProtocolError
+
+    stage, _camera, slot, _worker = rig
+    scanner = GridScanner(stage, LatestFrameSource(slot))
+    params = _params(width_um=300.0, height_um=200.0, settle_ms=60)
+
+    real_move = stage.move_abs_um
+    calls = {"n": 0}
+
+    def flaky_move(x_um, y_um, r_deg=None, speed=None, speed_pps=None):
+        calls["n"] += 1
+        if calls["n"] == 5:                 # partway through, like the bench
+            raise ProtocolError("Read input reg 30016: Frame too short")
+        return real_move(x_um, y_um, r_deg, speed, speed_pps)
+
+    stage.move_abs_um = flaky_move
+    result = scanner.run(params, tmp_path, meta={"fov_um": (100.0, 100.0)})
+
+    assert not result.aborted, "the operator did not abort this"
+    assert result.stopped_early, "an unfinished run must not read as complete"
+    assert not result.complete
+    assert result.planned == 12 and 0 < result.visited < result.planned
+    assert "Frame too short" in result.message, "the reason must survive"
+    # and the frames captured before the fault are still there
+    assert len(result.frames) == result.visited
+    with open(result.manifest_path, encoding="utf-8") as fh:
+        rows = list(csv.DictReader(fh))
+    assert len(rows) == result.visited
+
+
+def test_a_completed_run_is_complete_and_not_stopped_early(qapp, rig, tmp_path):
+    """The other side of the same flag: a normal run must not be reported
+    as a failure."""
+    stage, _camera, slot, _worker = rig
+    scanner = GridScanner(stage, LatestFrameSource(slot))
+    params = _params(width_um=200.0, height_um=100.0, settle_ms=60)
+    result = scanner.run(params, tmp_path, meta={"fov_um": (100.0, 100.0)})
+    assert result.complete
+    assert not result.stopped_early
+    assert result.visited == result.planned == len(result.frames)

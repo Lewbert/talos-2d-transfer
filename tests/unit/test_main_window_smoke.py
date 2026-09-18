@@ -1129,3 +1129,86 @@ def test_the_samples_are_a_table_outside_the_settings_scroll(window):
         assert not isinstance(parent, QScrollArea), \
             "the samples must not scroll with the scan settings"
         parent = parent.parentWidget()
+
+
+def test_a_scan_that_stops_early_is_not_reported_as_done(window):
+    """The bench bug of 2026-09-18, at the point the operator saw it.
+
+    A transient Modbus frame error stopped a scan at tile 5 of 12. The
+    panel called it "Scan done" — the reason was carried in
+    ``result.message`` and never shown — so a third of a dataset looked
+    like a complete one. Three outcomes, three messages.
+    """
+    from pathlib import Path
+
+    from talos.cv.scan import ScanResult
+
+    scan = window._sample_finding.scan_panel
+    stopped = ScanResult(manifest_path=Path("C:/tmp/nothing.csv"),
+                         message="Read input reg 30016: Frame too short: "
+                                 "b'\x01\x04'",
+                         missing=0, planned=12, visited=5)
+    stopped.frames = [Path(f"C:/tmp/f{i}.png") for i in range(5)]
+    scan._pending_export = None
+    scan._on_scan_done({"result": stopped, "out_dir": Path("C:/tmp"),
+                        "fov": (100.0, 100.0)})
+
+    text = scan.status.text()
+    assert "STOPPED" in text, text
+    assert "tile 5 of 12" in text, text
+    assert "Frame too short" in text, "the reason has to be visible"
+    assert "done" not in text.lower()
+    # and the styling says so too, not the same grey as a finished run
+    assert scan.status.objectName() == "error"
+
+    # a normal finish still reads as one, and clears the tone
+    finished = ScanResult(manifest_path=Path("C:/tmp/x.csv"), message="ok",
+                          planned=6, visited=6)
+    finished.frames = [Path(f"C:/tmp/g{i}.png") for i in range(6)]
+    scan._pending_export = None
+    scan._on_scan_done({"result": finished, "out_dir": Path("C:/tmp"),
+                        "fov": (100.0, 100.0)})
+    assert scan.status.text().startswith("Scan done")
+    assert scan.status.objectName() == "dim"
+
+    # and an operator abort reads as an abort
+    aborted = ScanResult(aborted=True, message="aborted by user",
+                         planned=12, visited=3)
+    scan._pending_export = None
+    scan._on_scan_done({"result": aborted, "out_dir": Path("C:/tmp"),
+                        "fov": (100.0, 100.0)})
+    assert "aborted" in scan.status.text().lower()
+    assert scan.status.objectName() == "warn"
+
+
+def test_the_export_summary_does_not_overwrite_the_verdict(window):
+    """The bug the operator actually saw, one layer further out.
+
+    The panel reported "Scan STOPPED at tile 5 of 12 — Frame too short"
+    correctly, and then the export finished a second later and replaced it
+    with "Scan done → …". The verdict must survive its own footnote.
+    """
+    from pathlib import Path
+
+    from talos.cv.scan import ScanResult
+
+    scan = window._sample_finding.scan_panel
+    stopped = ScanResult(manifest_path=Path("C:/tmp/n.csv"),
+                         message="Frame too short", planned=12, visited=5)
+    stopped.frames = [Path(f"C:/tmp/f{i}.png") for i in range(5)]
+    scan._pending_export = None
+    scan._on_scan_done({"result": stopped, "out_dir": Path("C:/tmp"),
+                        "fov": (100.0, 100.0)})
+    verdict = scan.status.text()
+
+    scan._export_worker = None
+    scan._on_export_done({"dir": Path("C:/tmp"),
+                          "written": ["candidates.csv", "mosaic.png"],
+                          "samples": 0})
+    text = scan.status.text()
+    assert text.startswith(verdict), text
+    assert "candidates.csv" in text
+    assert "done" not in text.lower()
+    assert scan.status.objectName() == "error"
+
+

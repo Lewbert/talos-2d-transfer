@@ -345,10 +345,29 @@ class ScanResult:
     # (no frame source, or the fetch failed). Kept separate so a scan
     # can never report frames it does not have.
     missing: int = 0
+    #: How many waypoints the plan had, and how many the loop got through.
+    #: Together they are what makes "did this run finish?" answerable: a
+    #: run that stopped early because a MOVE failed is not an abort (the
+    #: operator did not press anything) and it is certainly not a
+    #: completed scan — and reporting it as either was a real bug.
+    planned: int = 0
+    visited: int = 0
 
     @property
     def captured(self) -> int:
         return len(self.frames)
+
+    @property
+    def complete(self) -> bool:
+        """Every planned waypoint was visited, and nothing aborted."""
+        return (not self.aborted and self.planned > 0
+                and self.visited >= self.planned)
+
+    @property
+    def stopped_early(self) -> bool:
+        """Ended before the last waypoint for a reason that is NOT the
+        operator's: a device error, a settle timeout, a limit."""
+        return not self.aborted and not self.complete
 
 
 class GridScanner(QObject):
@@ -420,6 +439,7 @@ class GridScanner(QObject):
         meta = dict(meta or {})
         fov = tuple(meta.get("fov_um") or (1000.0, 1000.0))
         waypoints = self.plan(params, fov)
+        result.planned = len(waypoints)
 
         settle_s = max(0.0, float(getattr(params, "settle_ms", 0) or 0) / 1000.0)
         backlash_um = max(0.0, float(getattr(params, "backlash_um", 0.0) or 0.0))
@@ -479,12 +499,21 @@ class GridScanner(QObject):
                     meta.get("focus_pos", ""),
                 ])
                 manifest.flush()
+                result.visited = waypoint.index + 1
                 self.sig_progress.emit(waypoint.index + 1, len(waypoints))
         except DeviceError as exc:
             # An aborted move surfaces here as a device error (the
             # adapter refuses to submit once the abort is set) — report it
             # as an abort, not as a failure: the manifest and the UI both
             # read this flag.
+            #
+            # But a device error WITHOUT an abort is a real fault — a
+            # move timeout, a soft limit, a serial glitch — and it must
+            # not read as a completed scan. ``aborted`` stays False (the
+            # operator asked for nothing) and ``visited < planned`` is
+            # what tells the UI the run did not finish; ``message`` says
+            # why. Reporting this as "Scan done" hid the fault behind a
+            # success message, which is the worst place for one.
             result.aborted = self.abort_requested
             result.message = str(exc)
             self.sig_log.emit(f"scan stopped: {exc}")
@@ -513,8 +542,11 @@ class GridScanner(QObject):
                  "meta": meta,
                  "n_frames": len(result.frames),
                  "n_missing": result.missing,
+                 "n_planned": result.planned,
+                 "n_visited": result.visited,
                  "frame_shape": list(frame_shape) if frame_shape else None,
-                 "aborted": result.aborted}, indent=2), encoding="utf-8")
+                 "aborted": result.aborted,
+                 "message": result.message}, indent=2), encoding="utf-8")
         result.manifest_path = manifest_path
         if not result.message and not result.aborted:
             result.message = "ok"

@@ -143,6 +143,10 @@ class ScanPanel(QWidget):
         self._scan_started_at = 0.0
         self._latest_frame = None
         self._flip = False
+        #: The last verdict's text and tone, so the export summary can
+        #: append to it rather than overwrite it with a success message.
+        self._status_base = ""
+        self._status_tone: str | None = None
         #: Set by the workspace: how many captured tiles have not been
         #: examined yet. The panel owns the files, so it has to know when
         #: the results are complete — but the queue belongs to the engine.
@@ -868,20 +872,57 @@ class ScanPanel(QWidget):
         self.sig_tile_captured.emit(index, float(x_um), float(y_um), frame)
 
     def _on_scan_done(self, payload) -> None:
+        """Report what actually happened — three outcomes, not two.
+
+        A run can end because the operator aborted it, because it finished,
+        or because something FAILED mid-way (a move that timed out, a soft
+        limit, a serial glitch). The third used to be reported as "Scan
+        done": the fault was carried in ``result.message`` and the message
+        was never shown, so a scan that died at tile 3 of 100 looked like a
+        complete one, and the operator had no way to tell. It now says what
+        stopped it, where, and why.
+        """
         if self._state.mode == "SCAN":
             self._state.set_mode("MANUAL")
         self._set_job(None)
         self.progress.setVisible(False)
         if not payload:
-            self.set_status("Scan failed (see the log)")
+            self.set_status("Scan failed before it started (see the log)")
             return
         result = payload["result"]
         aborted = result.aborted or self._scan_abort.is_set()
-        what = "Scan aborted" if aborted else "Scan done"
         missing = getattr(result, "missing", 0)
-        note = f" · {missing} waypoint(s) had no frame" if missing else ""
-        self.set_status(f"{what}: {len(result.frames)} frame(s){note}")
-        self._log(f"{what} → {payload['out_dir']}")
+        planned = getattr(result, "planned", len(result.frames))
+        visited = getattr(result, "visited", len(result.frames))
+        note = f" · {missing} tile(s) had no frame" if missing else ""
+        if aborted:
+            text = (f"Scan aborted at tile {visited} of {planned} · "
+                    f"{len(result.frames)} frame(s){note}")
+            self.set_status(text, tone="warn")
+            self._log(f"scan aborted → {payload['out_dir']}")
+        elif getattr(result, "stopped_early", False):
+            reason = str(result.message or "the stage stopped responding")
+            text = (f"Scan STOPPED at tile {visited} of {planned} — {reason} · "
+                    f"{len(result.frames)} frame(s) are on disk{note}")
+            self.set_status(text, tone="error")
+            self._log(f"scan stopped early at tile {visited} of {planned}: "
+                      f"{reason} → {payload['out_dir']}")
+        elif missing >= planned and planned > 0:
+            # The stage walked the whole area and captured nothing: the
+            # camera was not streaming (ZEN open, camera unplugged, the
+            # frame slot never filled). The geometry is recorded and the
+            # scan did finish — but "done" alone would send the operator
+            # looking for images that were never taken.
+            self.set_status(
+                f"Scan finished but captured NO frames — is the camera "
+                f"streaming? ({planned} tiles recorded in the manifest)",
+                tone="error")
+            self._log("scan captured no frames: the frame slot was empty "
+                      "for every tile")
+        else:
+            text = f"Scan done: {len(result.frames)} frame(s){note}"
+            self.set_status(text, tone="warn" if missing else None)
+            self._log(f"scan done → {payload['out_dir']}")
         self._pending_export = payload
         self._maybe_export()
 
@@ -971,11 +1012,21 @@ class ScanPanel(QWidget):
             flip=bool(payload.get("flip", False)))
 
     def _on_export_done(self, summary) -> None:
+        """Append what was written — never replace the verdict.
+
+        This used to say "Scan done → …" whatever had happened, a second
+        after the run ended, so it *overwrote* the honest report with a
+        success message. A scan that stopped at tile 5 of 12 said "Scan
+        STOPPED — Frame too short" for about a second and then quietly
+        became "Scan done". The exports are a footnote to the outcome, not
+        a second opinion about it.
+        """
         self._export_worker = None
         if not summary:
             return
         detail = ", ".join(summary["written"]) or "nothing extra"
-        self.set_status(f"Scan done → {summary['dir']} ({detail})")
+        base = self._status_base or "Scan finished"
+        self.set_status(f"{base} · wrote {detail}", self._status_tone)
         self._log(f"wrote {detail} to {summary['dir']}")
 
     # ------------------------------------------------------------------
@@ -1039,8 +1090,25 @@ class ScanPanel(QWidget):
     # small things
     # ------------------------------------------------------------------
 
-    def set_status(self, text: str) -> None:
+    def set_status(self, text: str, tone: str | None = None) -> None:
+        """The run card's one line. ``tone`` is ``"warn"`` or ``"error"``
+        for a run that did not finish — a stopped scan must not read in the
+        same grey as a finished one.
+
+        The text and tone are remembered so a later line (the export
+        summary) can append to the verdict instead of replacing it.
+        """
         self.status.setText(text)
+        self._status_base = text
+        self._status_tone = tone
+        wanted = tone or "dim"
+        if self.status.objectName() != wanted:
+            self.status.setObjectName(wanted)
+            # Qt only re-evaluates the stylesheet when it is told the
+            # widget changed; without this the colour never moves.
+            style = self.status.style()
+            style.unpolish(self.status)
+            style.polish(self.status)
 
     def _log(self, message: str) -> None:
         self.sig_log.emit(str(message))

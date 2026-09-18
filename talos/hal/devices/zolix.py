@@ -461,7 +461,24 @@ class ZolixXYRStage(XYRStage):
         return unpack_f32(regs[0], regs[1])
 
     def _transact(self, frame: bytes, allow_retry: bool) -> bytes:
-        for attempt in (1, 2):
+        """Send one request; return one COMPLETE response.
+
+        A reply that stops short of the length its function code promises
+        is a bad EXCHANGE, not an answer. On this bench one arrived as two
+        bytes — the slave address and the function code, then silence —
+        from a controller that was perfectly healthy; the driver passed
+        the fragment to the parser, the parser raised, and the job failed.
+
+        Reads retry such an exchange, because a read has no side effects
+        and the next attempt usually completes. Writes do not: a truncated
+        *write* response means we cannot know whether the write landed, and
+        re-sending a motion command on a guess is how the controller gets
+        the same move twice (the "no silent retries on motion" invariant).
+        So ``allow_retry`` is set by the caller, and a write returns the
+        fragment for the parser to reject.
+        """
+        attempts = 2 if allow_retry else 1
+        for attempt in range(1, attempts + 1):
             try:
                 self._ser.reset_input_buffer()
                 self._ser.reset_output_buffer()
@@ -478,14 +495,18 @@ class ZolixXYRStage(XYRStage):
                         if total is not None and len(response) >= total:
                             return bytes(response[:total])
                     elif response:
-                        return bytes(response)
+                        break        # the line went quiet mid-frame
                     else:
                         time.sleep(0.005)
                 if response:
+                    if attempt < attempts:
+                        time.sleep(0.02)
+                        continue
                     return bytes(response)
-                if not allow_retry or attempt == 2:
-                    raise DeviceTimeoutError(f"No Modbus reply on {self.port_name}")
-                time.sleep(0.02)
+                if attempt < attempts:
+                    time.sleep(0.02)
+                    continue
+                raise DeviceTimeoutError(f"No Modbus reply on {self.port_name}")
             except OSError as exc:
                 self._connected = False
                 raise NotConnectedError(f"Zolix serial error: {exc}") from exc
@@ -511,6 +532,14 @@ class ZolixXYRStage(XYRStage):
         resp = self._transact(build_read(self.slave, READ_INPUT, reg, count), allow_retry=True)
         try:
             return parse_read_response(resp, self.slave, READ_INPUT)
+        except FrameError as exc:
+            # A malformed frame is a PROTOCOL error and must leave the
+            # driver as a DeviceError like everything else. Left raw it
+            # broke the HAL's contract at every caller that catches
+            # DeviceError — ``check_estop`` would have let it through
+            # instead of reporting "unknown", and it reached the scan as a
+            # failure with no category at all (2026-09-18).
+            raise ProtocolError(f"Read input reg {reg}: {exc}") from exc
         except ModbusException as exc:
             self._raise_for_exception(exc, f"Read input reg {reg}")
         except ValueError as exc:
@@ -522,6 +551,8 @@ class ZolixXYRStage(XYRStage):
         resp = self._transact(build_read(self.slave, READ_HOLDING, reg, count), allow_retry=True)
         try:
             return parse_read_response(resp, self.slave, READ_HOLDING)
+        except FrameError as exc:
+            raise ProtocolError(f"Read holding reg {reg}: {exc}") from exc
         except ModbusException as exc:
             self._raise_for_exception(exc, f"Read holding reg {reg}")
         except ValueError as exc:
