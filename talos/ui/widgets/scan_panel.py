@@ -92,6 +92,10 @@ PATH_OPTIONS = [
     (PATHS[2], "Hilbert", "The curve, clipped to the area (experimental)"),
 ]
 
+#: The 4K sensor mode's width, which is also how a streamed frame says
+#: which mode the camera is in (``capture.resolution`` uses the same 0/1).
+_UHD_WIDTH_PX = 3840
+
 
 class _Worker(QThread):
     """Runs a blocking callable; emits the result (no exception escapes)."""
@@ -151,6 +155,15 @@ class ScanPanel(QWidget):
         #: examined yet. The panel owns the files, so it has to know when
         #: the results are complete — but the queue belongs to the engine.
         self.pending_tiles_fn = None
+        #: Set while a run is waiting for the camera to change sensor mode:
+        #: (job_id, origin) — the run starts when that job lands.
+        self._pending_scan_start: tuple[int, tuple[float, float]] | None = None
+        #: The live mode to put back after a run that switched it.
+        self._camera_mode_before_scan: int | None = None
+        # The camera's completion relay (the same signals the snapshot
+        # busy-gate uses) — the run is sequenced on them.
+        manager.sig_job_done.connect(self._on_camera_job_done)
+        manager.sig_job_failed.connect(self._on_camera_job_failed)
 
         self._build_ui()
         self._load_settings()
@@ -780,6 +793,26 @@ class ScanPanel(QWidget):
                 self, "Scan", "No stage position yet — the Zolix controller "
                 "has not reported. Check the connection.")
             return
+        # The tiles are captured at the live resolution unless Preferences
+        # → Scan asks for another one; switching stops the stream for a
+        # pipeline re-init, so it happens ONCE for the run, before the
+        # first move, and is put back when the run ends.
+        mode = self._camera_mode_to_switch_to()
+        if mode is None:
+            self._begin_scan(position)
+            return
+        self.set_status("Switching the camera for the scan…")
+        job = self._manager.submit_camera("set_property", "resolution", mode)
+        if int(job) < 0:
+            self._log("the camera cannot change resolution — scanning at "
+                      "the live one")
+            self._begin_scan(position)
+            return
+        self._camera_mode_before_scan = self._current_camera_mode()
+        self._pending_scan_start = (int(job), position)
+
+    def _begin_scan(self, position: StagePosition) -> None:
+        """Everything a run does once the camera is in the right mode."""
         # The scanner refuses to start on a moving axis, and the controller
         # rejects opcodes to one: cancel held jogs and queue a stop ahead of
         # the first move (same worker, so it lands first).
@@ -796,6 +829,7 @@ class ScanPanel(QWidget):
         self._pending_export = None
         self.refresh_plan()
         self.map.clear_tiles()                 # the previous run's tiles
+        self.map.clear_footprint()
         self._set_job("scan")
         self._state.set_mode("SCAN")
         self._scan_started_at = time.monotonic()
@@ -810,6 +844,58 @@ class ScanPanel(QWidget):
         self._scan_worker.finished.connect(self._scan_worker.deleteLater)
         self._scan_worker.finished.connect(self._forget_scan_worker)
         self._scan_worker.start()
+
+    # --- the camera's sensor mode -------------------------------------
+
+    def _current_camera_mode(self) -> int | None:
+        """0 = 4K, 1 = 1080p, None when nothing has streamed yet."""
+        frame = self._latest_frame
+        if frame is None or len(frame.shape) < 2:
+            return None
+        return 0 if int(frame.shape[1]) >= _UHD_WIDTH_PX else 1
+
+    def _camera_mode_to_switch_to(self) -> int | None:
+        """The mode this run needs, or None when it needs no switch."""
+        current = self._current_camera_mode()
+        if current is None:
+            return None
+        try:
+            want = 0 if int(self._prefs.get("resolution", 1)) == 0 else 1
+        except (TypeError, ValueError):
+            return None
+        return None if want == current else want
+
+    def _on_camera_job_done(self, job_id: int, _result) -> None:
+        pending = self._pending_scan_start
+        if pending is None or int(job_id) != pending[0]:
+            return
+        self._pending_scan_start = None
+        self._begin_scan(pending[1])
+
+    def _on_camera_job_failed(self, job_id: int, exc_type: str,
+                              message: str) -> None:
+        pending = self._pending_scan_start
+        if pending is None or int(job_id) != pending[0]:
+            return
+        self._pending_scan_start = None
+        self._camera_mode_before_scan = None
+        self._log(f"camera resolution switch refused ({exc_type}: {message}) "
+                  f"— the run will capture at the live resolution")
+        self._begin_scan(pending[1])
+
+    def _restore_camera_mode(self) -> None:
+        """Put the live stream back the way the operator had it. Best
+        effort: a camera that will not switch back leaves the live view at
+        the scan's resolution for this session, and the next connect
+        re-applies the configured live resolution anyway."""
+        mode = self._camera_mode_before_scan
+        self._camera_mode_before_scan = None
+        if mode is None:
+            return
+        job = self._manager.submit_camera("set_property", "resolution", mode)
+        if int(job) < 0:
+            self._log("the camera did not switch back after the scan — "
+                      "reconnect it to restore the live resolution")
 
     def _forget_scan_worker(self) -> None:
         self._scan_worker = None
@@ -886,10 +972,19 @@ class ScanPanel(QWidget):
             self._state.set_mode("MANUAL")
         self._set_job(None)
         self.progress.setVisible(False)
+        # The single path for finish, abort AND fault: whatever the run
+        # did to the camera's sensor mode, the live view goes back to the
+        # operator's resolution here.
+        self._restore_camera_mode()
         if not payload:
             self.set_status("Scan failed before it started (see the log)")
             return
         result = payload["result"]
+        # Where the run's wall-clock actually went — the number that says
+        # whether the next speed-up is a motion parameter or a camera one.
+        timing = getattr(getattr(result, "timing", None), "summary", "")
+        if timing:
+            self._log(f"scan timing: {timing}")
         aborted = result.aborted or self._scan_abort.is_set()
         missing = getattr(result, "missing", 0)
         planned = getattr(result, "planned", len(result.frames))

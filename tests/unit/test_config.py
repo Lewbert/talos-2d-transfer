@@ -137,10 +137,31 @@ def test_load_applies_normalization(tmp_path):
     assert "jog_speed" not in settings.device("focus")
     assert "coarse_step" not in settings.section("autofocus")
     assert settings.section("autofocus")["quality_threshold"] == 0.5
-    # the schema marker: nothing gates on it, but it must match the
-    # bundled defaults (it used to disagree with them AND the code)
-    assert settings.get("_version") == 8
+    # the schema marker: it must match the bundled defaults (it used to
+    # disagree with them AND the code), and since v9 one migration reads
+    # it — the settle default only moves for a file that predates it
+    assert settings.get("_version") == 9
     assert len(settings.get("objectives")) == 5
+
+
+def test_the_settle_default_moves_only_for_a_file_that_predates_it(tmp_path):
+    """v9 halved the scan's settle default. A file still carrying the old
+    default follows it; a value someone chose, or one they set back after
+    the migration, stays exactly as it is."""
+    old_default = tmp_path / "old.json"
+    old_default.write_text(json.dumps(
+        {"_version": 8, "scan": {"settle_ms": 200}}), encoding="utf-8")
+    assert Settings.load(old_default).section("scan")["settle_ms"] == 100
+
+    chosen = tmp_path / "chosen.json"
+    chosen.write_text(json.dumps(
+        {"_version": 8, "scan": {"settle_ms": 350}}), encoding="utf-8")
+    assert Settings.load(chosen).section("scan")["settle_ms"] == 350
+
+    deliberate = tmp_path / "deliberate.json"
+    deliberate.write_text(json.dumps(
+        {"_version": 9, "scan": {"settle_ms": 200}}), encoding="utf-8")
+    assert Settings.load(deliberate).section("scan")["settle_ms"] == 200
 
 
 # ---------------------------------------------------------------------------

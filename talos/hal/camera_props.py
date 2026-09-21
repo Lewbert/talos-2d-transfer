@@ -39,6 +39,13 @@ _VALUE_MAP: dict[str, dict[str, tuple[str, float]]] = {
                           "manual": ("color_temperature", 1.0),
                           "sim": ("color_temperature", 1.0)},
     "color_mode": {"smartcam": ("color_mode", 1.0), "sim": ("color_mode", 1.0)},
+    # The live sensor mode (0 = 4K, 1 = 1080p), for the backends that can
+    # change it WHILE RUNNING — which is what a scan that captures at a
+    # resolution other than the live view's needs. Everywhere else a
+    # resolution is a SNAPSHOT argument, so those backends are absent on
+    # purpose: the KeyError is how the caller hears "no" instead of a
+    # switch that silently did nothing.
+    "resolution": {"smartcam": ("resolution", 1.0), "sim": ("resolution", 1.0)},
     # software-level, shared by EVERY backend (the 180° decode-time
     # rotation) — a missing row raises KeyError on the first UI write
     "flip": {"smartcam": ("flip", 1.0), "harvesters": ("flip", 1.0),

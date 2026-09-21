@@ -193,3 +193,34 @@ def test_sim_camera_blur_reduces_sharpness():
     f_blur = blurred.fetch()
     var = lambda img: cv2.Laplacian(cv2.cvtColor(img, cv2.COLOR_RGB2GRAY), cv2.CV_64F).var()  # noqa: E731
     assert var(f_sharp) > var(f_blur)
+
+
+def test_sim_camera_switches_sensor_mode_like_the_real_one():
+    """``set_property("resolution", mode)`` is what a scan that captures at
+    another resolution asks for: 0 = 4K, 1 = 1080p, and the same field of
+    view sampled twice as finely means half the µm per pixel."""
+    cam = SimCamera({"width": 1920, "height": 1080, "fps": 1000,
+                     "wafer": True, "wafer_fov_um": 1400.0})
+    cam.connect()
+    assert cam.fetch().shape == (1080, 1920, 3)
+    assert cam.wafer_um_per_px == pytest.approx(1400.0 / 1920)
+
+    cam.set_property("resolution", 0)
+    assert cam.fetch().shape == (2160, 3840, 3)
+    assert cam.wafer_um_per_px == pytest.approx(1400.0 / 3840)
+
+    cam.set_property("resolution", 1)
+    assert cam.fetch().shape == (1080, 1920, 3)
+
+    with pytest.raises(ValueError):
+        cam.set_property("resolution", 7)
+
+
+def test_a_pinned_wafer_scale_survives_a_mode_switch():
+    """A test that pinned µm/px means it — the switch must not quietly
+    re-derive it from the frame width."""
+    cam = SimCamera({"width": 320, "height": 240, "fps": 1000,
+                     "wafer": True, "wafer_um_per_px": 0.5})
+    cam.connect()
+    cam.set_property("resolution", 1)
+    assert cam.wafer_um_per_px == pytest.approx(0.5)

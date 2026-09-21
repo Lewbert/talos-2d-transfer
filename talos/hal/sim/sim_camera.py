@@ -33,6 +33,10 @@ _WAFER_BEACON = (0.0, 0.0, 150.0, (255, 0, 255))
 _WAFER_PITCH_UM = 500.0
 _WAFER_FIELD_UM = 3000.0
 
+#: The sensor modes the real camera has, as the frame size they produce:
+#: the same encoding ``capture.resolution`` and the smartcam backend use.
+_RESOLUTION_MODES = {0: (3840, 2160), 1: (1920, 1080)}
+
 
 class SimCamera(Camera):
     APPLIES_FLIP = True
@@ -52,8 +56,10 @@ class SimCamera(Camera):
         # docstring). Off unless asked for, so every closed-loop suite keeps
         # the scene it was calibrated against.
         self.wafer = bool(config.get("wafer", False))
-        self.wafer_um_per_px = float(config.get("wafer_um_per_px", 0.0)) \
-            or (float(config.get("wafer_fov_um", 1400.0)) / max(1, self.width))
+        self._wafer_fixed_um_per_px = float(config.get("wafer_um_per_px", 0.0))
+        self._wafer_fov_um = float(config.get("wafer_fov_um", 1400.0))
+        self.wafer_um_per_px = self._wafer_fixed_um_per_px \
+            or (self._wafer_fov_um / max(1, self.width))
         self._wafer_features = self._build_wafer_features()
         self._props: dict[str, Any] = {
             "exposure_us": int(config.get("exposure_us", 5000)),
@@ -241,9 +247,30 @@ class SimCamera(Camera):
     def set_property(self, name: str, value: Any) -> None:
         if self.try_set_flip(name, value):
             return
+        if name == "resolution":
+            self.set_resolution(int(value))
+            return
         if name not in self._props:
             raise KeyError(f"Unknown camera property: {name}")
         self._props[name] = value
+
+    def set_resolution(self, mode: int) -> None:
+        """Switch the sensor mode (0 = 4K, 1 = 1080p) and keep streaming.
+
+        The real backend stops the stream, writes the parameter and resumes
+        with a pipeline re-init; the sim only has to change its frame size.
+        A scan whose capture resolution differs from the live view's does
+        this once for the run and once again at the end.
+        """
+        size = _RESOLUTION_MODES.get(int(mode))
+        if size is None:
+            raise ValueError(f"unknown resolution mode: {mode!r}")
+        self.width, self.height = size
+        self._props["width"], self._props["height"] = size
+        # The wafer moves under the same optics, so its µm per pixel halves
+        # when the same field of view is sampled by twice the pixels.
+        if not self._wafer_fixed_um_per_px:
+            self.wafer_um_per_px = self._wafer_fov_um / max(1, self.width)
 
     def snapshot(self, path: Path, timeout_s: float = 15.0,
                  resolution: int | None = None,

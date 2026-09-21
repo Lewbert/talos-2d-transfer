@@ -903,6 +903,18 @@ def _scan_page(settings, parent) -> QWidget:
     page.add_bool("export_overview", "Write overview.png", True)
     page.add_hint("Raw frames and manifest.csv are always written.")
 
+    page.add_group("Capture")
+    # 0/1, the same encoding the Capture group's snapshot resolution uses.
+    page.add_choice("resolution", "Tile resolution",
+                    [(0, "4K (3840×2160)"), (1, "1080p (1920×1080)")])
+    page.add_hint(
+        "When this differs from the live resolution the camera switches "
+        "mode for the run and back afterwards — the stream restarts once, "
+        "at the start and at the end. 1080p is the fast path and shows "
+        "more of the sample in the same run; 4K tiles are slower to "
+        "capture, encode and identify, and change nothing about where the "
+        "tiles are. Identification thresholds stay in µm either way.")
+
     page.add_group("Motion")
     # One speed, not a slow/fast pair: the scan runs the controller in
     # fixed-steps mode and lets it generate its own ramp, so a second

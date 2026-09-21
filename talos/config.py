@@ -38,7 +38,7 @@ def load_defaults() -> dict:
         # detection-based), but a stale number here was one of three
         # disagreeing values (defaults said 4, this said 3, _normalize logged
         # "v5"), and a test pinned the wrong one.
-        return {"_version": 8}
+        return {"_version": 9}
 
 
 # Keys superseded by schema v3 (autofocus is µm-based now; the focus
@@ -104,6 +104,29 @@ def _normalize(data: dict) -> dict:
         if isinstance(scan, dict) and scan.get("white_balance") == "Once":
             scan["white_balance"] = "Off"
             dropped.append("devices.camera.scan.white_balance Once→Off")
+    # v9: the scan's settle default halved to 100 ms. The settle window now
+    # begins when the stage ACTUALLY stops rather than ~0.6 s later (the
+    # telemetry-sample wait is gone — see docs/SCAN.md), so the same number
+    # buys a longer real quiet time; 100 ms was bench-tested.
+    #
+    # Only a file still carrying the OLD DEFAULT moves, and only once: a
+    # value the operator chose is theirs, and the version stamp is what
+    # makes "they never touched it" knowable at all.
+    try:
+        stored_version = int(data.get("_version", 0) or 0)
+    except (TypeError, ValueError):
+        stored_version = 0
+    if stored_version < 9:
+        scan_section = data.get("scan")
+        if isinstance(scan_section, dict):
+            try:
+                settle = int(scan_section.get("settle_ms", 0) or 0)
+            except (TypeError, ValueError):
+                settle = 0
+            if settle == 200:
+                scan_section["settle_ms"] = 100
+                dropped.append("scan.settle_ms 200→100 (the new default)")
+    data["_version"] = 9
     default_rows = load_defaults().get("objectives", [])
     rows = data.get("objectives")
     if not isinstance(rows, list):

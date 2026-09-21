@@ -792,6 +792,69 @@ def test_the_footprint_follows_the_nested_telemetry(window):
     assert scan.map._footprint == (4321.0, -765.0)
 
 
+def _ready_to_scan(window, monkeypatch, *, resolution, live_width=1920):
+    """A panel that passes every gate in `_on_scan`, with `_begin_scan`
+    stubbed out (the run itself has its own tests) and the camera's job
+    submissions recorded."""
+    import numpy as np
+
+    scan = window._sample_finding.scan_panel
+    window._manager.last_position["zolix"] = {"x_um": 0.0, "y_um": 0.0,
+                                              "r_deg": 0.0}
+    scan._latest_frame = np.zeros((live_width * 9 // 16, live_width, 3),
+                                  np.uint8)
+    scan._prefs["resolution"] = resolution
+    calls: list = []
+    started: list = []
+    monkeypatch.setattr(scan._manager, "submit_camera",
+                        lambda method, *args: (calls.append((method, args)),
+                                               4242)[1])
+    monkeypatch.setattr(scan, "_begin_scan", started.append)
+    return scan, calls, started
+
+
+def test_a_scan_at_the_live_resolution_switches_nothing(window, monkeypatch):
+    scan, calls, started = _ready_to_scan(window, monkeypatch, resolution=1)
+    scan._on_scan()
+    assert calls == []
+    assert len(started) == 1, "the run should have started at once"
+
+
+def test_a_scan_at_another_resolution_switches_once_and_puts_it_back(
+        window, monkeypatch):
+    """The switch is sequenced ahead of the first move: a run that started
+    before the camera changed mode would file 1080p frames as 4K tiles."""
+    scan, calls, started = _ready_to_scan(window, monkeypatch, resolution=0)
+    scan._on_scan()
+    assert calls == [("set_property", ("resolution", 0))]
+    assert started == [], "the run started before the camera switched"
+    assert scan._camera_mode_before_scan == 1
+
+    job = scan._pending_scan_start[0]
+    scan._on_camera_job_done(job, None)
+    assert len(started) == 1 and scan._pending_scan_start is None
+
+    # ... and the live stream goes back when the run reports in
+    scan._on_scan_done(None)
+    assert calls[-1] == ("set_property", ("resolution", 1))
+    assert scan._camera_mode_before_scan is None
+
+
+def test_a_refused_switch_still_runs_the_scan(window, monkeypatch):
+    """A backend with no live resolution switch (or a camera that errors)
+    must not cost the operator the run: it is logged and the scan goes
+    ahead at the live resolution."""
+    scan, calls, started = _ready_to_scan(window, monkeypatch, resolution=0)
+    monkeypatch.setattr(scan._manager, "submit_camera",
+                        lambda method, *args: -1)
+    logs: list = []
+    scan.sig_log.connect(logs.append)
+    scan._on_scan()
+    assert len(started) == 1
+    assert scan._camera_mode_before_scan is None
+    assert any("live one" in line for line in logs), logs
+
+
 def test_stop_all_aborts_the_run_not_just_the_motion(window):
     """Esc must end a scan. Without this wiring the abort flag stayed
     clear, the controller stopped, and the run continued at the next

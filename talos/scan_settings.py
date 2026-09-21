@@ -22,7 +22,7 @@ from pathlib import Path
 #: "empty means the default folder" convention — see :func:`scan_directory`.
 SCAN_KEYS = ("width_um", "height_um", "origin", "overlap", "path",
              "serpentine", "start_axis", "x_dir", "y_dir", "speed_pps",
-             "settle_ms", "backlash_um", "backlash_approach",
+             "settle_ms", "resolution", "backlash_um", "backlash_approach",
              "return_to_start", "export_mosaic", "export_candidates",
              "export_overview")
 
@@ -38,7 +38,15 @@ DEFAULTS = {
     "x_dir": 1,
     "y_dir": 1,
     "speed_pps": 500.0,
-    "settle_ms": 200,
+    #: Mechanical quiet after a stop, before the exposure. Was 200 ms while
+    #: the settle window began ~0.6 s after the motion ended (the old
+    #: telemetry-sample wait); now it begins when the stage actually stops,
+    #: so the same number is a longer real quiet time. Bench-tested at 100.
+    "settle_ms": 100,
+    #: Which sensor mode the tiles are captured in: 0 = 4K, 1 = 1080p, the
+    #: same encoding as ``capture.resolution``. Equal to the live mode by
+    #: default, i.e. no switch and today's behaviour.
+    "resolution": 1,
     "backlash_um": 0.0,
     "backlash_approach": 1,
     "return_to_start": True,

@@ -60,3 +60,17 @@ def test_map_color_temperature():
         ("color_temperature", 3200)
     with pytest.raises(KeyError):
         map_property("harvesters", "color_temperature", 3200)
+
+
+def test_resolution_is_a_live_mode_for_the_backends_that_have_one():
+    """A scan whose capture resolution differs from the live view's has to
+    change the sensor mode WITHOUT a reconnect, so this one is routed like
+    any other property — and a backend with no live mode refuses it, which
+    is how the panel hears "no" instead of a switch that quietly did
+    nothing."""
+    assert map_property("smartcam", "resolution", 0) == ("resolution", 0)
+    assert map_property("sim", "resolution", 1) == ("resolution", 1)
+    with pytest.raises(KeyError):
+        map_property("harvesters", "resolution", 0)
+    with pytest.raises(KeyError):
+        map_property("manual", "resolution", 0)

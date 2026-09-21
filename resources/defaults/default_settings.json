@@ -1,5 +1,5 @@
 {
-  "_version": 8,
+  "_version": 9,
   "selected_objective": 0,
   "objective_offsets_enabled": true,
   "display": {
@@ -237,7 +237,8 @@
     "x_dir": 1,
     "y_dir": 1,
     "speed_pps": 500.0,
-    "settle_ms": 200,
+    "settle_ms": 100,
+    "resolution": 1,
     "backlash_um": 0.0,
     "backlash_approach": 1,
     "return_to_start": true,
