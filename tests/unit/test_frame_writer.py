@@ -92,31 +92,13 @@ def test_the_first_error_is_the_one_reported(tmp_path, monkeypatch):
     assert "could not write" in writer.close()
 
 
-class _Recorder:
-    """Stands in for the scanner's signals (a Qt signal is emitted, not
-    called — PySide6 signal instances have no __call__)."""
-
-    def __init__(self):
-        self.calls = []
-
-    def emit(self, *args):
-        self.calls.append(args)
-
-
-def test_the_scan_signals_carry_the_frame_and_its_thumbnail(tmp_path):
-    frames, tiles = _Recorder(), _Recorder()
-    writer = _writer(tmp_path, thumb_width=4, sig_frame=frames,
-                     sig_tile=tiles)
-    writer.start()
-    writer.submit_frame(7, (11.0, 12.0, 0.0), _frame(16, 8), 1.0)
-    writer.submit_missing(8, None, 2.0)
-    writer.close()
-
-    assert [(i, x, y, f.shape) for i, x, y, f in frames.calls] \
-        == [(7, 11.0, 12.0, (8, 16, 3))]
-    # 16 px wide -> 4 px wide thumbnail, aspect kept
-    assert [(i, x, y, t.shape) for i, x, y, t in tiles.calls] \
-        == [(7, 11.0, 12.0, (2, 4, 3))]
+def test_the_writer_emits_nothing_of_its_own(tmp_path):
+    """The scan's signals belong to the SCAN thread: one emitter, and a
+    synchronous caller (the sim tests, the CLI benches) sees its own emits
+    delivered instead of queued to an event loop that is not running."""
+    writer = _writer(tmp_path)
+    assert not hasattr(writer, "sig_frame")
+    assert not hasattr(writer, "sig_tile")
 
 
 def test_a_full_queue_blocks_the_caller_rather_than_growing(tmp_path):

@@ -8,9 +8,15 @@ thread that could instead be commanding the next move — so every tile paid
 it twice over, once as the work and once as the stage standing still.
 
 This puts it on a writer thread behind a bounded queue. The scanner hands
-over ``(index, position, frame)`` and moves on; the writer encodes, emits
-the frame and its thumbnail (through the scanner's own signals, so nothing
-downstream changed), appends the manifest row and flushes.
+over ``(index, position, frame)`` and moves on; the writer encodes, appends
+the manifest row and flushes.
+
+The scan's *signals* stay on the scan thread (the scanner emits them itself
+before handing the frame over). Emitting them from here would have been one
+thread fewer in the way of the encode, but it costs more than it saves: two
+emitters for one signal, an ordering question against ``sig_done``, and a
+queued connection that a synchronous caller — the sim tests, the CLI benches
+— never sees delivered.
 
 Three properties the callers depend on:
 
@@ -69,16 +75,10 @@ class FrameWriter:
     """Owns the scan's `frames/` directory and `manifest.csv` on a thread."""
 
     def __init__(self, out_dir: Path, meta: dict | None = None, *,
-                 thumb_width: int = 160, max_queue: int = 4,
-                 sig_frame=None, sig_tile=None):
+                 max_queue: int = 4):
         self._out_dir = Path(out_dir)
         self._meta = dict(meta or {})
-        self._thumb_width = int(thumb_width)
         self._queue: queue.Queue = queue.Queue(maxsize=max(1, int(max_queue)))
-        #: The scanner's signals, emitted from this thread. None (the CLI
-        #: benches) means nobody is listening.
-        self._sig_frame = sig_frame
-        self._sig_tile = sig_tile
         self._frames: list[Path] = []
         self._error: str | None = None
         self._thread: threading.Thread | None = None
@@ -187,13 +187,6 @@ class FrameWriter:
         if not written:
             raise OSError(f"could not write {frame_path.name}")
         self._frames.append(frame_path)
-        if item.pos is not None:
-            if self._sig_frame is not None:
-                self._sig_frame.emit(item.index, item.pos[0], item.pos[1],
-                                     item.frame)
-            thumb = self._thumbnail(item.frame)
-            if thumb is not None and self._sig_tile is not None:
-                self._sig_tile.emit(item.index, item.pos[0], item.pos[1], thumb)
         self._row(item, frame_name=frame_path.name)
 
     def _row(self, item: _Item, frame_name: str) -> None:
@@ -209,19 +202,6 @@ class FrameWriter:
                              self._meta.get("objective_id", ""),
                              self._meta.get("focus_pos", "")])
         self._manifest.flush()
-
-    def _thumbnail(self, frame):
-        """A small RGB copy for the scan map (the map fills with tiles as
-        they arrive; a full 1080p frame per tile is megabytes of QImage)."""
-        width = self._thumb_width
-        if not width or frame is None:
-            return None
-        h, w = frame.shape[:2]
-        if w <= width:
-            return frame.copy()
-        scale = width / float(w)
-        return cv2.resize(frame, (width, max(1, int(round(h * scale)))),
-                          interpolation=cv2.INTER_AREA)
 
     # ------------------------------------------------------------------
     # results

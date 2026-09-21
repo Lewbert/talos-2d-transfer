@@ -24,6 +24,7 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
+import cv2
 from PySide6.QtCore import QObject, Signal
 
 from talos.cv.frame_source import DEFAULT_TIMEOUT_S
@@ -466,6 +467,19 @@ class GridScanner(QObject):
         self._max_pending = max(1, int(max_pending_tiles))
         self.abort_requested = False
 
+    def _thumbnail(self, frame):
+        """A small RGB copy for the scan map (the map fills with tiles as
+        they arrive; a full 1080p frame per tile is megabytes of QImage)."""
+        width = self._thumb_width
+        if not width or frame is None:
+            return None
+        h, w = frame.shape[:2]
+        if w <= width:
+            return frame.copy()
+        scale = width / float(w)
+        return cv2.resize(frame, (width, max(1, int(round(h * scale)))),
+                          interpolation=cv2.INTER_AREA)
+
     def request_abort(self) -> None:
         self.abort_requested = True
         try:
@@ -525,8 +539,7 @@ class GridScanner(QObject):
         waypoints = self.plan(params, fov)
         result.planned = len(waypoints)
 
-        writer = FrameWriter(out_dir, meta, thumb_width=self._thumb_width,
-                             sig_frame=self.sig_frame, sig_tile=self.sig_tile)
+        writer = FrameWriter(out_dir, meta)
         writer.start()
 
         settle_s = max(0.0, float(getattr(params, "settle_ms", 0) or 0) / 1000.0)
@@ -601,9 +614,17 @@ class GridScanner(QObject):
                 result.timing.stopped_s += time.monotonic() - t_idle
                 result.timing.tiles += 1
                 if frame is not None:
-                    # Hand it over and move on: the encode, the thumbnail,
-                    # the manifest row and its flush are the writer's.
+                    # The signals are emitted HERE, on the scan thread —
+                    # one emitter, and the ordering against sig_done stays
+                    # trivially right. The expensive half (the encode, the
+                    # manifest row and its flush) is the writer's.
                     frame_shape = tuple(frame.shape)
+                    self.sig_frame.emit(waypoint.index, pos.x_um, pos.y_um,
+                                        frame)
+                    thumb = self._thumbnail(frame)
+                    if thumb is not None:
+                        self.sig_tile.emit(waypoint.index, pos.x_um, pos.y_um,
+                                           thumb)
                     writer.submit_frame(
                         waypoint.index, (pos.x_um, pos.y_um, pos.r_deg), frame,
                         time.time())
