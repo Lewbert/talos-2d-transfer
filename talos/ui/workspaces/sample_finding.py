@@ -487,13 +487,14 @@ class SampleFindingWorkspace(QWidget):
         else:
             return
         if moving:
-            # Each moving sample pushes the hold back; when they stop it
-            # runs out and clears the pause.
+            # Every moving sample pushes the hold back; the LAST one starts
+            # the countdown that ends the pause. Restarting it on the quiet
+            # samples too (the obvious "elif still moving") would keep it
+            # alive forever at the 10 Hz telemetry rate — the pause would
+            # never lift.
             self._stage_moving = True
             self._motion_hold.start()
             self._refresh_processed_views()
-        elif self._stage_moving:
-            self._motion_hold.start()
 
     def _on_motion_hold_expired(self) -> None:
         self._stage_moving = False

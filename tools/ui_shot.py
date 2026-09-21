@@ -234,6 +234,21 @@ def main() -> int:
         pass
     flush(200)
     finding = window._sample_finding
+    # Every axis is IDLE for these shots. The strip above was posed with a
+    # moving XYR axis AND the focus mid-jog, and a moving axis correctly
+    # holds the processed views back — which would make the Pre-processed
+    # and Samples shots show the raw frame, i.e. the same picture three
+    # times. Nothing overwrites the posed values either: the sim devices
+    # do not poll in this rig.
+    window._on_device_state("zolix", {
+        "connected": True,
+        "status": asdict(StageStatus()),
+        "position": asdict(StagePosition(x_um=0.0, y_um=0.0, r_deg=0.0)),
+    })
+    window._on_device_state("focus", {
+        "status": asdict(FocusStatus(pos=0, mode="IDLE")),
+        "slim_bounds": (-1000, 2000),
+    })
     finding._engine.set_live(True)
     finding.preprocess_group.enable.setChecked(True)
     finding.preprocess_group.local.enable.setChecked(True)

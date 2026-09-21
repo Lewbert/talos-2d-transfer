@@ -924,6 +924,30 @@ def test_a_scan_holds_the_processed_views_back(window):
     assert not finding._engine.suspended
 
 
+def test_the_motion_hold_ends_under_a_steady_stream_of_telemetry(window):
+    """Regression, found by the screenshot rig: the hold was restarted on
+    every sample, so at the 10 Hz telemetry rate it never expired and the
+    processed views never came back. Only a MOVING sample may push it
+    back."""
+    import time
+
+    from PySide6.QtWidgets import QApplication
+
+    finding = window._sample_finding
+    quiet = {"position": {"x_um": 0.0, "y_um": 0.0},
+             "status": {"x_moving": False}}
+    finding._note_motion("zolix", {"position": {"x_um": 0.0, "y_um": 0.0},
+                                   "status": {"x_moving": True}})
+    assert finding.live_view.processed_paused
+    deadline = time.monotonic() + 3.0
+    while time.monotonic() < deadline and finding.live_view.processed_paused:
+        finding._note_motion("zolix", quiet)     # telemetry keeps arriving
+        QApplication.processEvents()             # let the hold timer fire
+        time.sleep(0.05)
+    assert not finding.live_view.processed_paused, \
+        "the pause never lifted while telemetry kept flowing"
+
+
 def test_a_moving_axis_holds_the_processed_views_back(window):
     """A jog: the processed frame is a picture of where the stage WAS. The
     live feed keeps running (a jog is exactly when the dropper is used)."""
