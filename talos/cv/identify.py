@@ -58,6 +58,10 @@ from talos.models import FlakeCandidate, ObjectiveCalibration, StagePosition
 logger = logging.getLogger(__name__)
 
 #: A connected region smaller than this many pixels is noise, at any scale.
+#: Deliberately NOT scaled by the frame's resolution (unlike the lengths
+#: below): sensor speckle is a per-pixel phenomenon, not a physical one, and
+#: this is a noise floor rather than a size gate — the µm² gate is
+#: ``SizeStage``, which is physical and resolution-independent already.
 _MIN_AREA_PX2 = 4.0
 
 _STAGE_TYPES: dict[str, type] = {}
@@ -281,7 +285,7 @@ class BorderStage(Stage):
     KIND = "gate"
 
     def keep(self, cand: FlakeCandidate, ctx: "_Ctx") -> bool:
-        margin = max(1, int(round(self.margin_px * ctx.scale)))
+        margin = max(1, int(round(ctx.ref_px(self.margin_px))))
         x, y, w, h = cand.bbox
         return not (x <= margin or y <= margin
                     or x + w >= ctx.width - margin
@@ -293,9 +297,9 @@ class BorderStage(Stage):
 class SharpnessStage(Stage):
     """Gate: mean boundary gradient. Crystals have sharp edges; tape
     residue, dust and defocused blobs are diffuse. The threshold is
-    normalised by the preview scale (a downscaled frame has smaller
-    gradients), so it means the same thing in the preview and in a
-    full-resolution tile.
+    normalised by the preview scale AND by the frame's own resolution (a
+    downscaled or coarser frame has smaller gradients), so it means the
+    same thing in the preview, in a 1080p tile and in a 4K one.
 
     Raise it to reject diffuse blobs; the default is deliberately low,
     because a colour-matched contour traces the colour boundary and
@@ -313,7 +317,7 @@ class SharpnessStage(Stage):
     def keep(self, cand: FlakeCandidate, ctx: "_Ctx") -> bool:
         strength = ctx.edge_strength(cand)
         cand.score = strength          # the table's ranking number
-        return strength >= self.min_edge_strength * ctx.scale
+        return strength >= ctx.ref_grad(self.min_edge_strength)
 
 
 @_register
@@ -330,7 +334,7 @@ class MergeStage(Stage):
 
     def merge(self, candidates: list[FlakeCandidate],
               ctx: "_Ctx") -> list[FlakeCandidate]:
-        return merge_fragments(candidates, self.gap_px * ctx.scale,
+        return merge_fragments(candidates, ctx.ref_px(self.gap_px),
                                ctx.um2_per_px2)
 
 
@@ -443,13 +447,19 @@ class _Ctx:
     """Everything a stage needs, computed at most once per run."""
 
     def __init__(self, img: np.ndarray, um_per_px: tuple[float, float],
-                 scale: float):
+                 scale: float, frame_scale: float = 1.0):
         self.img = img                       # the (possibly scaled) frame
         self.height, self.width = img.shape[:2]
-        self.scale = scale
+        self.scale = float(scale) or 1.0
         # µm per pixel OF THIS FRAME (a downscaled frame covers more µm/px)
         self.um_per_px = (um_per_px[0], um_per_px[1])
         self.um2_per_px2 = um_per_px[0] * um_per_px[1]
+        #: How finely this frame samples compared with the frame the
+        #: operator tunes on (see :meth:`ref_px`). 1.0 unless a caller says
+        #: otherwise: the live preview IS the frame the parameters were
+        #: judged on, and only another resolution of the same field of view
+        #: needs the ratio.
+        self.frame_scale = float(frame_scale) or 1.0
         self._hsv = None
         self._grad = None
         self._contours: dict[int, Any] = {}
@@ -490,6 +500,32 @@ class _Ctx:
 
     def mark_failed(self, cand: FlakeCandidate) -> None:
         self._failed.add(id(cand))
+
+    # --- pixel-unit parameters, in the frame actually in hand ------------
+
+    def ref_px(self, value: float) -> float:
+        """A LENGTH the operator set, in work-frame pixels.
+
+        The parameter is expressed in pixels of the frame they judged it on
+        (the live preview), which is not necessarily the frame in hand: a
+        scan can capture at another resolution of the same field of view
+        (Preferences → Scan). Scaling by ``frame_scale`` keeps the number
+        meaning the same DISTANCE on the sample — 4 px of a 1080p frame and
+        8 px of the 4K one are both the same µm. With ``frame_scale`` at
+        its default this is exactly ``value * scale``, which is what the
+        code did before there was a second resolution at all.
+        """
+        return float(value) * self.scale * self.frame_scale
+
+    def ref_grad(self, value: float) -> float:
+        """A per-pixel GRADIENT threshold, in work-frame-pixel units.
+
+        Gradient magnitude is per pixel, so this one scales INVERSELY to the
+        sampling: the same physical edge spread over twice the pixels has
+        half the per-pixel gradient. ``ref_px``'s inverse, for the same
+        reason.
+        """
+        return float(value) * self.scale / self.frame_scale
 
     def regions(self) -> list:
         return [Region(contour=contour, passed=key not in self._failed)
@@ -555,7 +591,8 @@ class IdentifyPipeline:
             config: IdentifyConfig | None = None,
             stage_pos: StagePosition | None = None,
             scale: float = 1.0,
-            flip: bool = False) -> IdentifyResult:
+            flip: bool = False,
+            frame_scale: float = 1.0) -> IdentifyResult:
         """Identify samples in ``img`` (RGB uint8).
 
         ``scale`` < 1 processes a downscaled copy (the live preview) while
@@ -564,6 +601,11 @@ class IdentifyPipeline:
         candidate's ``x_um``/``y_um`` through the px→stage mapping, which
         needs ``flip`` (the camera flip — it decides which way the image
         axes point relative to the stage).
+
+        ``frame_scale`` says how finely THIS frame samples the field of
+        view compared with the frame the pixel-unit parameters were tuned
+        on — supplied by a caller that captures at more than one resolution
+        (the scan), and 1.0 for everything else. See ``_Ctx.ref_px``.
         """
         config = config or self.config
         scale = float(scale)
@@ -577,7 +619,7 @@ class IdentifyPipeline:
 
         um_x = float(getattr(calib, "um_per_px_x", None) or 1.0) / scale
         um_y = float(getattr(calib, "um_per_px_y", None) or 1.0) / scale
-        ctx = _Ctx(work, (um_x, um_y), scale)
+        ctx = _Ctx(work, (um_x, um_y), scale, frame_scale)
 
         counts: list = []
         mask = np.zeros(work.shape[:2], np.uint8)

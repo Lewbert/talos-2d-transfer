@@ -74,6 +74,8 @@ class SampleFindingWorkspace(QWidget):
         self._input = input_system
         self._autofocus = autofocus_service
         self._last_frame = None
+        #: The width of the frame the operator tunes on (see on_frame).
+        self._reference_width = 0
 
         self._engine = DetectionEngine(parent=self)
         self._engine.sig_result.connect(self._on_detected)
@@ -255,22 +257,38 @@ class SampleFindingWorkspace(QWidget):
     def camera_flip(self) -> bool:
         return bool(self._settings.device("camera").get("flip", True))
 
-    def live_calibration(self):
-        """The active calibration in LIVE-frame pixels (the stored value is
-        per 4K-sensor pixel)."""
+    def calibration_for(self, frame):
+        """The active calibration in THIS frame's pixels.
+
+        The stored value is µm per 4K-SENSOR pixel (``cv/calibration.py``),
+        so a frame sampled at another resolution needs the ratio: the same
+        field of view over half the pixels means twice the µm per pixel.
+        The width ratio is applied to both axes — right for the 16:9 frames
+        this bench produces, and the same assumption the scale bar and the
+        snapshot burn already make.
+
+        It MUST be the frame's own width, not the live stream's. A scan can
+        capture at a resolution the live view is not using
+        (Preferences → Scan), and measuring those tiles with the live
+        frame's scale gets every µm² wrong by the square of the ratio and
+        every go-to-sample offset wrong in proportion.
+        """
         from dataclasses import replace
 
         from talos.cv.calibration import SENSOR_WIDTH_PX
 
         calib = (self._calibration.calibration() if self._calibration
                  else self.scan_panel.canonical_calibration())
-        frame = self._last_frame
         if frame is None or not frame.shape[1]:
             return calib
         factor = SENSOR_WIDTH_PX / float(frame.shape[1])
         return replace(calib,
                        um_per_px_x=(calib.um_per_px_x or 0.0) * factor,
                        um_per_px_y=(calib.um_per_px_y or 0.0) * factor)
+
+    def live_calibration(self):
+        """The active calibration in LIVE-frame pixels."""
+        return self.calibration_for(self._last_frame)
 
     def _sync_curve_centre(self) -> None:
         self.preprocess_group.set_centre(self.colour_group.rgb())
@@ -304,6 +322,30 @@ class SampleFindingWorkspace(QWidget):
         """The newest streamed frame: the detection source hands it on and
         the picker falls back to it before the worker has run once."""
         self._last_frame = frame
+        # The frame the operator is tuning the pixel-unit parameters ON —
+        # remembered from before a scan, because a run can switch the live
+        # stream to the scan's resolution (Preferences → Scan) and the
+        # tiles that arrive then are not what the parameters were judged
+        # against. See ``frame_scale_for``.
+        if self._state.mode != "SCAN":
+            self._reference_width = int(frame.shape[1]) if frame is not None \
+                and len(frame.shape) > 1 else 0
+
+    def frame_scale_for(self, frame) -> float:
+        """How finely THIS frame samples the field of view, relative to the
+        frame the parameters were tuned on.
+
+        Every pixel-unit parameter (the frame-edge margin, the merge gap,
+        the sharpness threshold) means pixels of what the operator was
+        looking at when they set it. A scan that captures the same field of
+        view at twice the resolution needs those numbers doubled (and the
+        gradient threshold halved) or the gates silently change meaning —
+        which is what "does this work at both scan resolutions?" turns on.
+        """
+        reference = int(self._reference_width or 0)
+        if reference <= 0 or frame is None or len(frame.shape) < 2:
+            return 1.0
+        return float(frame.shape[1]) / float(reference)
 
     def _detect_source(self):
         """What the live detection feed works from, one tick at a time."""
@@ -322,10 +364,11 @@ class SampleFindingWorkspace(QWidget):
         from talos.models import StagePosition
 
         self._engine.submit_tile(
-            index, frame, self.live_calibration(),
+            index, frame, self.calibration_for(frame),
             StagePosition(x_um=x_um, y_um=y_um, r_deg=0.0),
             self.identify_config(), scale=1.0, flip=self.camera_flip(),
-            preprocess=self.preprocess_config(), colour=self.colour_rgb())
+            preprocess=self.preprocess_config(), colour=self.colour_rgb(),
+            frame_scale=self.frame_scale_for(frame))
 
     def _on_detected(self, index: int, result, preprocessed, overlay) -> None:
         if result is None:

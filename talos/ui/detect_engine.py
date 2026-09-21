@@ -50,6 +50,10 @@ class DetectJob:
     stage_pos: object
     config: object
     scale: float = 1.0
+    #: How finely this frame samples the field of view compared with the
+    #: frame the operator tunes on — 1.0 for the live feed, and the ratio
+    #: for a tile captured at another resolution (Preferences → Scan).
+    frame_scale: float = 1.0
     render: bool = True
     flip: bool = False    # the camera flip, for the px→stage mapping
     preprocess: object = None    # PreprocessConfig | None
@@ -92,7 +96,7 @@ class _DetectWorker(QThread):
                 result = IdentifyPipeline().run(
                     work, job.calib, config=job.config,
                     stage_pos=job.stage_pos, scale=job.scale,
-                    flip=job.flip)
+                    flip=job.flip, frame_scale=job.frame_scale)
                 overlay = (render_overlay(work, result)
                            if job.render else None)
             except Exception as exc:  # noqa: BLE001 - never kill the scan
@@ -168,7 +172,8 @@ class DetectionEngine(QObject):
 
     def submit_tile(self, index: int, frame, calib, stage_pos, config,
                     scale: float = 1.0, flip: bool = False,
-                    preprocess=None, colour=None) -> None:
+                    preprocess=None, colour=None,
+                    frame_scale: float = 1.0) -> None:
         """One captured tile. Queued unconditionally: a scan must not be
         able to outrun the detector and silently lose a sample.
 
@@ -179,6 +184,7 @@ class DetectionEngine(QObject):
         self._worker.submit(DetectJob(index=int(index), frame=frame,
                                       calib=calib, stage_pos=stage_pos,
                                       config=config, scale=scale,
+                                      frame_scale=frame_scale,
                                       render=False, flip=flip,
                                       preprocess=preprocess, colour=colour))
 
