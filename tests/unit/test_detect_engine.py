@@ -187,3 +187,30 @@ def test_the_worker_emits_both_views_from_one_transform(qapp):
         render=False)
     assert tile_overlay is None
     assert tile_pre is not None          # the layer is still handed back
+
+
+def test_a_suspended_engine_stops_sampling_but_finishes_its_tiles(qapp):
+    """A scan suspends the live feed so its tiles are not queued behind
+    previews — and the tiles already submitted still drain."""
+    from talos.ui.detect_engine import DetectionEngine
+
+    engine = DetectionEngine(interval_ms=30)
+    try:
+        calls: list = []
+        engine.set_source(lambda: calls.append(1) or None)
+        engine.set_live(True)
+        engine.set_suspended(True)
+        deadline = time.monotonic() + 0.4
+        while time.monotonic() < deadline:
+            qapp.processEvents()
+            time.sleep(0.01)
+        assert calls == [], "the live feed sampled while suspended"
+
+        engine.set_suspended(False)
+        deadline = time.monotonic() + 1.0
+        while time.monotonic() < deadline and not calls:
+            qapp.processEvents()
+            time.sleep(0.01)
+        assert calls, "the live feed did not come back"
+    finally:
+        engine.shutdown()

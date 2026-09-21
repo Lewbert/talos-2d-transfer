@@ -855,6 +855,76 @@ def test_a_refused_switch_still_runs_the_scan(window, monkeypatch):
     assert any("live one" in line for line in logs), logs
 
 
+def test_a_scan_holds_the_processed_views_back(window):
+    """For the whole run: the processed layers would be work the tiles are
+    queued behind, and the live feed is what the operator watches the stage
+    travel on."""
+    finding = window._sample_finding
+    finding.set_view_mode("samples")
+    assert not finding.live_view.processed_paused
+
+    finding._state.set_mode("SCAN")
+    try:
+        assert finding.live_view.processed_paused
+        assert "scanning" in finding.live_view._pause_note
+        assert finding._engine.suspended
+    finally:
+        finding._state.set_mode("MANUAL")
+    assert not finding.live_view.processed_paused
+    assert not finding._engine.suspended
+
+
+def test_a_moving_axis_holds_the_processed_views_back(window):
+    """A jog: the processed frame is a picture of where the stage WAS. The
+    live feed keeps running (a jog is exactly when the dropper is used)."""
+    finding = window._sample_finding
+    moving = {"position": {"x_um": 0.0, "y_um": 0.0},
+              "status": {"x_moving": True}}
+    finding._note_motion("zolix", moving)
+    assert finding.live_view.processed_paused
+    assert not finding._engine.suspended
+
+    finding._note_motion("zolix", {"position": {"x_um": 0.0, "y_um": 0.0},
+                                   "status": {"x_moving": False}})
+    assert finding.live_view.processed_paused, "held until the frame settles"
+    finding._on_motion_hold_expired()
+    assert not finding.live_view.processed_paused
+
+
+def test_focus_motion_pauses_the_previews_too(window):
+    finding = window._sample_finding
+    finding._note_motion("focus", {"status": {"mode": "TRAP"}})
+    assert finding.live_view.processed_paused
+    finding._note_motion("focus", {"status": {"mode": "IDLE"}})
+    finding._on_motion_hold_expired()
+    assert not finding.live_view.processed_paused
+
+
+def test_a_tile_never_becomes_the_live_display_layer(window):
+    """A tile is a different part of the sample: showing it (or letting the
+    dropper sample it) is how the view jumps to a region nobody is looking
+    at."""
+    finding = window._sample_finding
+    finding.live_view.set_preprocessed_frame(None)
+    live_layer = finding.live_view._preprocessed_frame
+    finding._on_detected(3, _result_stub(), _tile_frame(), None)
+    assert finding.live_view._preprocessed_frame is live_layer
+
+
+def _result_stub():
+    class _Result:
+        candidates: list = []
+        summary = "colour 1"
+
+    return _Result()
+
+
+def _tile_frame():
+    import numpy as np
+
+    return np.full((32, 48, 3), 200, np.uint8)
+
+
 def test_stop_all_aborts_the_run_not_just_the_motion(window):
     """Esc must end a scan. Without this wiring the abort flag stayed
     clear, the controller stopped, and the run continued at the next

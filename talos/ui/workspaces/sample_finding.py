@@ -34,7 +34,7 @@ Two rules it inherits and keeps:
 
 from __future__ import annotations
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtWidgets import (
     QScrollArea,
     QSplitter,
@@ -46,6 +46,7 @@ from talos.cv.identify import IdentifyConfig, sample_hex
 from talos.ui.detect_engine import DetectionEngine
 from talos.ui.widgets.collapsible import CollapsibleGroup
 from talos.ui.widgets.control_groups import CameraGroup
+from talos.ui.widgets.hardware_strip import parse_focus, parse_zolix
 from talos.ui.widgets.identify_panel import (ColourGroup, IdentifyGroup,
                                              PreprocessGroup)
 from talos.ui.widgets.live_view import LiveViewModeBar, LiveViewWidget
@@ -56,6 +57,13 @@ from talos.ui.widgets.scan_panel import ScanPanel
 #: path is the scan's, where a tile takes a second to capture anyway and
 #: nothing is dropped.
 PREVIEW_SCALE = 0.5
+
+#: How long the processed views stay held back after the last sign of
+#: motion. The telemetry says an axis has stopped before the frame that
+#: still shows it settling has been delivered, and a preview that flashes
+#: a blurry processed frame on every jog release is worse than one that
+#: waits a moment.
+MOTION_HOLD_MS = 300
 
 
 class SampleFindingWorkspace(QWidget):
@@ -76,6 +84,12 @@ class SampleFindingWorkspace(QWidget):
         self._last_frame = None
         #: The width of the frame the operator tunes on (see on_frame).
         self._reference_width = 0
+        #: True while an axis the camera can see is moving.
+        self._stage_moving = False
+        self._motion_hold = QTimer(self)
+        self._motion_hold.setSingleShot(True)
+        self._motion_hold.setInterval(MOTION_HOLD_MS)
+        self._motion_hold.timeout.connect(self._on_motion_hold_expired)
 
         self._engine = DetectionEngine(parent=self)
         self._engine.sig_result.connect(self._on_detected)
@@ -87,6 +101,9 @@ class SampleFindingWorkspace(QWidget):
         self._sync_curve_centre()
         self.set_view_mode(self._stored_view_mode())
         self._engine.set_live(True)
+        # A scan or an autofocus run holds the processed views back for its
+        # whole duration (see _refresh_processed_views).
+        self._state.sig_mode_changed.connect(self._on_mode_changed)
 
     # ------------------------------------------------------------------
     # construction
@@ -208,6 +225,7 @@ class SampleFindingWorkspace(QWidget):
             self.live_view.view_mode
         self._settings.save()
         self._engine.set_live(True)
+        self._refresh_processed_views()
 
     def eventFilter(self, obj, event):  # noqa: N802
         if obj is self.live_view and event.type() == event.Type.Resize:
@@ -297,14 +315,17 @@ class SampleFindingWorkspace(QWidget):
         self._sync_curve_centre()
         self._persist_identify()
         self._engine.set_live(True)
+        self._refresh_processed_views()
 
     def _on_preprocess_changed(self) -> None:
         self._persist_preprocess()
         self._engine.set_live(True)
+        self._refresh_processed_views()
 
     def _on_identify_changed(self) -> None:
         self._persist_identify()
         self._engine.set_live(True)
+        self._refresh_processed_views()
 
     def _persist_identify(self) -> None:
         self._settings.update("identify", self.identify_config().to_dict())
@@ -373,13 +394,22 @@ class SampleFindingWorkspace(QWidget):
     def _on_detected(self, index: int, result, preprocessed, overlay) -> None:
         if result is None:
             return
-        self.live_view.set_preprocessed_frame(preprocessed)
         if index < 0:
+            # LIVE jobs only. A tile's frame is the same size and shape as
+            # a live one but it is a different part of the sample: letting
+            # it become the display layer makes the view jump to that
+            # tile's region, and the dropper — which samples the
+            # pre-processed layer — would return a colour from a tile the
+            # operator is not looking at.
+            self.live_view.set_preprocessed_frame(preprocessed)
             self.live_view.set_overlay_frame(overlay)
             self.identify_group.set_counts(result.summary)
             self.scan_panel.show_live_candidates(result.candidates)
             return
         self.scan_panel.on_tile_result(index, result.candidates)
+        # A tile just drained: the last one is what unpauses the previews
+        # when a scan ends (its captures stop before its detections do).
+        self._refresh_processed_views()
 
     # ------------------------------------------------------------------
     # housekeeping
@@ -406,6 +436,68 @@ class SampleFindingWorkspace(QWidget):
 
     def update_telem(self, key: str, payload: dict) -> None:
         self.scan_panel.update_telem(key, payload)
+        self._note_motion(key, payload)
+
+    # ------------------------------------------------------------------
+    # what the processed views may show
+    # ------------------------------------------------------------------
+
+    def _refresh_processed_views(self) -> None:
+        """Hold the two processed views back while they would be stale,
+        expensive, or both.
+
+        Two cases, and the reason they share one switch: a moving stage
+        makes the processed frame a picture of where the stage WAS, and a
+        running scan makes it the work the tiles are queued behind.
+        """
+        scanning = (self._state.mode == "SCAN"
+                    or self.scan_panel.is_scanning()
+                    or self._engine.pending_tiles > 0)
+        paused = scanning or self._stage_moving
+        if scanning:
+            note = "scanning — showing the live frame"
+        elif paused:
+            note = "stage moving — showing the live frame"
+        else:
+            note = ""
+        self.live_view.set_processed_paused(paused, note)
+        self._engine.set_suspended(scanning)
+
+    def _on_mode_changed(self, _mode: str) -> None:
+        self._refresh_processed_views()
+
+    def _note_motion(self, key: str, payload: dict) -> None:
+        """Track whether an axis the CAMERA can see is moving.
+
+        The XYR stage blurs the image and the focus axis changes what is in
+        it, so both pause the previews. The transfer (XYZ) axes do not
+        appear in the image at all AND their firmware has no busy flag — a
+        motion inferred from a position delta would hold the previews back
+        on a noisy sample for no reason, so they are deliberately left out.
+
+        Telemetry only: the scan's own moves are covered by the mode, and
+        the zolix poll is starved while a scan queues jobs anyway.
+        """
+        if not isinstance(payload, dict):
+            return
+        if key == "zolix":
+            moving = bool(parse_zolix(payload).get("moving"))
+        elif key == "focus":
+            moving = str(parse_focus(payload).get("mode", "IDLE")) != "IDLE"
+        else:
+            return
+        if moving:
+            # Each moving sample pushes the hold back; when they stop it
+            # runs out and clears the pause.
+            self._stage_moving = True
+            self._motion_hold.start()
+            self._refresh_processed_views()
+        elif self._stage_moving:
+            self._motion_hold.start()
+
+    def _on_motion_hold_expired(self) -> None:
+        self._stage_moving = False
+        self._refresh_processed_views()
 
     def _log(self, message: str) -> None:
         self.sig_log.emit(str(message))

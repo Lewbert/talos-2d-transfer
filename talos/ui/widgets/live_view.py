@@ -176,6 +176,10 @@ class LiveViewWidget(QWidget):
         self._preprocessed_frame: np.ndarray | None = None
         self._overlay_frame: np.ndarray | None = None
         self._view_mode = "original"
+        #: The processed layers are HELD BACK (see ``set_processed_paused``):
+        #: the raw stream shows instead, whatever the mode bar says.
+        self._processed_paused = False
+        self._pause_note = ""
         self._picking = False
         self._af_phase: int | None = None
         self._af_label = ""
@@ -221,18 +225,53 @@ class LiveViewWidget(QWidget):
         look for. With pre-processing off it is the raw frame itself.
         """
         self._preprocessed_frame = frame
-        if self._view_mode == "preprocessed":
+        if self._view_mode == "preprocessed" and not self._processed_paused:
             self._pending = self._shown_frame()
             self.update()
 
     def set_overlay_frame(self, frame: np.ndarray | None) -> None:
         """The identification result drawn over the pre-processed layer."""
         self._overlay_frame = frame
-        if self._view_mode == "samples":
+        if self._view_mode == "samples" and not self._processed_paused:
             self._pending = self._shown_frame()
             self.update()
 
+    # --- holding the processed layers back ------------------------------
+
+    def set_processed_paused(self, paused: bool, note: str = "") -> None:
+        """Show the RAW frame while the processed layers are held back.
+
+        The two processed views cost a pre-process and a full
+        identification per job, and they are computed from frames the stage
+        was standing still for: while an axis is moving they are both stale
+        and expensive, and while a scan runs they are exactly the work the
+        tiles are waiting for. So they are held back — the mode bar keeps
+        its selection (the operator chose it and it comes straight back),
+        the image is the live stream, and ``note`` says so.
+
+        The DROPPER is deliberately untouched: ``pick_frame`` keeps
+        sampling the pre-processed layer, which is what the mask will look
+        for.
+        """
+        paused = bool(paused)
+        note = str(note or "") if paused else ""
+        if paused == self._processed_paused and note == self._pause_note:
+            return
+        self._processed_paused = paused
+        self._pause_note = note
+        # Repaint from the buffer that now applies — otherwise the stale
+        # processed frame would linger until the next streamed frame.
+        self._pending = self._shown_frame()
+        self.update()
+        self._overlay.update()
+
+    @property
+    def processed_paused(self) -> bool:
+        return self._processed_paused
+
     def _shown_frame(self) -> np.ndarray | None:
+        if self._processed_paused and self._live_frame is not None:
+            return self._live_frame
         if self._view_mode == "preprocessed" \
                 and self._preprocessed_frame is not None:
             return self._preprocessed_frame
@@ -405,6 +444,26 @@ class LiveViewWidget(QWidget):
             return None
         return self._um_per_px * (SENSOR_WIDTH_PX / self._last_shape[1])
 
+    def _draw_pause_note(self, painter: QPainter) -> None:
+        """Say why the image is not the layer the mode bar names.
+
+        A bottom-left caption with its own backing: the live image can be
+        anything, including a bright field, and a bare string on top of it
+        is a string nobody can read.
+        """
+        metrics = painter.fontMetrics()
+        text = self._pause_note
+        width = metrics.horizontalAdvance(text) + 16
+        height = metrics.height() + 6
+        rect = QRectF(10.0, self.height() - height - 10.0, width, height)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor(0, 0, 0, 150))
+        painter.drawRoundedRect(rect, 4.0, 4.0)
+        painter.setPen(QPen(QColor(255, 255, 255)))
+        painter.drawText(rect.adjusted(8.0, 0.0, -8.0, 0.0),
+                         Qt.AlignmentFlag.AlignVCenter
+                         | Qt.AlignmentFlag.AlignLeft, text)
+
     def _render_pending(self) -> None:
         if self._pending is None:
             return
@@ -492,6 +551,8 @@ class LiveViewWidget(QWidget):
             painter.setPen(_ROI_PEN)
             painter.setBrush(Qt.BrushStyle.NoBrush)
             painter.drawRect(self._drag_rect)
+        if self._processed_paused and self._pause_note:
+            self._draw_pause_note(painter)
         live_um_per_px = self._live_um_per_px()
         if self._scale_bar_enabled and live_um_per_px is not None:
             # the length choice lives in the shared spec now (same ladder

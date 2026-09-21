@@ -119,9 +119,10 @@ class DetectionEngine(QObject):
         self._worker.sig_result.connect(self._on_result)
         self._worker.sig_log.connect(self.sig_log)
         self._worker.start()
-        self._source = None            # () -> the seven-tuple below
+        self._source = None            # () -> the eight-tuple below
         self._busy = False
         self._live_on = False
+        self._suspended = False
         self._tiles_outstanding = 0
         self._timer = QTimer(self)
         self._timer.setInterval(max(30, int(interval_ms)))
@@ -148,8 +149,24 @@ class DetectionEngine(QObject):
     def live(self) -> bool:
         return self._timer.isActive()
 
+    def set_suspended(self, suspended: bool) -> None:
+        """Hold the LIVE feed without turning it off.
+
+        A scan owns this worker while it runs: its tiles are never dropped,
+        and every live job they wait behind is a sample found late. So the
+        preview feed is suspended for the run — but NOT with
+        ``set_live(False)``, which four handlers in the tab re-arm on every
+        edit (a colour, a filter, a view-mode change), and which the
+        dropper depends on staying fed.
+        """
+        self._suspended = bool(suspended)
+
+    @property
+    def suspended(self) -> bool:
+        return self._suspended
+
     def _tick(self) -> None:
-        if self._busy or self._source is None:
+        if self._busy or self._source is None or self._suspended:
             return                 # one job in flight: drop, don't queue
         try:
             item = self._source()

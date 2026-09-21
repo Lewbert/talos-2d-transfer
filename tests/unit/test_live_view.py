@@ -266,3 +266,62 @@ def test_the_dropper_samples_the_preprocessed_layer_never_the_display(qapp):
     view.set_overlay_frame(overlay)
     view.set_view_mode("samples")
     assert view.pick_frame() is filtered
+
+
+# --- held-back processed views -------------------------------------------
+
+def test_a_paused_processed_view_shows_the_live_frame(qapp):
+    """While the stage moves or a scan runs, the two processed buffers are
+    stale and expensive: the display falls back to the stream, whatever the
+    mode bar says."""
+    view = LiveViewWidget()
+    view.resize(640, 480)
+    live, processed = _grey_frame(50), _grey_frame(200)
+    view.set_view_mode("preprocessed")
+    view.show_frame(live)
+    view.set_preprocessed_frame(processed)
+    assert view._shown_frame() is processed
+
+    view.set_processed_paused(True, "stage moving — showing the live frame")
+    assert view._shown_frame() is live
+    assert view.processed_paused
+
+    view.set_processed_paused(False)
+    assert view._shown_frame() is processed
+    assert not view.processed_paused
+
+
+def test_the_dropper_keeps_sampling_the_processed_layer_while_paused(qapp):
+    """The pause is a DISPLAY decision. The mask searches the pre-processed
+    pixels, so a colour picked off a paused screen must still be the colour
+    the chain produced."""
+    view = LiveViewWidget()
+    live, processed = _grey_frame(50), _grey_frame(200)
+    view.show_frame(live)
+    view.set_preprocessed_frame(processed)
+    view.set_processed_paused(True, "scanning — showing the live frame")
+    assert view.pick_frame() is processed
+
+
+def test_a_paused_view_repaints_when_it_is_released(qapp):
+    """Otherwise the stale processed frame stays on screen until the next
+    streamed frame happens to arrive."""
+    view = LiveViewWidget()
+    view.resize(640, 480)
+    view.set_view_mode("samples")
+    view.show_frame(_grey_frame(50))
+    view.set_overlay_frame(_grey_frame(200))
+    view.set_processed_paused(True, "scanning")
+    view.show_frame(_grey_frame(60))
+    view._render_pending()
+
+    view.set_processed_paused(False)
+    assert view._pending is view._overlay_frame
+
+
+def test_the_pause_note_is_only_kept_while_paused(qapp):
+    view = LiveViewWidget()
+    view.set_processed_paused(True, "scanning — showing the live frame")
+    assert view._pause_note == "scanning — showing the live frame"
+    view.set_processed_paused(False, "ignored")
+    assert view._pause_note == ""
