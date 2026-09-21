@@ -37,8 +37,10 @@ def main() -> int:
     parser.add_argument("--overlap", type=float, default=0.10)
     parser.add_argument("--fov-x", type=float, default=768.0)
     parser.add_argument("--fov-y", type=float, default=432.0)
-    parser.add_argument("--settle-ms", type=int, default=200,
+    parser.add_argument("--settle-ms", type=int, default=100,
                         help="quiet time between the move and the capture")
+    parser.add_argument("--speed-pps", type=int, default=0,
+                        help="the scan's own speed (0 = the Zolix config's)")
     parser.add_argument("--backlash-um", type=float, default=0.0,
                         help="play to take up on every move (0 = off)")
     parser.add_argument("--out", type=Path, default=None)
@@ -73,10 +75,16 @@ def main() -> int:
     stage.connect()
     pos = stage.get_position()
     print(f"stage start: x={pos.x_um:.1f} µm, y={pos.y_um:.1f} µm")
+    if args.speed_pps:
+        # This tool owns the driver, so the scan's ONE speed is set here —
+        # in the app it travels in the adapter's config copy instead
+        # (see cv/scan.py:scan_speed_config).
+        stage.slow_speed_pps = int(args.speed_pps)
+    print(f"scan speed: {stage.slow_speed_pps} pps")
 
     params = ScanParams(x0_um=pos.x_um, y0_um=pos.y_um,
                         width_um=args.width, height_um=args.height,
-                        overlap=args.overlap, serpentine=True, slow_speed=True,
+                        overlap=args.overlap, serpentine=True,
                         settle_ms=args.settle_ms,
                         backlash_um=args.backlash_um)
     out_dir = args.out or (get_scan_dir() / "hardware_scan")
@@ -103,6 +111,10 @@ def main() -> int:
         return 1
     print(f"scan: {len(result.frames)} frames, aborted={result.aborted}, "
           f"msg={result.message!r}")
+    # Where the wall-clock went. The stop phase is the number this batch
+    # was about: 0.6 s of it used to be a telemetry-sample wait.
+    if result.timing.summary:
+        print(f"timing: {result.timing.summary}")
     print(f"manifest: {result.manifest_path}")
     if not result.aborted:
         # Return the stage to the scan start (composed fixed-length moves).

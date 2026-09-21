@@ -92,12 +92,39 @@ a wide band around a red target would otherwise match every grey in the frame.
 that reason; a grey or white target needs it lowered deliberately, and the UI
 gives it a row of its own.
 
-**The preview is honest.** The live view processes a *downscaled* copy of the
-frame for speed (50 % by default), but every result comes back in the caller's
-pixels and µm, and the pixel-unit parameters — the edge margin, the merge gap,
-the sharpness floor — are scaled with it. A knob turned on the preview means the
-same thing on a full-resolution tile, which is asserted by test: the same blob
-must yield the same µm at 1.0 and 0.5 scale.
+**The preview is honest, and so is the resolution.** A pixel-unit parameter —
+the edge margin, the merge gap, the sharpness floor — means pixels of the frame
+the operator was looking at when they set it, and both things that can change
+that frame are compensated:
+
+- the **preview downscale** (50 % by default): the pipeline runs on a smaller
+  copy, and every result comes back in the caller's pixels and µm;
+- the **frame's own resolution**: a scan can capture at 1080p or at 4K
+  (Preferences → Scan), and the same field of view sampled with twice the
+  pixels per axis is twice the pixels for a margin and *half* the per-pixel
+  gradient for an edge. The caller that knows both frames says so
+  (`IdentifyPipeline.run(frame_scale=...)`), and `_Ctx.ref_px`/`ref_grad`
+  scale the lengths and the gradient floors accordingly.
+
+Both are asserted by test: the same blob yields the same µm at 1.0 and 0.5
+scale, and the same scene at 1080p and 4K gets the same verdict from every
+gate. Deliberately *not* scaled: `_MIN_AREA_PX2` and the morphology kernel.
+Sensor speckle is a per-pixel phenomenon rather than a physical size, and the
+physical size gate is `SizeStage`, which is µm² and resolution-independent
+already.
+
+`frame_scale` is **never inferred from the frame width**. A 640×480 camera and
+a 4K one are not the same field of view, and guessing would move the gates of
+every setup that is not the one on this bench. It defaults to 1.0 — which is
+every 1080p path, i.e. the arithmetic every earlier version had.
+
+**The measurement is per frame too.** `SampleFindingWorkspace.calibration_for(frame)`
+scales the objective calibration (µm per 4K-sensor pixel) by *that frame's*
+width, for the live preview and for each tile alike. Using the live frame's
+scale for a tile captured at another resolution gets every µm² wrong by the
+square of the ratio and every go-to-sample offset wrong in proportion — a
+4× error in the size gate that nothing in a single-resolution build can show
+you.
 
 The pipeline also never sees a half-edited configuration: the panel rebuilds the
 whole config per job and hands it over, so the worker never reads a widget.
@@ -205,6 +232,28 @@ colour the sample does not have — and with pre-processing switched off that
 layer IS the raw frame, byte for byte. It is also the array the identification
 ran on, so a colour picked off the screen is a colour the mask will look for,
 by construction rather than by coincidence.
+
+### The two processed views stand down while a stage moves, or a scan runs
+
+They cost a pre-process and a full identification per job, and while the
+picture underneath them is moving they are a picture of where the stage *WAS*.
+So the display falls back to the raw stream — the mode bar keeps its selection
+and the view returns to it — whenever an axis the camera can see is moving
+(XYR: it blurs the image; focus: it changes what is in the image) and for the
+whole of a scan, which additionally **suspends the live feed** so the worker's
+time goes to the tiles.
+
+A caption over the image says why the frame on screen is not the layer the
+button names; a mode bar that is silently wrong is worse than a pause. Two
+things are deliberately not affected: the dropper (it keeps sampling the
+pre-processed layer, which is what the mask searches) and a *tile's* result,
+which no longer writes the display buffers at all — a tile is a different part
+of the sample, and letting it become the layer on screen (or the layer the
+dropper reads) is how the view jumps to a region nobody is looking at.
+
+The transfer (XYZ) axes are excluded on purpose: they never appear in the
+image, and their firmware has no busy flag, so a motion inferred from a
+position delta would pause the previews on a noisy sample for no reason.
 
 ## Performance and scheduling
 

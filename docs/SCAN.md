@@ -92,16 +92,20 @@ preview, the map and the run are all the same arithmetic.
 
 | Path | Order | Notes |
 |---|---|---|
-| **Serpentine** | rows end-to-end, alternating direction | The default. *Order: One-way* runs every row the same way |
+| **Serpentine** | rows end-to-end, alternating direction | The default: each row continues where the last ended, so the inter-tile moves are the shortest |
+| **One-way** | every row from the same side, a return between rows | The same cells as the serpentine with the direction rule off |
 | **Spiral** | ring by ring, outermost first | Same tile centres, inward-working order |
 | **Hilbert** | the curve, clipped to the rectangle | Complete, but loses its locality on very asymmetric areas |
 
 "Serpentine" and "Serpentine, one-way" were never two paths — they are one
-order with a direction rule — so the panel asks the two questions
-separately: **Path** (Serpentine / Spiral / Hilbert) and **Order**
-(Serpentine / One-way). Spiral and Hilbert ship as experimental: complete by
-test, no bench history, and the serpentine's locality is what keeps the
-inter-tile moves short.
+order with a direction rule — so the panel asks **one** question with four
+answers, not two questions. The CV layer spells One-way as
+`path="serpentine"` plus `serpentine=false`, which is exactly what the old
+Order row wrote: a stored configuration means the same thing after the
+merge, and `one_way` exists as a path *name* so the settings file and the
+map legend have something to say. Spiral and Hilbert ship as experimental:
+complete by test, no bench history, and the serpentine's locality is what
+keeps the inter-tile moves short.
 
 `start_axis` chooses whether rows advance first along X or along Y, and
 `x_dir`/`y_dir` mirror the whole rectangle from the start point. Both are
@@ -131,15 +135,57 @@ Per waypoint, in order:
    the scan drives the controller in fixed-steps mode, so the controller
    generates its own acceleration and deceleration ramp. There is no
    stability case left for a slow/fast pair to answer.
-2. **`wait_idle`** — position stable across three consecutive telemetry samples
-   at 0.2 s, i.e. at least 0.6 s after the motion stops. This is the single
-   largest *fixed* cost per tile: with the settle and the capture it comes to
-   about 0.9 s before any motion is counted, which is what the progress readout's
-   measured ETA is built from.
+2. **`wait_idle`** — until the *controller* reports every axis stopped, from
+   its own motion bits (registers 30012-30014), read with a short `get_status`
+   job every 50 ms. One poll after the ramp finishes ends it: ~0.08 s against
+   the **0.6 s** the previous telemetry rule cost every waypoint.
 3. **Readback** the position from the controller. The manifest records *where
    the stage was*, never where it was told to go.
-4. **Settle** (`settle_ms`, default 200) — mechanical quiet after the stop.
-5. **Capture** (below).
+4. **Settle** (`settle_ms`, default 100) — mechanical quiet after the stop.
+   It begins when the motion actually ended, which is what step 2 made true:
+   the old rule put ~0.6 s of waiting in between, which is why the default
+   halved with the fix.
+5. **Capture** (below), then hand the frame to the writer thread and go
+   straight on to the next move.
+
+**The stop phase is what the operator feels**, and these five steps are where
+it went. Per tile at 1080p, shipped defaults, before and after:
+
+| | before | after |
+|---|---|---|
+| motion-end detection | ≥0.60 s | ~0.08 s |
+| settle | 0.20 s | 0.10 s |
+| capture gate | 0.06–0.12 s | 0.06–0.12 s |
+| readback | 0.02–0.05 s | 0.02–0.05 s |
+| PNG + thumbnail + manifest | 0.04–0.12 s **on the scan thread** | 0 (writer thread) |
+| **stopped total** | **~1.1 s** | **~0.25 s** |
+
+Travel is untouched and remains the operator's knob: the bench's
+0.625 µm/pulse means `speed_pps` 500 is only ~312 µm/s, so on a large area
+the *move* is the term that is left. `ScanResult.timing` measures the three
+phases separately (to command / travelling / stopped) and the panel logs
+their per-tile averages at the end of a run — read that before changing any
+of this, and note that the bench checklist verifies the numbers rather than
+re-deriving them.
+
+**Why the wait is polled from the caller, not run inside the driver.** The
+driver has a `wait_idle` of its own and it would be marginally faster. It is
+not used because it would block the device worker for the whole move, which
+holds a queued STOP ALL behind it: Esc would look like it did nothing until
+the stage finished travelling. Short status jobs leave the worker free
+*between* reads, so the priority stop still lands promptly.
+
+Three details of that loop that are the whole point:
+
+- A result that is **not** a `StageStatus` counts as a FAILED poll, never as
+  "stopped". Reading an answer that cannot answer the question as a yes is
+  the bug the old telemetry key was written about (`stage_adapter.py`).
+- Three consecutive failures raise: a blip is retried by the driver's own
+  read retries, a dead link must fail the waypoint rather than spin to the
+  timeout.
+- An abort returns **quietly**, so the scan reports "aborted" — a different
+  thing from "stopped early", and it keeps the abort out of the status line
+  as an error.
 
 **Backlash take-up** is optional and off by default (`backlash_um = 0`). When
 enabled it makes every move *finish from the same side*: an axis travelling the
@@ -148,7 +194,12 @@ reversals — the obvious implementation — is wrong for a serpentine, whose ro
 alternate: it would leave odd rows a backlash away from even ones, which is the
 error the feature exists to remove. The cost is one extra short move on the
 waypoints where the approach is already wrong, and the tests prove the invariant
-over a whole run (`test_scan_backlash.py`), not just for a single move.
+over a whole run (`test_scan_backlash.py`), not just for a single move. Each
+take-up move now **waits for its own motion to end** before the target move is
+issued: the driver refuses to command a move onto a moving axis (by design —
+that is what stops a queued move from being executed twice), so the two-move
+take-up could not have worked on hardware. Its earlier test passed only
+because the stub's `wait_idle` was a no-op.
 
 ## Capture: from the frame slot, never from the camera
 
@@ -168,6 +219,59 @@ stream that has stalled cannot satisfy the gate, so the waypoint is counted
 the previous frame under a new position. The CLI benches, which own their
 camera outright, use `CameraFrameSource` and the same gate.
 
+### Capture resolution, and the switch around a run
+
+Tiles are whatever the frame slot is publishing, and Preferences → Scan says
+**which sensor mode that is**: `scan.resolution` (0 = 4K, 1 = 1080p — the
+same encoding the Capture group's snapshot resolution uses), 1080p by
+default, i.e. the live resolution and therefore no switch at all. When it
+differs, the panel changes the camera's mode **once** before the first move
+and puts it back when the run ends (finish, abort or fault — one path), and
+the run does not start until the switch's job completes: capturing the first
+tiles in the old mode would file 1080p frames as 4K tiles.
+
+Two consequences worth knowing:
+
+- **The live stream runs at the scan's resolution for the duration.** 4K is
+  a deliberate quality choice, not the fast path: the frames are four times
+  the pixels for the encode, the identification and the mosaic. Nothing
+  about *where* the tiles are changes — the plan's pitch comes from the
+  objective calibration, which is resolution-independent.
+- **A refused switch costs nothing.** A backend with no live mode (the
+  snapshot-only ones, or a camera that errors) fails the job, the panel logs
+  it, and the run captures at the live resolution — which is *correct*
+  because the identification measures each frame with its own pixels (see
+  `IDENTIFICATION.md`). A camera that refuses to switch *back* leaves the
+  live view at the scan's mode for that session; the next connect
+  re-applies the configured live resolution.
+
+### The frames are written by their own thread
+
+`cv/frame_writer.py` owns `frames/` and `manifest.csv` behind a bounded
+queue. The scan emits its signals as it always did (the frame and its
+thumbnail, on the scan thread — one emitter, and no ordering question
+against `sig_done`), then hands over `(index, readback position, frame)` and
+moves on; the writer encodes the PNG, appends the row and flushes it. Three
+properties the callers rely on:
+
+- **Order and completeness.** One thread, one FIFO, and every waypoint gets
+  exactly one row, including the ones with no frame and the ones with no
+  position. A row names a file only once that file exists.
+- **The join is a contract.** `scan_output` re-reads the manifest from disk
+  and `meta.json` counts the frames, so `run()` joins the writer before
+  either — and the return-to-start move happens first, so the drain overlaps
+  the travel.
+- **Bounded memory.** Tiles waiting for the detector are capped
+  (`MAX_PENDING_TILES`): tiles are never dropped, so an uncapped queue is how
+  a 4K scan runs out of memory (25 MB a frame). Past the cap the *stage*
+  waits for the detector instead — slower, and bounded. A safety valve keeps
+  a wedged detector from parking the run mid-plan.
+
+A writer failure is a fault like any other: the run stops with
+`stopped_early` and the reason. `ScanResult.failed` exists because a failure
+on the *last* waypoint would otherwise leave `visited == planned`, which
+reads as a completed scan over a truncated dataset.
+
 ## What a scan writes
 
 `~/Pictures/TALOS/scans/scan_<timestamp>/` — beside the snapshots, where
@@ -177,9 +281,9 @@ browse + open row the Capture group uses: one editor for one path.
 
 | File | Contents |
 |---|---|
-| `frames/frame_NNNNN.png` | One per captured waypoint, 1080p |
+| `frames/frame_NNNNN.png` | One per captured waypoint, at the configured capture resolution |
 | `manifest.csv` | One row per waypoint: frame name, **readback** x/y/r, unix time, objective id |
-| `meta.json` | The request (area, overlap, path, settle, backlash…), the FOV used, the frame shape, the counts |
+| `meta.json` | The request (area, overlap, path, settle, backlash…), the FOV used, the frame shape, the counts, the phase timings |
 | `mosaic.png` | Optional: the tiles assembled at their readback positions |
 | `overview.png` | Optional: a thumbnail per tile with the detections drawn on it |
 | `candidates.csv` | Optional: every detection with its stage coordinates and the tile it came from |
@@ -207,14 +311,35 @@ it** — which is the whole story of `cv/orientation.py`, and it has two parts:
 Tiles are drawn as captured, with no content rotation: they come from the same
 frames the live view shows, so the flip is already in the pixels.
 
-The **footprint** — the outlined box with a faint fill — is the field of
-view at the current stage position, and it is set only from a position that
-is actually known: `set_footprint(None)` means "no telemetry yet" and draws
-nothing. That distinction is not pedantic. The first version passed the
-whole device payload to `StagePosition.from_telemetry`, which reads a *flat*
-dict, so the position came back as `(0, 0, 0)` — and stage (0, 0) is a real
-place, so the box sat at origin on every idle frame, unrelated to the plan.
-A missing position and a position at the origin must not look the same.
+The **highlighted box** is the field of view, and it means exactly one of
+three things, decided in one place (`ScanMapWidget._highlight`):
+
+| State | What the box is |
+|---|---|
+| nothing scanned yet | **nothing**. The plan and its start dot, and no box |
+| a run is capturing | the tile being captured — the newest frame in the mosaic |
+| between runs, tiles on the map | the live stage position: where you are looking, relative to what was scanned |
+
+A legend line under the box names which of the two it is; a colour would
+have to be remembered. *Fit* frames the box too, so a stage parked off the
+scanned area can be brought back into view.
+
+The middle row is why the box is fed from the **tile signal** and not from
+telemetry during a run: the position a caller can read mid-run is a
+commanded value that lags the capture by a move, and the scan's own jobs
+starve the poll anyway.
+
+The first version had no rule at all — it drew a box from whatever telemetry
+last said, whenever a scan was not running — and it was wrong three ways.
+The two states that matter are the ones an empty box would lie about: with
+nothing scanned, a box says "you are here" about a map that has no
+"here" yet. And the box is set only from a position that is actually known:
+`set_footprint(None)` means "no position" and draws nothing. That
+distinction is not pedantic — the original passed the whole device payload
+to `StagePosition.from_telemetry`, which reads a *flat* dict, so the
+position came back as `(0, 0, 0)`, and stage (0, 0) is a real place: the box
+sat at the origin on every idle frame, unrelated to the plan. A missing
+position and a position at the origin must not look the same.
 
 ## Accuracy, and why the mosaic is not a measurement
 
@@ -302,10 +427,10 @@ repurposed.
 ## What the operator changes, and what they set once
 
 The panel carries the settings that change *between* runs: the area, the
-origin, the directions, the path order, the start axis, whether to come
-back, and the output folder. Overlap, settle time, scan speed, backlash and
-which extra files a run writes are in **Preferences → Scan** — set once and
-then not thought about again.
+origin, the directions, the path (one selector, four walks), the start axis,
+whether to come back, and the output folder. Overlap, settle time, scan
+speed, backlash, the capture resolution and which extra files a run writes
+are in **Preferences → Scan** — set once and then not thought about again.
 
 Which key belongs to which is pinned by a test
 (`test_preferences.py::test_the_scan_page_owns_what_the_panel_does_not`):
@@ -324,6 +449,16 @@ two editors to disagree. Writing that test caught `scan.dir` on both sides.
   the coverage proof asserted in `test_scan_plan.py`, and the properties that
   matter at the bench — the tile count and the union landing on the far edge —
   are visible on the map before the run starts.
+- **The stop-phase rewrite has no bench history yet** (2026-09-22). The
+  motion bits it now relies on are the controller's own and already drive the
+  hardware strip, and the sim test pins the wall-clock cost; what is *not*
+  measured is a real run's per-tile stop time and whether 100 ms of settle is
+  enough on this frame. `tools/scan_manager_bench.py` prints the phase
+  timings for exactly that, and the checklist item is to run it twice — once
+  at the shipped settings, once with `settle_ms` raised — and compare.
+- **A 4K scan has never run on hardware.** It is supported (the switch, the
+  per-frame calibration, the resolution-invariant gates are all tested), but
+  nothing has captured a 4K tile on this bench.
 - **Still owed**: Esc mid-scan end-to-end, a deliberately stalled camera (the
   missing-frame path), and a first identification run on a real wafer. The full
   checklist is in `docs/journal/BENCH_TODO.md`.

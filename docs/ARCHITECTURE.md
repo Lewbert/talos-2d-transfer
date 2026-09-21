@@ -34,6 +34,7 @@ Dependencies point downwards only: UI → input → manager → proxies → driv
 | one QThread (`CameraProxy`) | the camera backend, frame fetch loop | publishes frames and properties |
 | focus worker (same thread as the focus proxy) | also runs the autofocus job inline | see below |
 | scan `_Worker` QThread | a `GridScanner` run | submitted jobs, waits for completions |
+| scan writer thread (`FrameWriter`) | `frames/`, `manifest.csv` | one queue, bounded: the encode, the thumbnail and the row leave the scan thread the moment a tile is captured |
 | detection `_DetectWorker` QThread | the pre-processing chain and the identification pipeline, plus the scan's exports | one queue: live preview frames drop, scan tiles never do. Owned by the Sample Finding tab |
 
 **Rules that keep this safe**
@@ -372,6 +373,13 @@ the next preview and nothing else. Detection outlives the capture by design, so
 the exports wait for the queue to drain. The Sample Finding tab is the only
 place the stream is shown, and the detection worker builds both of its
 processed views from the same array it fed the pipeline.
+
+**The previews stand down when they would be wrong or in the way.** While an
+axis the camera can see is moving (XYR, focus) the two processed views fall
+back to the raw stream — a processed frame of a moving stage is a picture of
+where the stage *was* — and for the whole of a scan the live feed is suspended
+so the worker's time goes to the tiles. Neither touches the dropper (which
+keeps reading the pre-processed layer) or the capture path.
 
 ## Testing model
 

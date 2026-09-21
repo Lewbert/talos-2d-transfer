@@ -27,7 +27,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from PySide6.QtWidgets import QApplication  # noqa: E402
 
 from talos.config import Settings  # noqa: E402
-from talos.cv.scan import GridScanner, scale_scan_speed_config  # noqa: E402
+from talos.cv.scan import GridScanner, scan_speed_config  # noqa: E402
 from talos.hal.proxies.stage_adapter import ManagerStageAdapter  # noqa: E402
 from talos.instruments import InstrumentManager  # noqa: E402
 from talos.logging_setup import setup_logging  # noqa: E402
@@ -55,11 +55,8 @@ def _wait_for_zolix(app, manager, timeout_s: float = 20.0) -> bool:
 
 def _run_scan(app, manager, settings, *, width, height, abort_after=None):
     pos = manager.last_position["zolix"]
-    rows = settings.get("objectives") or []
-    row = rows[0] if rows else {}
-    cfg = scale_scan_speed_config(
-        settings.device("zolix"),
-        float(row.get("stage_speed_multiplier") or 1.0))
+    speed = float(settings.section("scan").get("speed_pps", 500) or 500)
+    cfg = scan_speed_config(settings.device("zolix"), speed)
     stop = threading.Event()
     adapter = ManagerStageAdapter(manager, cfg, abort_check=stop.is_set)
     scanner = GridScanner(adapter, camera=None)
@@ -67,7 +64,9 @@ def _run_scan(app, manager, settings, *, width, height, abort_after=None):
     params = ScanParams(x0_um=float(pos.get("x_um", 0.0)),
                         y0_um=float(pos.get("y_um", 0.0)),
                         width_um=width, height_um=height,
-                        overlap=0.1, serpentine=True, slow_speed=True)
+                        overlap=0.1, serpentine=True,
+                        settle_ms=int(settings.section("scan")
+                                      .get("settle_ms", 100) or 0))
     out_dir = get_scan_dir() / time.strftime("bench_%Y%m%d_%H%M%S")
     box: dict = {}
     t0 = time.monotonic()
@@ -139,6 +138,10 @@ def main() -> int:
             print(f"  {len(result.frames)} waypoints in {elapsed:.1f} s -> "
                   f"{result.manifest_path}")
             print(f"  message: {result.message}")
+            # The headline number of the stop-phase work: what each tile
+            # costs once the stage has arrived.
+            if result.timing.summary:
+                print(f"  timing: {result.timing.summary}")
             if len(result.frames) < 4:
                 print("  FAILED: expected at least 4 waypoints")
                 exit_code = 1
