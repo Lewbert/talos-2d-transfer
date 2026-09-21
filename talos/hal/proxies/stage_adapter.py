@@ -9,9 +9,10 @@ driver would be invisible to STOP ALL and to status polling.
 This adapter keeps the manager the single writer: each move is submitted
 as a normal job on the zolix worker — so the priority stop path and
 STOP ALL cover it — and the calling (scan) thread blocks on the job's
-completion. `wait_idle` never runs a blocking driver call on the worker:
-it watches the proxy's telemetry so the worker stays free to process a
-stop.
+completion. `wait_idle` never runs a blocking driver call on the worker
+either: it polls the controller's motion bits with short `get_status`
+jobs, so the worker is free *between* reads and a queued stop is executed
+the moment it arrives.
 """
 
 from __future__ import annotations
@@ -27,7 +28,7 @@ from talos.hal.base import (
     DeviceTimeoutError,
     StageSpeed,
 )
-from talos.models import StagePosition
+from talos.models import StagePosition, StageStatus
 
 logger = logging.getLogger(__name__)
 
@@ -35,27 +36,13 @@ logger = logging.getLogger(__name__)
 # the ones being awaited — a job can finish before the submitter has
 # stored its id). Oldest entries are dropped past this cap.
 _MAX_TRACKED_JOBS = 64
-_WAIT_POLL_S = 0.2
-_SETTLE_SAMPLES = 3
-
-
-def _pos_key(pos: StagePosition | dict | None) -> tuple[int, int, int] | None:
-    """Settle-detection key from the manager's telemetry.
-
-    NOTE the telemetry position is a plain dict (the proxy publishes
-    ``dataclasses.asdict``), NOT a StagePosition — reading it with
-    getattr made every sample look like (0, 0, 0), i.e. instantly
-    "stable", and the scan moved on before the stage had stopped.
-    """
-    if pos is None:
-        return None
-    if isinstance(pos, dict):
-        return (int(pos.get("x_pulses", 0) or 0),
-                int(pos.get("y_pulses", 0) or 0),
-                int(pos.get("r_pulses", 0) or 0))
-    return (int(getattr(pos, "x_pulses", 0)),
-            int(getattr(pos, "y_pulses", 0)),
-            int(getattr(pos, "r_pulses", 0)))
+#: Motion-end poll interval. The read itself costs ~10-25 ms on the wire,
+#: so this is a floor between jobs, not a sleep budget.
+_WAIT_POLL_S = 0.05
+#: Consecutive unanswered polls before `wait_idle` gives up: a blip is
+#: retried (the driver retries the read three times already), a dead link
+#: must fail the waypoint rather than spin to the timeout.
+_MAX_WAIT_FAILURES = 3
 
 
 class ManagerStageAdapter:
@@ -150,26 +137,53 @@ class ManagerStageAdapter:
                    self._pps(speed), timeout_s=120.0)
 
     def wait_idle(self, timeout_s: float = 120.0) -> None:
-        """Settle detection from the proxy's telemetry (position stable
-        across consecutive samples) — the driver's own wait_idle would
-        block the device worker, and a queued stop behind it."""
-        last: tuple[int, int, int] | None = None
-        stable = 0
-        deadline = time.monotonic() + timeout_s
-        while time.monotonic() < deadline:
+        """Block until the CONTROLLER reports every axis stopped.
+
+        The motion bits are the controller's own answer (regs 30012-30014,
+        one register per axis), so this returns as soon as the ramp has
+        finished — one poll, ~50 ms — instead of waiting for the position
+        to look stable across three telemetry samples 0.2 s apart. That
+        rule cost every waypoint at least 0.6 s of stage-idle time, and it
+        read the *GUI-delivered* telemetry, which stops updating entirely
+        while a job is queued (i.e. exactly while a move is in flight).
+
+        The driver's own ``wait_idle`` would be faster still, but a
+        blocking call on the device worker holds a queued STOP ALL behind
+        it. A short job per poll keeps the worker free between reads.
+
+        A result that is not a ``StageStatus`` counts as a FAILED poll,
+        never as "stopped": the same trap the old telemetry key was
+        written about (a value that cannot answer the question must not be
+        read as a yes).
+        """
+        deadline = time.monotonic() + max(0.0, float(timeout_s))
+        failures = 0
+        while True:
             if self._abort_check():
                 return
-            key = _pos_key(self._manager.last_position.get("zolix"))
-            if key is not None:
-                if key == last:
-                    stable += 1
-                    if stable >= _SETTLE_SAMPLES:
+            if time.monotonic() >= deadline:
+                raise DeviceTimeoutError(
+                    f"Zolix stage not settled after {timeout_s:.0f} s")
+            try:
+                status = self._call("get_status", timeout_s=10.0)
+            except DeviceError as exc:
+                if self._abort_check():
+                    return
+                failures += 1
+                if failures >= _MAX_WAIT_FAILURES:
+                    raise DeviceError(f"zolix.wait_idle: {exc}") from exc
+            else:
+                if isinstance(status, StageStatus):
+                    failures = 0
+                    if not status.any_moving:
                         return
                 else:
-                    stable = 0
-                last = key
+                    failures += 1
+                    if failures >= _MAX_WAIT_FAILURES:
+                        raise DeviceError(
+                            "zolix.wait_idle: the controller did not answer "
+                            "with a status")
             time.sleep(_WAIT_POLL_S)
-        raise DeviceTimeoutError(f"Zolix stage not settled after {timeout_s:.0f} s")
 
     def get_position(self) -> StagePosition:
         """Fresh hardware readback (never the commanded value)."""

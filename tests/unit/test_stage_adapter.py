@@ -9,7 +9,7 @@ from PySide6.QtCore import QObject, Signal
 from talos.hal.base import DeviceError, DeviceTimeoutError, StageSpeed
 from talos.hal.proxies import stage_adapter as sa
 from talos.hal.proxies.stage_adapter import ManagerStageAdapter
-from talos.models import StagePosition
+from talos.models import StagePosition, StageStatus
 
 
 class StubManager(QObject):
@@ -19,11 +19,14 @@ class StubManager(QObject):
     sig_job_done = Signal(int, object)
     sig_job_failed = Signal(int, str, str)
 
-    def __init__(self, results=None, fail=None, disabled=False):
+    def __init__(self, results=None, fail=None, disabled=False, sequence=None):
         super().__init__()
         self.jobs: list[tuple] = []
         self.last_position: dict = {}
         self._results = results or {}
+        #: per-method lists whose entries are consumed one per call, for a
+        #: value that changes between reads (moving → stopped, say)
+        self._sequence = {k: list(v) for k, v in (sequence or {}).items()}
         self._fail = fail or {}
         self._disabled = disabled
         self._next = 0
@@ -37,7 +40,9 @@ class StubManager(QObject):
         if method in self._fail:
             self.sig_job_failed.emit(job_id, "DeviceError", self._fail[method])
         else:
-            self.sig_job_done.emit(job_id, self._results.get(method))
+            feed = self._sequence.get(method)
+            result = feed.pop(0) if feed else self._results.get(method)
+            self.sig_job_done.emit(job_id, result)
         return job_id
 
 
@@ -125,49 +130,75 @@ def test_get_position_never_returns_the_commanded_value():
     assert isinstance(adapter.get_position(), StagePosition)
 
 
-def test_wait_idle_settles_on_stable_telemetry():
-    # the proxy publishes the position as a plain DICT (asdict), not a
-    # StagePosition — reading it with getattr made every sample (0,0,0)
-    # and the scan moved on before the stage had stopped
-    adapter, manager = _adapter()
-    manager.last_position["zolix"] = {"x_pulses": 5, "y_pulses": 5, "r_pulses": 0}
-    adapter.wait_idle(timeout_s=1.0)  # returns immediately (stable)
-
-
-def test_wait_idle_moves_on_only_after_three_stable_samples():
-    adapter, manager = _adapter()
-    samples = [{"x_pulses": 1}, {"x_pulses": 1}, {"x_pulses": 9},
-               {"x_pulses": 9}, {"x_pulses": 9}, {"x_pulses": 9}]
-
-    class _Feed:
-        def get(self, key, default=None):
-            if key != "zolix":
-                return default
-            return samples.pop(0) if samples else {"x_pulses": 9}
-
-    manager.last_position = _Feed()
+def test_wait_idle_settles_on_the_first_stopped_status():
+    """One status read is the whole wait: the controller's own motion bits
+    answer the question directly, so there is nothing to average."""
+    adapter, manager = _adapter(results={"get_status": StageStatus()})
     adapter.wait_idle(timeout_s=1.0)
-    # the single stable sample before the jump must NOT have settled it
-    assert len(samples) <= 3
+    assert [method for _d, method, _a, _p in manager.jobs] == ["get_status"]
 
 
-def test_wait_idle_times_out_on_a_moving_stage():
-    adapter, manager = _adapter()
-    positions = [StagePosition(x_pulses=i, y_pulses=i) for i in range(1000)]
+def test_wait_idle_polls_while_the_axes_are_moving():
+    adapter, manager = _adapter(sequence={
+        "get_status": [StageStatus(x_moving=True), StageStatus(y_moving=True),
+                       StageStatus()],
+    })
+    adapter.wait_idle(timeout_s=5.0)
+    assert len(manager.jobs) == 3
 
-    class _Feed:
-        def get(self, key, default=None):
-            return positions.pop(0) if positions else None
 
-    manager.last_position = _Feed()
+def test_wait_idle_never_reads_the_telemetry_it_used_to():
+    """The old rule watched `manager.last_position`, which the proxy stops
+    publishing while a job is queued — so the check was blind for exactly
+    the window it was meant to measure, and each sample cost 0.2 s."""
+    adapter, manager = _adapter(results={"get_status": StageStatus()})
+    manager.last_position["zolix"] = {"x_pulses": 0, "y_pulses": 0, "r_pulses": 0}
+    adapter.wait_idle(timeout_s=1.0)
+    assert all(method == "get_status" for _d, method, _a, _p in manager.jobs)
+
+
+def test_wait_idle_times_out_on_a_stage_that_never_stops():
+    adapter, _ = _adapter(results={"get_status": StageStatus(x_moving=True)})
     with pytest.raises(DeviceTimeoutError):
         adapter.wait_idle(timeout_s=0.05)
+
+
+def test_wait_idle_refuses_to_read_an_unreadable_answer_as_stopped():
+    """A job that completes with something unexpected cannot say "the axes
+    stopped" — it is a failed poll, three of which end the wait. Reading a
+    missing answer as a yes is the failure this method's predecessor was
+    written about."""
+    adapter, _ = _adapter(results={"get_status": "not-a-status"})
+    with pytest.raises(DeviceError, match="did not answer"):
+        adapter.wait_idle(timeout_s=5.0)
+
+
+def test_wait_idle_gives_up_on_a_link_that_stops_answering():
+    adapter, _ = _adapter(fail={"get_status": "CRC mismatch"})
+    with pytest.raises(DeviceError, match="CRC mismatch"):
+        adapter.wait_idle(timeout_s=5.0)
 
 
 def test_wait_idle_returns_early_on_abort():
     manager = StubManager()
     adapter = ManagerStageAdapter(manager, {}, abort_check=lambda: True)
     adapter.wait_idle(timeout_s=5.0)  # must not raise nor wait
+    assert manager.jobs == []
+
+
+def test_wait_idle_returns_quietly_when_the_abort_lands_mid_read():
+    """The abort can arrive while a status job is in flight; `_call` then
+    raises, and the scan must see a clean stop rather than a fault."""
+    flag = {"abort": False}
+
+    class _Aborting(StubManager):
+        def submit(self, device, method, *args, priority=0):
+            flag["abort"] = True          # the operator hits Esc mid-read
+            return -1
+
+    adapter = ManagerStageAdapter(_Aborting(), {},
+                                 abort_check=lambda: flag["abort"])
+    adapter.wait_idle(timeout_s=5.0)
 
 
 def test_stop_uses_the_priority_path():
