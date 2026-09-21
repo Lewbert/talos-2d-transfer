@@ -151,6 +151,8 @@ class ScanMapWidget(QWidget):
         self._images: dict[int, QImage] = {}
         self._markers: list[ScanMapMarker] = []
         self._footprint: tuple[float, float] | None = None
+        #: The tile a run is capturing right now (see _highlight).
+        self._active_tile: tuple[float, float] | None = None
         self._flip = False
         self._zoom = 1.0
         self._pan = QPointF(0.0, 0.0)
@@ -169,6 +171,10 @@ class ScanMapWidget(QWidget):
         if flip == self._flip:
             return
         self._flip = flip
+        # The box is NOT cleared: it is a stage position, and the flip
+        # changes the canvas mapping every drawn thing goes through — the
+        # tiles, the plan and the box together. Dropping it would blank the
+        # one control that says where the camera is pointing.
         self.update()
 
     def _effective_plan(self) -> ScanMapPlan:
@@ -193,6 +199,7 @@ class ScanMapWidget(QWidget):
         self._tiles.clear()
         self._images.clear()
         self._markers.clear()
+        self._active_tile = None
         self._selected = -1
         self._zoom = 1.0
         self._pan = QPointF(0.0, 0.0)
@@ -207,12 +214,24 @@ class ScanMapWidget(QWidget):
                 self._images.pop(key, None)
         self.update()
 
+    def set_active_tile(self, x_um: float | None,
+                        y_um: float | None = None) -> None:
+        """Mark the tile being captured (see :meth:`_highlight`). ``None``
+        ends the run's claim on the box, and the live position takes over
+        on the next telemetry sample."""
+        if x_um is None or y_um is None:
+            self._active_tile = None
+        else:
+            self._active_tile = (float(x_um), float(y_um))
+        self.update()
+
     def clear_tiles(self) -> None:
         """Drop the captured tiles and markers but KEEP the plan — what a
         new run of the same area needs."""
         self._tiles.clear()
         self._images.clear()
         self._markers.clear()
+        self._active_tile = None
         self._selected = -1
         self.update()
 
@@ -293,8 +312,25 @@ class ScanMapWidget(QWidget):
 
     # --- painting -----------------------------------------------------
 
+    def _fit_bounds(self) -> tuple[float, float, float, float]:
+        """The plan's bounds, plus the "you are here" box when there is
+        one: Fit should frame everything that is drawn, and a stage parked
+        off the scanned area would otherwise sit outside the view with no
+        way back to it."""
+        bounds = plan_bounds(self._effective_plan())
+        highlight = self._highlight()
+        if highlight is None or bounds == (0.0, 0.0, 0.0, 0.0):
+            return bounds
+        plan = self._effective_plan()
+        x0, y0, x1, y1 = bounds
+        x_um, y_um = self._at(highlight[0], highlight[1])
+        return (min(x0, x_um - plan.fov_x_um / 2.0),
+                min(y0, y_um - plan.fov_y_um / 2.0),
+                max(x1, x_um + plan.fov_x_um / 2.0),
+                max(y1, y_um + plan.fov_y_um / 2.0))
+
     def _transform(self) -> tuple[float, QPointF]:
-        scale, offset = fit_view(plan_bounds(self._effective_plan()),
+        scale, offset = fit_view(self._fit_bounds(),
                                  (self.width(), self.height()))
         base = QPointF(self.width() / 2.0, self.height() / 2.0)
         offset = base + (offset - base) * self._zoom + self._pan
@@ -385,9 +421,27 @@ class ScanMapWidget(QWidget):
             painter.drawLine(previous, point)
             previous = point
 
+    def _highlight(self) -> tuple[float, float, str] | None:
+        """Where the box goes, and what it means — one rule, three states.
+
+        - a run in progress: the tile being captured now, i.e. the newest
+          frame in the mosaic. The stage's own telemetry is NOT the answer
+          here: it lags the capture by a move, and the panel's poll is
+          starved while the scan queues jobs anyway.
+        - otherwise, with tiles on the map: the live stage position — where
+          you are looking relative to what was scanned.
+        - otherwise: nothing at all, just the plan's start dot. Drawing an
+          empty box from a position nobody asked about is what made this
+          control look broken.
+        """
+        if self._active_tile is not None:
+            return (self._active_tile[0], self._active_tile[1], "tile")
+        if self._tiles and self._footprint is not None:
+            return (self._footprint[0], self._footprint[1], "here")
+        return None
+
     def _draw_footprint(self, painter: QPainter, scale: float) -> None:
-        """The field of view at the current stage position — "you are
-        here", drawn over the plan rather than as another plan rectangle.
+        """The box from :meth:`_highlight`, in the style its meaning earns.
 
         A translucent fill and a two-pixel outline, because an empty
         rectangle among the plan's outlines reads as a stray artefact
@@ -395,17 +449,33 @@ class ScanMapWidget(QWidget):
         EFFECTIVE plan, like everything else here: reading the raw one was
         harmless only while oriented() happened not to scale it.
         """
-        if self._footprint is None:
+        highlight = self._highlight()
+        if highlight is None:
             return
+        x_um, y_um, kind = highlight
         plan = self._effective_plan()
         rect = QRectF(0.0, 0.0, plan.fov_x_um * scale, plan.fov_y_um * scale)
-        rect.moveCenter(self._to_widget(*self._at(*self._footprint)))
-        painter.setPen(QPen(QColor(theme.ACCENT), 2))
-        fill = QColor(theme.ACCENT)
-        fill.setAlpha(38)
+        rect.moveCenter(self._to_widget(*self._at(x_um, y_um)))
+        colour = QColor(theme.ACCENT) if kind == "tile" else QColor(theme.TEXT)
+        painter.setPen(QPen(colour, 2))
+        fill = QColor(colour)
+        fill.setAlpha(64 if kind == "tile" else 30)
         painter.setBrush(fill)
         painter.drawRect(rect)
         painter.setBrush(Qt.BrushStyle.NoBrush)
+        self._draw_legend(painter,
+                          "current tile" if kind == "tile" else "you are here")
+
+    def _draw_legend(self, painter: QPainter, text: str) -> None:
+        """Say which of the two the box is — the styles differ, and a
+        legend is cheaper than making the operator remember a colour."""
+        font = QFont(painter.font())
+        font.setPixelSize(9)
+        painter.setFont(font)
+        painter.setPen(QColor(theme.TEXT_DIM))
+        painter.drawText(QRectF(6.0, 4.0, self.width() - 12.0, 14.0),
+                         Qt.AlignmentFlag.AlignLeft
+                         | Qt.AlignmentFlag.AlignVCenter, text)
 
     def _draw_markers(self, painter: QPainter) -> None:
         font = QFont(painter.font())

@@ -4,7 +4,7 @@ scan actually walks."""
 
 import pytest
 
-from talos.cv.scan import (ORIGINS, PATHS, GridScanner, grid_shape,
+from talos.cv.scan import (ONE_WAY, ORIGINS, PATHS, GridScanner, grid_shape,
                            plan_cells, plan_geometry, plan_path, plan_steps)
 from talos.models import ScanParams
 
@@ -205,6 +205,18 @@ def test_serpentine_rows_alternate_and_uni_does_not():
 
     uni = plan_cells(_params(4, 3, serpentine=False), FOV)
     assert [c for c, _ in uni] == [0, 1, 2, 3] * 3
+
+
+def test_one_way_is_a_path_name_for_the_same_cells():
+    """The panel asks the walk question ONCE now, so ``one_way`` is a path
+    the CV layer understands — and it has to be exactly what the old
+    ``serpentine=False`` meant, because a stored configuration still says
+    that and must not change meaning."""
+    one_way = plan_cells(_params(4, 3, path=ONE_WAY), FOV)
+    flag = plan_cells(_params(4, 3, serpentine=False), FOV)
+    assert one_way == flag
+    assert one_way != plan_cells(_params(4, 3, serpentine=True), FOV)
+    assert ONE_WAY in PATHS
 
 
 def test_start_axis_y_runs_the_columns_first():

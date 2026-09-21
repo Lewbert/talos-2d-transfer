@@ -251,3 +251,46 @@ def test_a_double_click_asks_to_be_enlarged_rather_than_fitting(qapp):
     assert widget._zoom == 3.0          # the view was not reset
     widget.fit()
     assert widget._zoom == 1.0
+
+
+def test_the_box_is_hidden_until_something_has_been_scanned(qapp):
+    """One rule, three states. Idle with nothing scanned, the map shows
+    the plan and its start dot and NO box: an empty rectangle drawn from a
+    position nobody asked about is what made this control look broken."""
+    widget = ScanMapWidget()
+    widget.resize(800, 400)
+    widget.set_plan(_plan())
+    widget.set_footprint(900.0, 500.0)
+    assert widget._highlight() is None
+
+
+def test_the_box_follows_the_tile_a_run_is_capturing(qapp):
+    """During a run it marks the newest frame in the mosaic; afterwards it
+    goes back to being the live position, and it stops altogether when the
+    tiles are cleared (a new run of the same area)."""
+    widget = ScanMapWidget()
+    widget.resize(800, 400)
+    widget.set_plan(_plan())
+    widget.set_footprint(900.0, 500.0)
+
+    widget.add_tile(ScanMapTile(0, 100.0, 200.0, None))
+    assert widget._highlight() == (900.0, 500.0, "here")
+
+    widget.set_active_tile(1500.0, 700.0)
+    assert widget._highlight() == (1500.0, 700.0, "tile")
+
+    widget.set_active_tile(None)
+    assert widget._highlight() == (900.0, 500.0, "here")
+
+    widget.clear_tiles()
+    assert widget._highlight() is None
+    assert widget._active_tile is None
+
+
+def test_a_new_plan_drops_the_tile_the_box_was_marking(qapp):
+    widget = ScanMapWidget()
+    widget.resize(800, 400)
+    widget.set_plan(_plan())
+    widget.set_active_tile(1500.0, 700.0)
+    widget.set_plan(_plan(width_um=3000.0))
+    assert widget._highlight() is None

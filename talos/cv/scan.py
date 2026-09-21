@@ -42,12 +42,20 @@ _PENDING_POLL_S = 0.05
 _PENDING_TIMEOUT_S = 120.0
 
 #: Path orders. ``serpentine`` is the only one with a bench history.
+#: ``one_way`` is the same serpentine cells walked with every row in the
+#: same direction — a first-class path here because the panel asks the
+#: question once ("how should the stage walk the area?") rather than twice
+#: ("path... order..."), and because a name is what the settings file and
+#: the map legend need. ``serpentine=False`` still means the same thing,
+#: so a stored configuration needs no migration.
 SERPENTINE = "serpentine"
+ONE_WAY = "one_way"
 SPIRAL = "spiral"
 HILBERT = "hilbert"
-PATHS = (SERPENTINE, SPIRAL, HILBERT)
+PATHS = (SERPENTINE, ONE_WAY, SPIRAL, HILBERT)
 PATH_LABELS = {
     SERPENTINE: "Serpentine",
+    ONE_WAY: "One-way",
     SPIRAL: "Spiral (experimental)",
     HILBERT: "Hilbert (experimental)",
 }
@@ -309,6 +317,8 @@ def plan_cells(params, fov_um: tuple[float, float]) -> list[tuple[int, int]]:
         cells = _spiral_cells(nx, ny)
     elif kind == HILBERT:
         cells = _hilbert_cells(nx, ny)
+    elif kind == ONE_WAY:
+        cells = _serpentine_cells(nx, ny, False, start_axis)
     else:
         cells = _serpentine_cells(nx, ny, bool(params.serpentine), start_axis)
     return cells

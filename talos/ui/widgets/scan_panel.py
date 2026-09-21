@@ -53,8 +53,9 @@ from PySide6.QtWidgets import (
 from talos.cv.calibration import SENSOR_HEIGHT_PX, SENSOR_WIDTH_PX
 from talos.hal.base import StageSpeed
 from talos.cv.frame_source import LatestFrameSource
-from talos.cv.scan import (ORIGIN_LABELS, ORIGINS, PATHS, GridScanner,
-                           plan_path, scan_speed_config)
+from talos.cv.scan import (HILBERT, ONE_WAY, ORIGIN_LABELS, ORIGINS, PATHS,
+                           SERPENTINE, SPIRAL, GridScanner, plan_path,
+                           scan_speed_config)
 from talos.cv.scan_output import candidate_rows, write_outputs
 from talos.models import (FlakeCandidate, ObjectiveCalibration, ScanParams,
                           StagePosition)
@@ -85,16 +86,42 @@ ORIGIN_OPTIONS = [
      "overlap you asked for; the last one overhangs by up to one step."),
 ]
 
+#: How the stage walks the area — ONE question, four answers. "Serpentine"
+#: and "One-way" are the same cells with a different direction rule (the
+#: CV layer spells that as ``path='serpentine'`` plus a ``serpentine``
+#: flag, and both keys are still written so a stored configuration and the
+#: settings schema are unchanged); spiral and Hilbert ship as experimental.
 PATH_OPTIONS = [
-    (PATHS[0], "Serpentine",
-     "Rows end to end, alternating direction"),
-    (PATHS[1], "Spiral", "Rings, working inward (experimental)"),
-    (PATHS[2], "Hilbert", "The curve, clipped to the area (experimental)"),
+    (SERPENTINE, "Serpentine",
+     "Rows end to end, alternating direction — the shortest moves"),
+    (ONE_WAY, "One-way",
+     "Every row starts from the same side, with a return between rows"),
+    (SPIRAL, "Spiral", "Rings, working inward (experimental)"),
+    (HILBERT, "Hilbert", "The curve, clipped to the area (experimental)"),
 ]
 
 #: The 4K sensor mode's width, which is also how a streamed frame says
 #: which mode the camera is in (``capture.resolution`` uses the same 0/1).
 _UHD_WIDTH_PX = 3840
+
+
+def _path_kind(toggle_value: str) -> str:
+    """The stored ``scan.path`` for the one path toggle.
+
+    "One-way" is the serpentine cells with the direction rule turned off,
+    so the CV layer still spells it as ``path='serpentine'``.
+    """
+    value = str(toggle_value or SERPENTINE).lower()
+    return SERPENTINE if value == ONE_WAY else value
+
+
+def _path_toggle_value(path: str, serpentine: bool) -> str:
+    """The toggle's value from the two stored keys — the inverse, and the
+    reason a stored configuration needs no migration."""
+    kind = str(path or SERPENTINE).lower()
+    if kind == SERPENTINE and not serpentine:
+        return ONE_WAY
+    return kind if kind in PATHS else SERPENTINE
 
 
 class _Worker(QThread):
@@ -295,8 +322,10 @@ class ScanPanel(QWidget):
         layout = QVBoxLayout(inner)
         layout.setContentsMargins(0, 0, 4, 4)
         layout.setSpacing(6)
+        # The samples are NOT in here: `_build_ui` pins them below the
+        # scroll (a duplicate built here was never shown, and `self._table`
+        # rebinding to the pinned one left it permanently stale).
         layout.addWidget(self._build_scan_group())
-        layout.addWidget(self._build_samples_group())
         layout.addStretch(1)
         scroll.setWidget(inner)
         return scroll
@@ -359,12 +388,6 @@ class ScanPanel(QWidget):
 
         self.path = SegmentedToggle(PATH_OPTIONS)
         layout.addWidget(_row("Path", self.path))
-        self.serpentine = SegmentedToggle([
-            (True, "Serpentine", "Each row continues where the last one "
-                                 "ended — shortest moves"),
-            (False, "One-way", "Every row starts from the same side, with a "
-                               "return between rows")])
-        layout.addWidget(_row("Order", self.serpentine))
         self.start_axis = SegmentedToggle([
             ("x", "X first", "Fill a row, then step in Y"),
             ("y", "Y first", "Fill a column, then step in X")])
@@ -386,7 +409,7 @@ class ScanPanel(QWidget):
         layout.addWidget(self._fov_note)
 
         for toggle in (self.origin, self.x_dir, self.y_dir, self.path,
-                       self.serpentine, self.start_axis, self.return_home):
+                       self.start_axis, self.return_home):
             toggle.sig_changed.connect(self._on_field_changed)
         for widget in (self.width, self.height):
             widget.valueChanged.connect(self._on_field_changed)
@@ -480,8 +503,8 @@ class ScanPanel(QWidget):
         self.origin.set_value(str(saved["origin"]))
         self.x_dir.set_value(int(saved["x_dir"]))
         self.y_dir.set_value(int(saved["y_dir"]))
-        self.path.set_value(str(saved["path"]))
-        self.serpentine.set_value(bool(saved["serpentine"]))
+        self.path.set_value(_path_toggle_value(str(saved["path"]),
+                                               bool(saved["serpentine"])))
         self.start_axis.set_value(str(saved["start_axis"]))
         self.return_home.set_value(bool(saved["return_to_start"]))
 
@@ -499,8 +522,8 @@ class ScanPanel(QWidget):
             "origin": self.origin.value(),
             "x_dir": int(self.x_dir.value() or 1),
             "y_dir": int(self.y_dir.value() or 1),
-            "path": self.path.value(),
-            "serpentine": bool(self.serpentine.value()),
+            "path": _path_kind(self.path.value()),
+            "serpentine": str(self.path.value()) != ONE_WAY,
             "start_axis": self.start_axis.value(),
             "return_to_start": bool(self.return_home.value()),
         })
@@ -591,9 +614,9 @@ class ScanPanel(QWidget):
             x0_um=origin.x_um, y0_um=origin.y_um,
             width_um=self.width.value(), height_um=self.height.value(),
             overlap=float(self._prefs["overlap"]),
-            serpentine=bool(self.serpentine.value()),
+            serpentine=str(self.path.value()) != ONE_WAY,
             speed_pps=float(self._prefs["speed_pps"]),
-            path=str(self.path.value()),
+            path=_path_kind(self.path.value()),
             origin=str(self.origin.value()),
             start_axis=str(self.start_axis.value()),
             x_dir=int(self.x_dir.value() or 1),
@@ -678,8 +701,12 @@ class ScanPanel(QWidget):
         if not position:
             return
         pos = StagePosition.from_telemetry(position)
-        if self._job is None:
-            self.map.set_footprint(pos.x_um, pos.y_um)
+        # Recorded unconditionally; whether it is DRAWN is the map's
+        # decision (a run owns the box while it is capturing, and an idle
+        # map with nothing scanned shows only the start dot) — and keeping
+        # it fed during a run means the box is already current when the run
+        # hands it back.
+        self.map.set_footprint(pos.x_um, pos.y_um)
 
     # ------------------------------------------------------------------
     # results in
@@ -950,6 +977,11 @@ class ScanPanel(QWidget):
         self._scan_tiles[index] = (x_um, y_um)
         self.map.add_tile(ScanMapTile(index=index, x_um=x_um, y_um=y_um,
                                       thumb=thumb))
+        # The box follows the tile being captured: the newest frame in the
+        # mosaic is what "where the scan is now" means, and it is a fact
+        # already in hand rather than a position read from telemetry that
+        # the scan's own jobs are crowding out.
+        self.map.set_active_tile(x_um, y_um)
         self.refresh_markers()
 
     def _on_scan_frame(self, index: int, x_um: float, y_um: float,
@@ -972,6 +1004,9 @@ class ScanPanel(QWidget):
             self._state.set_mode("MANUAL")
         self._set_job(None)
         self.progress.setVisible(False)
+        # The run's claim on the map's box ends here; the live position
+        # takes it back on the next telemetry sample.
+        self.map.set_active_tile(None)
         # The single path for finish, abort AND fault: whatever the run
         # did to the camera's sensor mode, the live view goes back to the
         # operator's resolution here.
@@ -1051,7 +1086,7 @@ class ScanPanel(QWidget):
         self.progress.setVisible(busy)
         self._go_to_btn.setEnabled(not busy and bool(self._candidates))
         for widget in (self.origin, self.x_dir, self.y_dir, self.path,
-                       self.serpentine, self.start_axis, self.return_home,
+                       self.start_axis, self.return_home,
                        self.width, self.height, self._dir):
             widget.setEnabled(not busy)
         if not busy:

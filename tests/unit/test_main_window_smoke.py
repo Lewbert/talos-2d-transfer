@@ -813,6 +813,56 @@ def _ready_to_scan(window, monkeypatch, *, resolution, live_width=1920):
     return scan, calls, started
 
 
+def test_the_map_marks_the_tile_being_captured_and_then_the_live_position(
+        window):
+    """The panel's half of the map's three states: nothing until a run
+    starts, the newest tile while it captures, the live position after."""
+    import numpy as np
+
+    scan = window._sample_finding.scan_panel
+    scan.map.set_footprint(7000.0, -3000.0)
+    assert scan.map._highlight() is None            # nothing scanned yet
+
+    scan._on_tile(0, 10.0, 20.0, np.zeros((8, 16, 3), np.uint8))
+    scan._on_tile(1, 30.0, 40.0, np.zeros((8, 16, 3), np.uint8))
+    assert scan.map._highlight() == (30.0, 40.0, "tile")
+
+    scan._on_scan_done(None)
+    assert scan.map._highlight() == (7000.0, -3000.0, "here")
+    scan.map.clear_tiles()
+
+
+def test_the_path_toggle_round_trips_through_the_two_stored_keys(window):
+    """Path and Order were one question. The toggle writes the same two
+    keys it always did — so a configuration stored as
+    ``path=serpentine, serpentine=false`` comes back as "One-way", and
+    nothing needs migrating."""
+    from talos.cv.scan import ONE_WAY, SERPENTINE
+    from talos.scan_settings import load_scan_settings
+    from talos.ui.widgets.scan_panel import _path_kind, _path_toggle_value
+
+    assert _path_toggle_value(SERPENTINE, False) == ONE_WAY
+    assert _path_toggle_value(SERPENTINE, True) == SERPENTINE
+    assert _path_kind(ONE_WAY) == SERPENTINE
+
+    scan = window._sample_finding.scan_panel
+    scan.path.set_value(ONE_WAY)
+    scan._persist()
+    saved = load_scan_settings(window._settings)
+    assert saved["path"] == SERPENTINE and saved["serpentine"] is False
+    assert scan.params_for(scan.stage_position()).serpentine is False
+
+    scan.path.set_value(SERPENTINE)
+    scan._persist()
+    saved = load_scan_settings(window._settings)
+    assert saved["path"] == SERPENTINE and saved["serpentine"] is True
+
+    # ... and a hand-edited file round-trips too
+    window._settings.section("scan")["serpentine"] = False
+    scan._load_settings()
+    assert scan.path.value() == ONE_WAY
+
+
 def test_a_scan_at_the_live_resolution_switches_nothing(window, monkeypatch):
     scan, calls, started = _ready_to_scan(window, monkeypatch, resolution=1)
     scan._on_scan()
