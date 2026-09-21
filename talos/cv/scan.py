@@ -2,32 +2,44 @@
 
 Per waypoint: move (with the optional backlash take-up) → wait_idle →
 READBACK position (never the commanded value) → settle → capture frame →
-manifest row. Abortable: the stage is stopped and the dataset closed
-cleanly at any point.
+hand the frame and its row to the writer thread → next move. Abortable:
+the stage is stopped and the dataset closed cleanly at any point.
 
 The frames come from a *frame source* (``grab(settle_s, timeout_s)``), not
 from a camera object — see :mod:`talos.cv.frame_source` for why the scanner
 must not fetch from a backend the camera worker owns.
+
+Nothing that can be done off the scan thread is done on it: the manifest,
+the PNG encode and the thumbnail are the writer thread's
+(:mod:`talos.cv.frame_writer`), and identification is the detection
+worker's. What is left here is the part that needs the stage to be
+somewhere: the plan, the moves, the readback, the settle and the capture.
 """
 
 from __future__ import annotations
 
-import csv
 import json
 import math
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
-import cv2
 from PySide6.QtCore import QObject, Signal
 
 from talos.cv.frame_source import DEFAULT_TIMEOUT_S
+from talos.cv.frame_writer import FrameWriter
 from talos.hal.base import DeviceError
 from talos.hal.base import StageSpeed
 from talos.models import ScanParams
 
-MANIFEST_HEADER = ["frame", "x_um", "y_um", "r_deg", "t_unix", "objective_id", "focus_pos"]
+#: How many captured tiles may be waiting for the detector before the scan
+#: pauses. Tiles are never dropped, so without a cap a scan whose tiles are
+#: identified more slowly than they are captured queues whole frames — 6 MB
+#: each at 1080p, 25 MB at 4K — until the process runs out of memory. Past
+#: the cap the run waits for the detector instead: slower, and bounded.
+MAX_PENDING_TILES = 8
+_PENDING_POLL_S = 0.05
+_PENDING_TIMEOUT_S = 120.0
 
 #: Path orders. ``serpentine`` is the only one with a bench history.
 SERPENTINE = "serpentine"
@@ -345,6 +357,37 @@ def backlash_fix(prev: tuple[float, float] | None,
 
 
 @dataclass
+class ScanTiming:
+    """Where a run's wall-clock went (seconds, summed over the waypoints).
+
+    Split at the two points the operator can act on: ``command_s`` is the
+    serial cost of issuing the motion, ``travel_s`` is the stage actually
+    getting there (a `speed_pps` question), and ``stopped_s`` is everything
+    after the controller reported the axes stopped — the readback, the
+    settle and the wait for a frame (a `settle_ms` and camera question).
+    """
+
+    command_s: float = 0.0
+    travel_s: float = 0.0
+    stopped_s: float = 0.0
+    tiles: int = 0
+
+    @property
+    def total_s(self) -> float:
+        return self.command_s + self.travel_s + self.stopped_s
+
+    @property
+    def summary(self) -> str:
+        """``0.21 s/tile stopped · 1.42 s/tile travel`` — the bench number."""
+        if self.tiles <= 0:
+            return ""
+        n = float(self.tiles)
+        return (f"{self.stopped_s / n:.2f} s/tile stopped · "
+                f"{self.travel_s / n:.2f} s/tile travel · "
+                f"{self.command_s / n:.2f} s/tile to command")
+
+
+@dataclass
 class ScanResult:
     frames: list[Path] = field(default_factory=list)
     manifest_path: Path | None = None
@@ -362,6 +405,12 @@ class ScanResult:
     #: completed scan — and reporting it as either was a real bug.
     planned: int = 0
     visited: int = 0
+    #: The writer thread could not record something (a full disk, an encode
+    #: failure). It has to be its own flag, not just a message: a failure on
+    #: the LAST waypoint leaves ``visited == planned``, which would otherwise
+    #: read as a completed scan over a truncated dataset.
+    failed: bool = False
+    timing: ScanTiming = field(default_factory=ScanTiming)
 
     @property
     def captured(self) -> int:
@@ -369,14 +418,16 @@ class ScanResult:
 
     @property
     def complete(self) -> bool:
-        """Every planned waypoint was visited, and nothing aborted."""
-        return (not self.aborted and self.planned > 0
+        """Every planned waypoint was visited, nothing aborted, and every
+        frame the run took is on disk."""
+        return (not self.aborted and not self.failed and self.planned > 0
                 and self.visited >= self.planned)
 
     @property
     def stopped_early(self) -> bool:
         """Ended before the last waypoint for a reason that is NOT the
-        operator's: a device error, a settle timeout, a limit."""
+        operator's: a device error, a settle timeout, a limit, a writer
+        failure."""
         return not self.aborted and not self.complete
 
 
@@ -392,11 +443,17 @@ class GridScanner(QObject):
     sig_log = Signal(str)
 
     def __init__(self, stage, frame_source=None, parent: QObject | None = None,
-                 thumb_width: int = 160):
+                 thumb_width: int = 160, pending_tiles_fn=None,
+                 max_pending_tiles: int = MAX_PENDING_TILES):
         super().__init__(parent)
         self._stage = stage            # XYRStage (worker-thread owned)
         self._frames = frame_source    # grab(settle_s, timeout_s) | None
         self._thumb_width = int(thumb_width)
+        #: How many tiles are still waiting for the detector. Supplied by
+        #: the app (the detection engine's queue); None (the CLI benches)
+        #: means no pacing.
+        self._pending_fn = pending_tiles_fn
+        self._max_pending = max(1, int(max_pending_tiles))
         self.abort_requested = False
 
     def request_abort(self) -> None:
@@ -412,18 +469,31 @@ class GridScanner(QObject):
         """The waypoint grid for ``params`` — see :func:`plan_path`."""
         return plan_path(params, fov_um)
 
-    def _thumbnail(self, frame):
-        """A small RGB copy for the scan map (the map fills with tiles as
-        they arrive; a full 1080p frame per tile is megabytes of QImage)."""
-        width = self._thumb_width
-        if not width or frame is None:
-            return None
-        h, w = frame.shape[:2]
-        if w <= width:
-            return frame.copy()
-        scale = width / float(w)
-        return cv2.resize(frame, (width, max(1, int(round(h * scale)))),
-                          interpolation=cv2.INTER_AREA)
+    def _wait_for_the_detector(self) -> None:
+        """Pace the run to the detection queue.
+
+        The tiles are never dropped, so a scan that captures faster than
+        the identification chain runs — denoise at 4K on a slow machine —
+        would hold every waiting frame in memory. Past the cap the stage
+        waits instead. The timer is a safety valve: a detector that never
+        drains must not hang a run with the stage parked mid-plan.
+        """
+        if self._pending_fn is None:
+            return
+        deadline = time.monotonic() + _PENDING_TIMEOUT_S
+        while not self.abort_requested:
+            try:
+                pending = int(self._pending_fn() or 0)
+            except Exception:  # noqa: BLE001 - pacing is never fatal
+                return
+            if pending < self._max_pending:
+                return
+            if time.monotonic() >= deadline:
+                self.sig_log.emit(
+                    f"{pending} tiles are still waiting to be identified — "
+                    f"carrying on")
+                return
+            time.sleep(_PENDING_POLL_S)
 
     def _grab(self, settle_s: float):
         if self._frames is None:
@@ -440,16 +510,14 @@ class GridScanner(QObject):
         self.abort_requested = False
         result = ScanResult()
         out_dir = Path(out_dir)
-        frames_dir = out_dir / "frames"
-        frames_dir.mkdir(parents=True, exist_ok=True)
-        manifest_path = out_dir / "manifest.csv"
-        manifest = open(manifest_path, "w", newline="", encoding="utf-8")
-        writer = csv.writer(manifest)
-        writer.writerow(MANIFEST_HEADER)
         meta = dict(meta or {})
         fov = tuple(meta.get("fov_um") or (1000.0, 1000.0))
         waypoints = self.plan(params, fov)
         result.planned = len(waypoints)
+
+        writer = FrameWriter(out_dir, meta, thumb_width=self._thumb_width,
+                             sig_frame=self.sig_frame, sig_tile=self.sig_tile)
+        writer.start()
 
         settle_s = max(0.0, float(getattr(params, "settle_ms", 0) or 0) / 1000.0)
         backlash_um = max(0.0, float(getattr(params, "backlash_um", 0.0) or 0.0))
@@ -467,18 +535,33 @@ class GridScanner(QObject):
                     result.aborted = True
                     result.message = "aborted by user"
                     break
+                self._wait_for_the_detector()
+                if self.abort_requested:
+                    result.aborted = True
+                    result.message = "aborted by user"
+                    break
                 target = (waypoint.x_um, waypoint.y_um)
+                t_start = time.monotonic()
                 for step in backlash_fix(prev, target, backlash_um, approach):
                     if self.abort_requested:
                         break
                     self._stage.move_abs_um(step[0], step[1], speed=speed)
+                    # The take-up is a move like any other: the driver
+                    # refuses to command one onto a moving axis, so the
+                    # next one waits for it to land (as does the target
+                    # move below, which is what this fix is for).
+                    self._stage.wait_idle(timeout_s=120.0)
                 if self.abort_requested:
                     result.aborted = True
                     result.message = "aborted by user"
                     break
                 self._stage.move_abs_um(target[0], target[1], speed=speed)
                 prev = target
+                t_commanded = time.monotonic()
                 self._stage.wait_idle(timeout_s=120.0)
+                t_idle = time.monotonic()
+                result.timing.command_s += t_commanded - t_start
+                result.timing.travel_s += t_idle - t_commanded
                 try:
                     pos = self._stage.get_position()  # READBACK, not commanded
                 except DeviceError as exc:
@@ -493,10 +576,7 @@ class GridScanner(QObject):
                     self.sig_log.emit(
                         f"waypoint {waypoint.index}: no position readback "
                         f"({exc}) — recorded as missing")
-                    writer.writerow(["", "", "", "", f"{time.time():.3f}",
-                                     meta.get("objective_id", ""),
-                                     meta.get("focus_pos", "")])
-                    manifest.flush()
+                    writer.submit_missing(waypoint.index, None, time.time())
                     result.visited = waypoint.index + 1
                     self.sig_progress.emit(waypoint.index + 1, len(waypoints))
                     if lost_in_a_row >= MAX_CONSECUTIVE_LOSSES:
@@ -508,18 +588,15 @@ class GridScanner(QObject):
                     continue
                 lost_in_a_row = 0
                 frame = self._grab(settle_s)
-                frame_path = frames_dir / f"frame_{waypoint.index:05d}.png"
+                result.timing.stopped_s += time.monotonic() - t_idle
+                result.timing.tiles += 1
                 if frame is not None:
+                    # Hand it over and move on: the encode, the thumbnail,
+                    # the manifest row and its flush are the writer's.
                     frame_shape = tuple(frame.shape)
-                    cv2.imwrite(str(frame_path),
-                                cv2.cvtColor(frame, cv2.COLOR_RGB2BGR))
-                    self.sig_frame.emit(waypoint.index, pos.x_um, pos.y_um,
-                                        frame)
-                    thumb = self._thumbnail(frame)
-                    if thumb is not None:
-                        self.sig_tile.emit(waypoint.index, pos.x_um, pos.y_um,
-                                           thumb)
-                    result.frames.append(frame_path)
+                    writer.submit_frame(
+                        waypoint.index, (pos.x_um, pos.y_um, pos.r_deg), frame,
+                        time.time())
                 else:
                     # No frame source (or the fetch failed). The row is
                     # still written so the visited geometry is recorded —
@@ -529,14 +606,14 @@ class GridScanner(QObject):
                     # contained no images at all.
                     result.missing += 1
                     self.sig_log.emit(f"waypoint {waypoint.index}: no frame")
-                writer.writerow([
-                    frame_path.name if frame is not None else "",
-                    f"{pos.x_um:.3f}", f"{pos.y_um:.3f}",
-                    f"{pos.r_deg:.4f}", f"{time.time():.3f}",
-                    meta.get("objective_id", ""),
-                    meta.get("focus_pos", ""),
-                ])
-                manifest.flush()
+                    writer.submit_missing(
+                        waypoint.index, (pos.x_um, pos.y_um, pos.r_deg),
+                        time.time())
+                if writer.error is not None:
+                    # A disk that cannot take the frames is a fault like any
+                    # other: the run stops and says why, rather than walking
+                    # the rest of the plan recording nothing.
+                    raise DeviceError(f"frame writer: {writer.error}")
                 result.visited = waypoint.index + 1
                 self.sig_progress.emit(waypoint.index + 1, len(waypoints))
         except DeviceError as exc:
@@ -560,13 +637,15 @@ class GridScanner(QObject):
             except Exception:  # noqa: BLE001
                 pass
         finally:
-            manifest.close()
             # Park back at the ORIGIN — where the operator was standing
             # when they pressed the button, not the first waypoint: in the
             # corner modes those differ by half a field of view, and the
             # point of the return is to put the scope back where they left
             # it. Never on an abort — the point of an abort is that the
             # stage stops moving.
+            #
+            # The travel happens FIRST so the writer drains its queue while
+            # the stage is moving; the join then costs almost nothing.
             if (params.return_to_start and not result.aborted
                     and not self.abort_requested and waypoints):
                 try:
@@ -575,6 +654,14 @@ class GridScanner(QObject):
                     self._stage.wait_idle(timeout_s=120.0)
                 except Exception as exc:  # noqa: BLE001
                     self.sig_log.emit(f"return to start failed: {exc}")
+            # Nothing downstream may run before this: scan_output re-reads
+            # the manifest from disk, and meta.json records how many frames
+            # the run produced.
+            writer.close()
+            result.failed = writer.error is not None
+            if result.failed and not result.message:
+                result.message = f"frame writer: {writer.error}"
+            result.frames = writer.frames
             (out_dir / "meta.json").write_text(json.dumps(
                 {"params": params.__dict__,
                  "meta": meta,
@@ -584,8 +671,12 @@ class GridScanner(QObject):
                  "n_visited": result.visited,
                  "frame_shape": list(frame_shape) if frame_shape else None,
                  "aborted": result.aborted,
+                 "failed": result.failed,
+                 "timing_s": {"command": round(result.timing.command_s, 3),
+                              "travel": round(result.timing.travel_s, 3),
+                              "stopped": round(result.timing.stopped_s, 3)},
                  "message": result.message}, indent=2), encoding="utf-8")
-        result.manifest_path = manifest_path
+        result.manifest_path = writer.manifest_path
         if not result.message and not result.aborted:
             result.message = "ok"
         self.sig_done.emit(result)
