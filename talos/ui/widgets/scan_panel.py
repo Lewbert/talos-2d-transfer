@@ -686,19 +686,29 @@ class ScanPanel(QWidget):
             return_to_start=bool(self.return_home.value()))
 
     def _plan_origin(self) -> StagePosition:
-        """Where the plan is anchored.
+        """Where the plan is anchored: the run's origin while there is one,
+        the stage otherwise.
 
-        Normally the stage: the map answers "what would a scan from here
-        cover?". But while a finished run's tiles are on the map, the
-        answer must be where that RUN started — the stage has since
-        returned to the start or stayed at the last tile, and letting the
-        plan follow it re-anchors the outline under a mosaic that is still
-        being read (and, with a pulse of readback noise, changes the plan's
-        identity and used to take the mosaic with it). The anchor is
-        released when the results are cleared, and re-latched by the next
-        run.
+        Normally the stage — the map answers "what would a scan from here
+        cover?". Once a run exists, the answer is where that run was
+        ANCHORED, and that covers three moments with one rule:
+
+        - **while it runs**: the plan is the one being walked, which for a
+          *scan from origin* is the origin and not the stage (the stage is
+          wherever the last waypoint left it);
+        - **after it ends**: the stage has returned to the start or stayed
+          at the last tile, and letting the plan follow it re-anchors the
+          outline under a mosaic that is still being read — with a pulse of
+          readback noise in the return position, that also changed the
+          plan's identity and took the mosaic with it;
+        - **before any run**: no origin has been latched, so the stage.
+
+        The anchor is released when the results are cleared and re-latched
+        by the next run. It used to be gated on there being TILES, which is
+        false at the one moment a scan-from-origin needs it most: the start
+        of the run, before the first capture.
         """
-        if self._scan_tiles and self._origin is not None:
+        if self._origin is not None:
             return self._origin
         return self.stage_position()
 

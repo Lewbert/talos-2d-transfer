@@ -1633,25 +1633,54 @@ def test_scan_from_origin_anchors_the_plan_there_not_at_the_stage(
     origin = StagePosition(x_um=-1000.0, y_um=-500.0)
     window._state.set_stage_origin(origin)
 
-    started: list = []
-    monkeypatch.setattr(scan, "_begin_scan", started.append)
-    scan.scan_from_origin()
-    assert len(started) == 1
-    assert (started[0].x_um, started[0].y_um) == (-1000.0, -500.0)
-
-    # the plan is anchored there, and the first waypoint is inset
     scan.origin.set_value("corner_fit")
-    params = scan.params_for(origin)
     fov = scan.fov()
-    first = plan_path(params, fov)[0]
-    assert first.x_um == pytest.approx(-1000.0 + fov[0] / 2)
-    assert first.y_um == pytest.approx(-500.0 + fov[1] / 2)
+    scan.scan_from_origin()
+
+    # THE MAP's plan, not a helper's — the first cut of this test called
+    # params_for() itself, so it passed while the map drew the plan at the
+    # live position: the panel latched the origin for the RUN but the map's
+    # preview still followed the stage.
+    assert scan.map._plan.x0_um == pytest.approx(-1000.0)
+    assert scan.map._plan.y0_um == pytest.approx(-500.0)
+    first = scan.map._plan.waypoints[0]
+    assert first[0] == pytest.approx(-1000.0 + fov[0] / 2)
+    assert first[1] == pytest.approx(-500.0 + fov[1] / 2)
+
+    # ... and the run really was anchored there
+    assert scan._origin is not None
+    assert (scan._origin.x_um, scan._origin.y_um) == (-1000.0, -500.0)
 
     # the centre mode keeps waypoint 0 == the origin (that is what centre
     # means), so the two modes differ in exactly the way described
     scan.origin.set_value("centre")
-    assert plan_path(scan.params_for(origin), fov)[0].x_um == \
-        pytest.approx(-1000.0)
+    scan.refresh_plan()
+    assert scan.map._plan.waypoints[0][0] == pytest.approx(-1000.0)
+
+    # and clearing the results releases the anchor: the plan previews from
+    # the stage again
+    scan.clear_results()
+    scan.refresh_plan()
+    assert scan.map._plan.x0_um == pytest.approx(5000.0)
+
+
+def test_scan_from_here_still_anchors_the_plan_at_the_stage(window):
+    """The control for the test above: the ordinary button must preview from
+    where the stage is, both before any run and after the origin latch."""
+    window._manager.last_position["zolix"] = {
+        "x_um": 250.0, "y_um": 350.0, "r_deg": 0.0,
+        "x_pulses": 0, "y_pulses": 0, "r_pulses": 0}
+    from talos.models import StagePosition
+
+    window._state.set_stage_origin(StagePosition(x_um=-1000.0, y_um=-500.0))
+    scan = window._sample_finding.scan_panel
+    scan._origin = None
+    scan.refresh_plan()
+    assert scan.map._plan.x0_um == pytest.approx(250.0)
+
+    scan._on_scan()                      # the real button's handler
+    assert scan.map._plan.x0_um == pytest.approx(250.0)
+    assert scan._origin.x_um == pytest.approx(250.0)
 
 
 def test_scan_from_origin_says_so_when_nothing_is_marked(window):
