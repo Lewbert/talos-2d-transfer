@@ -45,7 +45,7 @@ from PySide6.QtWidgets import (
 from talos.cv.identify import IdentifyConfig, sample_hex
 from talos.ui.detect_engine import DetectionEngine
 from talos.ui.widgets.collapsible import CollapsibleGroup
-from talos.ui.widgets.control_groups import CameraGroup, OriginGroup
+from talos.ui.widgets.control_groups import CameraGroup
 from talos.ui.widgets.hardware_strip import parse_focus, parse_zolix
 from talos.ui.widgets.identify_panel import (ColourGroup, IdentifyGroup,
                                              PreprocessGroup)
@@ -131,15 +131,6 @@ class SampleFindingWorkspace(QWidget):
         column.setContentsMargins(4, 0, 4, 0)
         column.setSpacing(6)
 
-        # The origin card sits ABOVE the colour: it is three buttons and a
-        # line of text, and "scan from the origin" is the entry point to a
-        # session at the bench — mark the spot, then run.
-        self.origin_group = OriginGroup(self._state)
-        self.origin_group.sig_set_origin.connect(self.sig_set_stage_origin)
-        self.origin_group.sig_go_to_origin.connect(self.go_to_origin)
-        self.origin_group.sig_scan_from_origin.connect(self.scan_from_origin)
-        column.addWidget(self.origin_group)
-
         # Quick access, pinned: the one colour that drives two things.
         self.colour_group = ColourGroup(settings)
         self.colour_group.sig_changed.connect(self._on_colour_changed)
@@ -210,6 +201,9 @@ class SampleFindingWorkspace(QWidget):
         self.scan_panel.sig_tile_captured.connect(self._on_tile_captured)
         self.scan_panel.sig_log.connect(self._log)
         self.scan_panel.sig_plan_changed.connect(self.refresh_settings)
+        # The origin card is the scan's own run card, and the origin itself
+        # belongs to the app (the Navigation tab sets the same one).
+        self.scan_panel.sig_set_origin.connect(self.sig_set_stage_origin)
         self.scan_panel.pending_tiles_fn = lambda: self._engine.pending_tiles
         self.scan_panel.set_flip(self.camera_flip())
         column.addWidget(self.scan_panel, 1)
@@ -451,13 +445,16 @@ class SampleFindingWorkspace(QWidget):
         self._note_motion(key, payload)
 
     # ------------------------------------------------------------------
-    # the stage origin (shared with the Navigation tab)
+    # the stage origin (shared with the Navigation tab; the buttons live in
+    # the scan panel's run card, and its sig_set_origin is re-emitted above)
     # ------------------------------------------------------------------
 
     def go_to_origin(self) -> None:
+        """Move the stage to the origin (the run card's own button)."""
         self.scan_panel.go_to_origin()
 
     def scan_from_origin(self) -> None:
+        """Scan anchored at the origin (the run card's own button)."""
         self.scan_panel.scan_from_origin()
 
     # ------------------------------------------------------------------

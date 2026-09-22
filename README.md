@@ -158,16 +158,11 @@ rotates the image and never touches an axis.
 - **Sample Finding** — three columns: the camera and the computer vision on the
   left, the live view in the middle, and the scan on the right.
 
-  **Left.** The **stage origin** card is pinned at the top: mark a spot, go
-  back to it, or start a scan from it. The same origin the Navigation tab
-  sets, so a corner marked on one tab is the corner the other one means — and
-  *scan from origin* anchors the area there and moves straight to the first
-  tile's centre, not to the marked point. Below it sits the sample colour —
-  the one control touched constantly, because it is both the mask's target and
-  the centre of the local-contrast curve — then foldable groups for the
-  camera's manual profile (identification needs a stable image, not an
-  auto-adjusted one), the **pre-processing** chain and the **identification**
-  chain.
+  **Left.** The sample colour is pinned at the top — the one control touched
+  constantly, because it is both the mask's target and the centre of the
+  local-contrast curve. Below it, foldable groups for the camera's manual
+  profile (identification needs a stable image, not an auto-adjusted one), the
+  **pre-processing** chain and the **identification** chain.
 
   **Centre.** The live view, with a floating **Original / Pre-processed /
   Samples** switch. *Pre-processed* is what the filters make of the frame — and
@@ -181,6 +176,15 @@ rotates the image and never touches an axis.
   microscope (the only part that scrolls), and — pinned below them, always
   visible — the table of samples that were found, with *go to* to bring one
   under the crosshair.
+
+  The **run card** is where a run starts, and it starts one of two ways: from
+  where the stage is standing, or from the **origin**. The origin is the same
+  one the Navigation tab marks — one value, two tabs — and the card carries
+  the three controls for it: *Set origin* (mark where the stage is now), *Go
+  to origin*, and *Scan from origin*. That last one anchors the AREA at the
+  origin and moves straight to the first tile's centre: in the corner origin
+  modes that centre is inset half a field of view, so the marked corner lands
+  where you meant it to, on the corner of the first FRAME.
 
 **Pre-processing** is what makes a thin sample visible: an edge-preserving
 denoise for the noise a gain would amplify, and a **local-contrast curve** that

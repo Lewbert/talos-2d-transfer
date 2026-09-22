@@ -1545,28 +1545,38 @@ def test_the_colour_rows_have_sliders_and_the_gates_do_not(window):
     assert all(len(spec) == 2 for spec in plain._editors.values())
 
 
-# --- the stage origin card (shared with the Navigation tab) ---------------
+# --- the stage origin, in the run card (shared with the Navigation tab) ---
 
-def test_the_origin_card_follows_the_state(window):
-    """It starts with its two actions disabled: an origin is something the
-    operator MARKS, and a seeded (0, 0) would be the stage's machine origin
-    wearing that label."""
-    group = window._sample_finding.origin_group
-    assert not group.go_btn.isEnabled()
-    assert not group.scan_btn.isEnabled()
-    assert "not set" in group._label.text()
+def test_the_origin_row_follows_the_state(window):
+    """The two origin ACTIONS start disabled: an origin is something the
+    operator MARKS, and a seeded (0, 0) would be the machine origin wearing
+    that label. *Set origin* stays available — it is how you mark one."""
+    scan = window._sample_finding.scan_panel
+    assert not scan.go_origin_btn.isEnabled()
+    assert not scan.scan_origin_btn.isEnabled()
+    assert scan.set_origin_btn.isEnabled()
+    assert "not set" in scan.origin_label.text()
 
     from talos.models import StagePosition
 
     window._state.set_stage_origin(StagePosition(x_um=12.5, y_um=-3.0))
-    assert group.go_btn.isEnabled() and group.scan_btn.isEnabled()
-    assert "12.5" in group._label.text() and "-3.0" in group._label.text()
+    assert scan.go_origin_btn.isEnabled() and scan.scan_origin_btn.isEnabled()
+    assert "12.5" in scan.origin_label.text()
+    assert "-3.0" in scan.origin_label.text()
+
+    # a run owns the axes: the two actions stand down with everything else
+    scan._set_job("scan")
+    assert not scan.go_origin_btn.isEnabled()
+    assert not scan.scan_origin_btn.isEnabled()
+    assert scan.set_origin_btn.isEnabled(), "marking a spot is still useful"
+    scan._set_job(None)
+    assert scan.go_origin_btn.isEnabled()
 
 
-def test_the_origin_card_sets_the_shared_origin(window):
-    """ONE origin for both tabs: the card's Set button runs the same handler
-    as the Navigation quick action — so the value, the settings write and
-    the other tab's label cannot disagree.
+def test_the_run_card_sets_the_shared_origin(window):
+    """ONE origin for both tabs: the run card's Set button runs the same
+    handler as the Navigation quick action — so the value, the settings
+    write and the other tab's label cannot disagree.
 
     The handler also has to WRITE the settings: it used to raise NameError
     halfway through, which left the origin in memory, never saved, and no
@@ -1575,7 +1585,7 @@ def test_the_origin_card_sets_the_shared_origin(window):
     window._manager.last_position["zolix"] = {
         "x_um": 111.0, "y_um": -222.0, "r_deg": 0.0,
         "x_pulses": 1, "y_pulses": 2, "r_pulses": 0}
-    window._sample_finding.origin_group.set_btn.click()
+    window._sample_finding.scan_panel.set_origin_btn.click()
     assert window._state.stage_origin.x_um == pytest.approx(111.0)
     assert window._settings.section("origin")["xyr"]["x_um"] \
         == pytest.approx(111.0)
@@ -1585,7 +1595,7 @@ def test_the_origin_card_sets_the_shared_origin(window):
     # with no position to store, it says so instead of storing (0, 0)
     window._state._stage_origin = None
     window._manager.last_position.clear()
-    window._sample_finding.origin_group.set_btn.click()
+    window._sample_finding.scan_panel.set_origin_btn.click()
     assert window._state.stage_origin is None
 
 

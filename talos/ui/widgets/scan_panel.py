@@ -149,6 +149,9 @@ class ScanPanel(QWidget):
     #: the workspace hands it to the detection engine.
     sig_tile_captured = Signal(int, float, float, object)
     sig_log = Signal(str)
+    #: "Store here as the origin" — the workspace passes it on to the main
+    #: window, which owns the shared origin and its settings write.
+    sig_set_origin = Signal()
     #: Something that affects the plan changed (the workspace persists).
     sig_plan_changed = Signal()
 
@@ -198,6 +201,12 @@ class ScanPanel(QWidget):
         self._build_ui()
         self._load_settings()
         self._refresh_fov_label()
+        # The origin is shared with the Navigation tab: it can be set there
+        # and used here, so the readout follows the state rather than the
+        # buttons that happen to be on this panel.
+        self._state.sig_stage_origin_changed.connect(
+            lambda _p: self.refresh_origin())
+        self.refresh_origin()
 
     # ------------------------------------------------------------------
     # construction
@@ -286,6 +295,15 @@ class ScanPanel(QWidget):
         return card
 
     def _build_run_card(self) -> QWidget:
+        """Where a run starts, and where the origin it can start from lives.
+
+        The origin is here rather than in a card of its own because it is a
+        scan setting like the area is: it answers "where does the next run
+        begin", which is the question this row already asks twice (from the
+        stage, from the origin). *Set origin* sits with the readout, not with
+        the two actions that USE the origin — marking it is housekeeping, and
+        putting it third in a row of motion buttons made it look like one.
+        """
         card = QFrame()
         card.setObjectName("card")
         layout = QVBoxLayout(card)
@@ -308,6 +326,41 @@ class ScanPanel(QWidget):
         self.abort_btn.clicked.connect(lambda: self._on_abort("abort"))
         row.addWidget(self.abort_btn, 1)
         layout.addLayout(row)
+
+        row = QHBoxLayout()
+        row.setSpacing(6)
+        self.scan_origin_btn = QPushButton("Scan from origin")
+        self.scan_origin_btn.setObjectName("qa_primary")
+        self.scan_origin_btn.setToolTip(
+            "Run the same scan anchored at the origin instead of at the\n"
+            "stage. The first move goes to the first tile's centre — which\n"
+            "in the corner origin modes is inset half a field of view, not\n"
+            "the origin itself.")
+        self.scan_origin_btn.clicked.connect(self.scan_from_origin)
+        row.addWidget(self.scan_origin_btn, 2)
+        self.go_origin_btn = QPushButton("Go to origin")
+        self.go_origin_btn.setObjectName("qa")
+        self.go_origin_btn.setToolTip("Move the stage to the origin, at the "
+                                      "scan's speed")
+        self.go_origin_btn.clicked.connect(self.go_to_origin)
+        row.addWidget(self.go_origin_btn, 1)
+        layout.addLayout(row)
+
+        row = QHBoxLayout()
+        row.setSpacing(6)
+        self.origin_label = QLabel("origin: not set")
+        self.origin_label.setObjectName("dim")
+        self.origin_label.setWordWrap(True)
+        row.addWidget(self.origin_label, 1)
+        self.set_origin_btn = QPushButton("Set origin")
+        self.set_origin_btn.setObjectName("compact")
+        self.set_origin_btn.setToolTip(
+            "Store the current XYR position as the origin. The Navigation\n"
+            "tab sets and shows the same one.")
+        self.set_origin_btn.clicked.connect(self.sig_set_origin.emit)
+        row.addWidget(self.set_origin_btn)
+        layout.addLayout(row)
+
         self.progress = QProgressBar()
         self.progress.setVisible(False)
         layout.addWidget(self.progress)
@@ -874,6 +927,18 @@ class ScanPanel(QWidget):
             return
         self._go_to(origin.x_um, origin.y_um, "the origin")
 
+    def refresh_origin(self) -> None:
+        """The origin readout, and which of the origin actions can run."""
+        origin = getattr(self._state, "stage_origin", None)
+        if origin is None:
+            self.origin_label.setText("origin: not set")
+        else:
+            self.origin_label.setText(f"origin: {origin.x_um:.1f}, "
+                                      f"{origin.y_um:.1f} µm")
+        usable = origin is not None and self._job is None
+        self.go_origin_btn.setEnabled(usable)
+        self.scan_origin_btn.setEnabled(usable)
+
     def _start_scan(self, position: StagePosition) -> bool:
         """Begin a run anchored at ``position``. False when it was refused
         (the caller says which anchor it was for)."""
@@ -1192,10 +1257,15 @@ class ScanPanel(QWidget):
         self.abort_btn.setEnabled(busy)
         self.progress.setVisible(busy)
         self._go_to_btn.setEnabled(not busy and bool(self._candidates))
+        # Everything a run would fight over is disabled — except *Set
+        # origin*, which only reads the position and is worth having
+        # mid-run (marking the spot the run started from), and the two
+        # origin actions, whose enable state refresh_origin owns.
         for widget in (self.origin, self.x_dir, self.y_dir, self.path,
                        self.start_axis, self.return_home,
                        self.width, self.height, self._dir):
             widget.setEnabled(not busy)
+        self.refresh_origin()
         if not busy:
             self._refresh_fov_label()
 
