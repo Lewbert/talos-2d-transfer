@@ -393,11 +393,39 @@ the port open and the controller possibly mid-move.
 
 **STOP ALL aborts the run, not just the motion in flight.** Esc and LB+RB route
 through the input layer to `manager.stop_all()`, whose completion signal
-(`sig_stop_all_done`) reaches the same abort path as the Abort button. Without
-that wiring the stage stopped but the run continued at the next waypoint, which
-made Esc look like it had done nothing. The reverse case is handled too: the
-scan's own start sequence submits a *Zolix-only* stop rather than
-`manager.stop_all()`, so it cannot abort itself through that same signal.
+(`sig_stop_all_done`) reaches the scan's abort path. Without that wiring the
+stage stopped but the run continued at the next waypoint, which made Esc look
+like it had done nothing. The reverse case is handled too: the scan's own start
+sequence submits a *Zolix-only* stop rather than `manager.stop_all()`, so it
+cannot abort itself through that same signal.
+
+**The abort does not stop the stage, and that is the point.** Three things
+arrive at the same abort: the panel's Abort button (which does stop
+everything), Esc / LB+RB through the input layer (already stopped by the time
+the signal lands), and the map window's Esc. The abort path itself only sets
+the flag, asks the **adapter** for one priority stop of the axis the run owns,
+and drops the input holds.
+
+The first version called `manager.stop_all()` from all three. For the
+completion-driven ones that is a cycle: `stop_all` completes by emitting
+`sig_stop_all_done`, whose handler called the abort, which stopped everything
+again — which emitted the signal again. On the bench it read as a scan that
+"aborted halfway and then looped forever", with a trio of
+`job #N: zolix.stop()` / `STOP ALL requested` / `All stages stopped` repeating
+several times a second for as long as the run took to unwind, each round
+putting another stop job on a serial link that is this bench's weak point. **A
+completion handler must not re-issue the action that produces it.**
+
+Two properties the unwinding has, both of which were missing:
+
+- **An abort is not waited out.** `ManagerStageAdapter._call` watches the abort
+  flag in the same loop that watches its deadline, so an abort arriving while a
+  move is in flight ends the run in a poll or two, not at the job's timeout
+  (120 s for a move) with the stage already stopped and the operator watching.
+- **An abort always reaches the scanner**, including one that lands while the
+  scan worker is still starting up (the adapter's abort check is the same
+  Event, so the run was already refusing to move — but it used to *end* as
+  "stopped early", i.e. the operator's own abort reported as a fault).
 
 ## Three ways a run can end, and why they must not be confused
 

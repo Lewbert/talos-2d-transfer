@@ -989,6 +989,13 @@ class ScanPanel(QWidget):
         scanner.sig_frame.connect(self._on_scan_frame)
         scanner.sig_log.connect(self._log)
         self._scanner = scanner
+        if self._scan_abort.is_set():
+            # STOP ALL landed while this thread was still starting up, so
+            # nothing has told the SCANNER yet. The adapter already refuses
+            # to move (its abort check is the same Event), but the run would
+            # then end as "stopped early — scan aborted", which is the
+            # operator's own abort reported as a fault.
+            scanner.request_abort()
         out_dir = scan_directory(self._settings) / time.strftime(
             "scan_%Y%m%d_%H%M%S")
         try:
