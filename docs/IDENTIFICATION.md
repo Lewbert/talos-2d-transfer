@@ -132,23 +132,42 @@ whole config per job and hands it over, so the worker never reads a widget.
 ## Pre-processing — the layer in front of the chain
 
 Everything here runs on the detection worker, once per job, before the chain
-sees the frame. The stage order is fixed and stated on the panel:
-**shade → denoise → tone → curve**. It is not arbitrary: the local-contrast
-curve multiplies small differences around the picked colour, *including* the
-differences that illumination unevenness and sensor noise put there, so those
-two are removed first.
+sees the frame. Two stages, in a fixed order that the panel states:
+**denoise → curve**. It is not arbitrary: the local-contrast curve multiplies
+small differences around the picked colour, *including* the differences that
+sensor noise put there, so the noise is removed first.
 
 | Stage | What it does | Default |
 |---|---|---|
-| **Shade correction** | Divide by a heavily blurred copy of the frame (each channel keeps its own mean). The useful half of the old Contrast stage. | off |
 | **Denoise** | Edge-preserving (bilateral) smoothing, for the noise the curve would otherwise amplify. It must not soften flake edges — they are what is being identified. | off |
-| **Tone** | Exposure, brightness, contrast, gamma. All four collapse into the same lookup tables as the curve. | identity |
 | **Local contrast** | The curve below. | off |
 
 **Pre-processing is a pure transform, and it is never written to disk.**
 Snapshots, scan tiles and the mosaic are all raw captures; the chain exists so
 that the operator can see — and the identification can segment — the same
 prepared frame, and for nothing else.
+
+### The three stages that were removed, and why
+
+Recorded because "why is there no brightness control?" is a question somebody
+will ask with a screenshot in hand (removed 2026-09-23).
+
+- **Tone operations** — exposure, brightness, contrast, gamma. The camera's own
+  exposure, gain and white balance already set the frame, and a second set of
+  the same controls behind the operator's back made every bench session a
+  question about *which layer* was being tuned: the live view is the
+  pre-processed one, so a brightness change looked exactly like a change to the
+  camera. With the identification chain also having lost its Contrast stage,
+  they were the last thing standing between the sample and the operator.
+- **Shade correction** (illumination flattening). It was the useful half of the
+  old Contrast stage, and on this bench the lighting is even enough that it had
+  nothing to correct. **A vignette correction is the version of it worth
+  having** if a wider field or a different lamp ever makes the corners matter —
+  that is a different filter (a calibrated per-pixel gain, not a blurred-copy
+  division) and it is deliberately not this one.
+- The old contrast stage's *other* half — the one that decided what is a sample
+  — is still gone from the chain as it has been since #34. The mask's source is
+  the picked colour.
 
 ### The local-contrast curve
 
@@ -168,8 +187,8 @@ the one that matters, and not for aesthetics: the *same hex* is the colour
 mask's target. A curve that moved the picked value would leave the mask
 searching for a colour the frame no longer contains — you would point at a
 flake, switch the filter on, and watch it disappear. That is why the curve is
-applied **last**, after the exposure and brightness stages: its fixed point
-lands on the value the dropper actually read, which is a value in output space.
+applied **last**, after the spatial stage: its fixed point lands on the value
+the dropper actually read, which is a value in output space.
 
 **The gain means the gain.** "×3" is the slope at the picked colour, solved for
 rather than assumed — the naive construction delivers about 2.9 and calls it 4,
@@ -184,18 +203,12 @@ than a few levels share an output, and the panel reports what it used
 the gain does the delivered gain come out lower, and it says so.
 
 **What it does not fix.** It is a point operation, so it cannot tell a layer
-difference from a lighting difference — that is what shade correction is for,
-and shade correction does not fix a gradient that varies within a single flake.
-It also cannot separate two layers whose colour difference sits under the
-sensor's noise: it multiplies what is there, and if what is there is noise, the
-noise is what gets multiplied.
-
-A caveat for whoever tunes the shade correction: `sigma` is in pixels of
-whatever frame it is given, so the preview's 50 % scale makes the same sigma
-cover **twice** the physical distance it covers on a full-resolution tile. The
-sharpness threshold is normalised for exactly this reason; the shade sigma is
-not, so a value tuned on the live preview is not the same filter on a captured
-tile. (Recorded 2026-09-18; carried over from the stage it replaced.)
+difference from a *lighting* difference — there is no illumination flattening
+behind it any more (see above), so a field with a real gradient in it is a
+field this chain cannot help with. It also cannot separate two layers whose
+colour difference sits under the sensor's noise: it multiplies what is there,
+and if what is there is noise, the noise is what gets multiplied — which is
+what the denoise is for, and why the denoise runs first.
 
 ## Configuration
 

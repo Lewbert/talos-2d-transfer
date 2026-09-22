@@ -86,8 +86,14 @@ def main() -> int:
     # Never the operator's settings (see the module docstring). An
     # explicit TALOS_APPDATA still wins — that is how a caller asks for a
     # particular scratch profile.
+    #
+    # A NEW directory per run, not a reused one: the fixed name meant each
+    # run loaded the settings the PREVIOUS run had saved, so a published
+    # image could show a state nobody had posed — an origin of (0, 0) that
+    # an older defaults file had seeded, for instance, which is exactly the
+    # kind of thing these images exist to document honestly.
     if not os.environ.get("TALOS_APPDATA"):
-        scratch = Path(tempfile.gettempdir()) / "talos-ui-shot-appdata"
+        scratch = Path(tempfile.mkdtemp(prefix="talos-ui-shot-"))
         os.environ["TALOS_APPDATA"] = str(scratch)
         print(f"using a throwaway appdata: {scratch}")
 

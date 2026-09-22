@@ -158,11 +158,16 @@ rotates the image and never touches an axis.
 - **Sample Finding** — three columns: the camera and the computer vision on the
   left, the live view in the middle, and the scan on the right.
 
-  **Left.** The sample colour is pinned at the top, because it is the one
-  control that is touched constantly — it is both the mask's target and the
-  centre of the local-contrast curve. Below it, foldable groups for the camera's
-  manual profile (identification needs a stable image, not an auto-adjusted
-  one), the **pre-processing** chain and the **identification** chain.
+  **Left.** The **stage origin** card is pinned at the top: mark a spot, go
+  back to it, or start a scan from it. The same origin the Navigation tab
+  sets, so a corner marked on one tab is the corner the other one means — and
+  *scan from origin* anchors the area there and moves straight to the first
+  tile's centre, not to the marked point. Below it sits the sample colour —
+  the one control touched constantly, because it is both the mask's target and
+  the centre of the local-contrast curve — then foldable groups for the
+  camera's manual profile (identification needs a stable image, not an
+  auto-adjusted one), the **pre-processing** chain and the **identification**
+  chain.
 
   **Centre.** The live view, with a floating **Original / Pre-processed /
   Samples** switch. *Pre-processed* is what the filters make of the frame — and
@@ -177,13 +182,14 @@ rotates the image and never touches an axis.
   visible — the table of samples that were found, with *go to* to bring one
   under the crosshair.
 
-**Pre-processing** is what makes a thin sample visible: shade correction for
-uneven illumination, an edge-preserving denoise, the ordinary tone controls,
-and a **local-contrast curve** that steepens the tone curve at the colour you
-picked and flattens it everywhere else. A monolayer and a bilayer a few levels
-apart become a difference you can see, while the picked colour itself does not
-move — it is the same hex the colour mask searches for, so the sample cannot
-disappear the moment you switch the filter on.
+**Pre-processing** is what makes a thin sample visible: an edge-preserving
+denoise for the noise a gain would amplify, and a **local-contrast curve** that
+steepens the tone curve at the colour you picked and flattens it everywhere
+else. A monolayer and a bilayer a few levels apart become a difference you can
+see, while the picked colour itself does not move — it is the same hex the
+colour mask searches for, so the sample cannot disappear the moment you switch
+the filter on. The camera's own exposure, gain and white balance are the only
+tone controls, deliberately: one set of them, not two.
 
 ![The Sample Finding workspace](docs/images/sample_finding.png)
 

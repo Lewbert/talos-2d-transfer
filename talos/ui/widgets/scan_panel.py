@@ -844,20 +844,54 @@ class ScanPanel(QWidget):
         return self._job is not None
 
     def _on_scan(self) -> None:
-        if self._job is not None:
+        """Scan from where the stage is standing."""
+        self._start_scan(self.stage_position())
+
+    def scan_from_origin(self) -> None:
+        """Run the same scan, anchored at the stored origin.
+
+        The anchor is where the AREA starts, not where the stage goes: the
+        run's first move is to the first tile's centre, which in the corner
+        origin modes is inset by half a field of view from the corner the
+        operator marked. That is the point of the mode — the origin is the
+        corner of the area, not the middle of the first frame.
+        """
+        origin = getattr(self._state, "stage_origin", None)
+        if origin is None:
+            self.set_status("No stage origin set — mark one first.",
+                            tone="warn")
             return
+        if self._start_scan(origin):
+            self.set_status(f"Scanning from the origin "
+                            f"({origin.x_um:.1f}, {origin.y_um:.1f} µm) — "
+                            f"Esc or Abort stops it")
+
+    def go_to_origin(self) -> None:
+        origin = getattr(self._state, "stage_origin", None)
+        if origin is None:
+            self.set_status("No stage origin set — mark one first.",
+                            tone="warn")
+            return
+        self._go_to(origin.x_um, origin.y_um, "the origin")
+
+    def _start_scan(self, position: StagePosition) -> bool:
+        """Begin a run anchored at ``position``. False when it was refused
+        (the caller says which anchor it was for)."""
+        if self._job is not None:
+            self.set_status("A run is already going — stop it first.",
+                            tone="warn")
+            return False
         if self._state.mode != "MANUAL":
             QMessageBox.information(
                 self, "Scan",
                 f"The stage is in use ({self._state.mode}) — a scan cannot "
                 "start while another job owns the axes.")
-            return
-        position = self.stage_position()
+            return False
         if not self._manager.last_position.get("zolix"):
             QMessageBox.information(
                 self, "Scan", "No stage position yet — the Zolix controller "
                 "has not reported. Check the connection.")
-            return
+            return False
         # The tiles are captured at the live resolution unless Preferences
         # → Scan asks for another one; switching stops the stream for a
         # pipeline re-init, so it happens ONCE for the run, before the
@@ -865,16 +899,17 @@ class ScanPanel(QWidget):
         mode = self._camera_mode_to_switch_to()
         if mode is None:
             self._begin_scan(position)
-            return
+            return True
         self.set_status("Switching the camera for the scan…")
         job = self._manager.submit_camera("set_property", "resolution", mode)
         if int(job) < 0:
             self._log("the camera cannot change resolution — scanning at "
                       "the live one")
             self._begin_scan(position)
-            return
+            return True
         self._camera_mode_before_scan = self._current_camera_mode()
         self._pending_scan_start = (int(job), position)
+        return True
 
     def _begin_scan(self, position: StagePosition) -> None:
         """Everything a run does once the camera is in the right mode."""
@@ -1256,25 +1291,32 @@ class ScanPanel(QWidget):
 
     def _on_go_to(self) -> None:
         if self._selected < 0 or self._selected >= len(self._candidates):
-            QMessageBox.information(self, "Go to", "Select a sample first.")
-            return
-        if self._state.mode != "MANUAL":
-            QMessageBox.information(
-                self, "Go to",
-                f"The stage is in use ({self._state.mode}) — sample moves "
-                "are refused while a job owns the axes.")
+            self.set_status("Select a sample first.", tone="warn")
             return
         cand = self._candidates[self._selected]
-        position = self.stage_position()
-        dx = cand.x_um - position.x_um
-        dy = cand.y_um - position.y_um
-        answer = QMessageBox.question(
-            self, "Move to sample",
-            f"Move the stage by ΔX={dx:+.1f} µm, ΔY={dy:+.1f} µm to bring "
-            "this sample to the crosshair?",
-            QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel)
-        if answer != QMessageBox.StandardButton.Ok:
+        self._go_to(cand.x_um, cand.y_um, f"sample #{self._selected + 1}")
+
+    def _go_to(self, x_um: float, y_um: float, what: str) -> None:
+        """Move the stage so a point lands under the crosshair.
+
+        No confirmation dialog: the move is short, the scan's own speed, and
+        it is the whole point of the button — asking "shall I?" between the
+        click and the motion is a click the operator pays every time for a
+        mistake they can see on the map. Refusals say why in the status
+        line, which is also where the move reports itself.
+        """
+        if self._job is not None:
+            self.set_status("The stage is busy with a run — stop it first.",
+                            tone="warn")
             return
+        if self._state.mode != "MANUAL":
+            self.set_status(
+                f"The stage is in use ({self._state.mode}) — moves are "
+                f"refused while a job owns the axes.", tone="warn")
+            return
+        position = self.stage_position()
+        dx = x_um - position.x_um
+        dy = y_um - position.y_um
         # The same speed the scan runs at, for the same reason: this is a
         # scan move, not a jog.
         #
@@ -1286,7 +1328,7 @@ class ScanPanel(QWidget):
         # adapter fills the same parameter the same way.
         self._manager.submit("zolix", "move_rel_um", dx, dy, None,
                              StageSpeed.SLOW, int(self._prefs["speed_pps"]))
-        self.set_status(f"Moving to sample #{self._selected + 1}")
+        self.set_status(f"Moving to {what} (ΔX={dx:+.1f}, ΔY={dy:+.1f} µm)")
 
     # ------------------------------------------------------------------
     # small things

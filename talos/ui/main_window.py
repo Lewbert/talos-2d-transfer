@@ -149,6 +149,11 @@ class MainWindow(QMainWindow):
             self._on_quick_af)
         self._navigation.quick_actions.sig_set_stage_origin.connect(
             self._on_set_stage_origin)
+        # The same origin, from the Sample Finding tab's quick access card:
+        # one handler, so the value, the settings write and the label in the
+        # other tab cannot disagree.
+        self._sample_finding.sig_set_stage_origin.connect(
+            self._on_set_stage_origin)
         self._navigation.quick_actions.sig_set_focus_origin.connect(
             self._on_set_focus_origin)
         # Workspace switching applies the workspace's camera profile.
@@ -694,15 +699,32 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
 
     def _on_set_stage_origin(self) -> None:
-        self._state.set_stage_origin(
-            StagePosition.from_telemetry(
-                self._manager.last_position.get("zolix")))
+        """Store where the stage is now as the software XYR origin.
+
+        Shared by both tabs — the Navigation quick actions and the Sample
+        Finding origin card — so it lives here, with the settings write
+        that keeps it across a restart.
+
+        It used to reference a local ``position`` that was never bound, so
+        the state was set, the NameError ended the slot, and the origin was
+        never saved: it worked until the app was restarted, and the log
+        line that says so never appeared.
+        """
+        payload = self._manager.last_position.get("zolix")
+        if not payload:
+            self._on_log_message(
+                "warning", "No stage position yet — the origin was not set")
+            return
+        position = StagePosition.from_telemetry(payload)
+        self._state.set_stage_origin(position)
         self._settings.section("origin")["xyr"] = {
             "x_pulses": position.x_pulses, "y_pulses": position.y_pulses,
             "r_pulses": position.r_pulses, "x_um": position.x_um,
             "y_um": position.y_um, "r_deg": position.r_deg}
         self._settings.save()
-        self._on_log_message("info", "Stage origin stored")
+        self._on_log_message(
+            "info", f"Stage origin stored at {position.x_um:.1f}, "
+                    f"{position.y_um:.1f} µm")
 
     def _on_set_focus_origin(self) -> None:
         steps = int(self._manager.focus_position)

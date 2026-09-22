@@ -144,6 +144,27 @@ def test_load_applies_normalization(tmp_path):
     assert len(settings.get("objectives")) == 5
 
 
+def test_the_removed_preprocess_stages_are_dropped_from_a_stored_file(
+        tmp_path):
+    """The tone operations and the shade correction went on 2026-09-23.
+    A settings file that still carries them loads as if they were never
+    there — what is left (the curve and the denoise) keeps its values."""
+    path = tmp_path / "old.json"
+    path.write_text(json.dumps({
+        "preprocess": {"enabled": True, "exposure": 2.0, "brightness": 10.0,
+                       "contrast": 0.5, "gamma": 2.0,
+                       "shade": {"enabled": True, "sigma": 30.0},
+                       "denoise": {"enabled": True, "diameter": 9},
+                       "local": {"enabled": True, "gain": 5.0}},
+    }), encoding="utf-8")
+    section = Settings.load(path).section("preprocess")
+    for gone in ("exposure", "brightness", "contrast", "gamma", "shade"):
+        assert gone not in section, gone
+    assert section["enabled"] is True
+    assert section["local"]["gain"] == 5.0
+    assert section["denoise"]["diameter"] == 9
+
+
 def test_the_settle_default_moves_only_for_a_file_that_predates_it(tmp_path):
     """v9 halved the scan's settle default. A file still carrying the old
     default follows it; a value someone chose, or one they set back after
@@ -274,3 +295,18 @@ def test_migrate_mapping_uses_deployed_keys(tmp_path, monkeypatch):
     assert mapping["zolix"]["um_per_pulse_xy"] == 0.625
     assert mapping["focus"]["jog_speed"] == 200
     assert mapping["focus"]["max_speed"] == 2000
+
+
+def test_a_fresh_install_has_no_stage_origin(tmp_path):
+    """The bundled defaults used to seed ``origin.xyr = (0, 0, 0)`` — the
+    stage's MACHINE origin wearing the label "your origin". The origin is
+    something the operator marks, and (0, 0) is a real place: the same trap
+    the map's footprint had, and the reason the origin card starts with its
+    actions disabled rather than pointing at a coordinate nobody chose."""
+    from talos.config import load_defaults
+
+    assert not (load_defaults().get("origin") or {}).get("xyr")
+    assert not (load_defaults().get("origin") or {}).get("focus")
+    # a file with no origin section at all stays that way
+    settings = Settings.load(tmp_path / "fresh.json")
+    assert not settings.section("origin").get("xyr")

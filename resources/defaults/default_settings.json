@@ -22,11 +22,7 @@
     "console_enabled": true,
     "verbose_logging": true
   },
-  "origin": {
-    "xyr": {"x_pulses": 0, "y_pulses": 0, "r_pulses": 0,
-            "x_um": 0.0, "y_um": 0.0, "r_deg": 0.0},
-    "focus": 0
-  },
+  "origin": {},
   "devices": {
     "zolix": {
       "port": "COM3",
@@ -260,11 +256,6 @@
   },
   "preprocess": {
     "enabled": false,
-    "exposure": 1.0,
-    "brightness": 0.0,
-    "contrast": 1.0,
-    "gamma": 1.0,
-    "shade": {"enabled": false, "sigma": 60.0, "strength": 1.0},
     "denoise": {"enabled": false, "diameter": 7, "sigma_color": 40.0,
                 "sigma_space": 5.0},
     "local": {"enabled": false, "gain": 3.0, "width": 32.0}

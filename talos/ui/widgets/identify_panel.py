@@ -39,6 +39,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QPushButton,
+    QSlider,
     QSpinBox,
     QVBoxLayout,
     QWidget,
@@ -67,6 +68,13 @@ PARAM_LABELS = {
 
 def param_label(name: str) -> str:
     return PARAM_LABELS.get(name, name.replace("_", " ").capitalize())
+
+
+def _set_quietly(box, value) -> None:
+    """Move a spin box without telling anyone (see ``_number_and_slider``)."""
+    box.blockSignals(True)
+    box.setValue(value if isinstance(box, QSpinBox) else float(value))
+    box.blockSignals(False)
 
 
 def _spin(value, limits, suffix: str = "") -> QWidget:
@@ -190,9 +198,15 @@ class StageEditor(QFrame):
     sig_dropper = Signal()
 
     def __init__(self, stage: Stage, parent: QWidget | None = None,
-                 show_enable: bool = True, framed: bool = True):
+                 show_enable: bool = True, framed: bool = True,
+                 sliders: bool = False):
         super().__init__(parent)
         self._stage = stage
+        #: Give every numeric row a slider under its number box, the way the
+        #: camera's controls are laid out. Off by default: the values in a
+        #: gate are typed once and left, while the colour's three are
+        #: hunted for by eye while watching the mask change.
+        self._sliders = bool(sliders)
         if framed:
             self.setObjectName("card")
         outer = QVBoxLayout(self)
@@ -262,9 +276,48 @@ class StageEditor(QFrame):
         else:
             limits = getattr(stage, "RANGES", {}).get(name, (0, 255, 1))
             box = _spin(value, limits)
+            if self._sliders and limits[1] > limits[0]:
+                container, slider = self._number_and_slider(box, limits)
+                # Registered like every other row: ``stage()`` reads its
+                # parameters back out of ``_editors``, so a row that skips
+                # it is a parameter the operator sets and the pipeline
+                # never sees.
+                self._editors[name] = ("num", box, slider)
+                form.addRow(param_label(name), container)
+                box.valueChanged.connect(self._on_changed)
+                return
             self._editors[name] = ("num", box)
             form.addRow(param_label(name), box)
             box.valueChanged.connect(self._on_changed)
+
+    def _number_and_slider(self, box, limits) -> tuple[QWidget, QSlider]:
+        """The camera's row: the number, and a slider under it.
+
+        The slider moves the NUMBER and nothing else; the change is applied
+        once, on release. Dragging must not re-save the settings file and
+        re-run the mask on every pixel — that is why the camera's exposure
+        row is built the same way — while the number box still applies as
+        it is typed, which is how the value is set precisely.
+        """
+        slider = QSlider(Qt.Orientation.Horizontal)
+        slider.setRange(int(limits[0]), int(limits[1]))
+        step = max(1, int(limits[2]))
+        slider.setSingleStep(step)
+        slider.setPageStep(step * 4)
+        slider.setValue(int(round(box.value())))
+        slider.valueChanged.connect(
+            lambda value, b=box: _set_quietly(b, value))
+        slider.sliderReleased.connect(self._on_changed)
+        box.valueChanged.connect(
+            lambda value, s=slider: s.setValue(int(round(value))))
+
+        container = QWidget()
+        row = QVBoxLayout(container)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(0)
+        row.addWidget(box)
+        row.addWidget(slider)
+        return container, slider
 
     def _refresh_swatch(self) -> None:
         entry = self._editors.get("hex_color")
@@ -344,7 +397,8 @@ class ColourGroup(QGroupBox):
         layout.setSpacing(4)
 
         self.editor = StageEditor(self._colour_stage(), self,
-                                  show_enable=True, framed=False)
+                                  show_enable=True, framed=False,
+                                  sliders=True)
         self.editor.sig_changed.connect(self._on_changed)
         self.editor.sig_dropper.connect(self.sig_dropper)
         layout.addWidget(self.editor)
@@ -427,12 +481,10 @@ class PreprocessGroup(QGroupBox):
         self.spatial.sig_changed.connect(self._changed)
         layout.addWidget(self.spatial)
 
-        self.tone = _ToneRows(cfg, self)
-        self.tone.sig_changed.connect(self._changed)
-        layout.addWidget(self.tone)
-
-        order = QLabel("Order: shade → denoise → tone → curve. The curve is "
-                       "last so the pick stays where it was picked.")
+        order = QLabel("Order: denoise → curve. The curve is last so the "
+                       "pick stays where it was picked, and the denoise "
+                       "runs first because the curve amplifies noise as "
+                       "eagerly as it amplifies a layer.")
         order.setObjectName("hint")
         order.setWordWrap(True)
         layout.addWidget(order)
@@ -449,9 +501,8 @@ class PreprocessGroup(QGroupBox):
     # ------------------------------------------------------------------
 
     def config(self) -> PreprocessConfig:
-        cfg = PreprocessConfig(
-            enabled=self.enable.isChecked(),
-            **self.tone.values(), **self.spatial.values())
+        cfg = PreprocessConfig(enabled=self.enable.isChecked(),
+                               **self.spatial.values())
         cfg.local = self.local.value()
         return cfg
 
@@ -469,7 +520,6 @@ class PreprocessGroup(QGroupBox):
         self._building = True
         try:
             self.enable.setChecked(cfg.enabled)
-            self.tone.load(cfg)
             self.spatial.load(cfg)
             self.local.load(cfg.local)
         finally:
@@ -492,7 +542,6 @@ class PreprocessGroup(QGroupBox):
         self._building = True
         try:
             self.enable.setChecked(fresh.enabled)
-            self.tone.load(fresh)
             self.spatial.load(fresh)
             self.local.load(fresh.local)
         finally:
@@ -574,8 +623,8 @@ class _LocalContrastRows(QFrame):
 
 
 class _SpatialRows(QFrame):
-    """Shade correction and denoise — the stages that run before the tone
-    operations, and the expensive ones."""
+    """Denoise — the one stage here with a real cost, and the one that has
+    to run before the curve."""
 
     sig_changed = Signal()
 
@@ -584,22 +633,6 @@ class _SpatialRows(QFrame):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(2)
-
-        self.shade_enable = QCheckBox("Shade correction")
-        self.shade_enable.setToolTip(
-            "Divides out a blurred copy of the frame. The curve amplifies\n"
-            "illumination unevenness exactly as eagerly as a flake, so this\n"
-            "removes it first.")
-        self.shade_sigma = _spin(cfg.shade.sigma, (4.0, 200.0, 4.0), " px")
-        self.shade_strength = _spin(cfg.shade.strength, (0.0, 1.0, 0.05))
-        shade_form = QFormLayout()
-        shade_form.setContentsMargins(14, 0, 0, 0)
-        shade_form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
-        shade_form.setVerticalSpacing(4)
-        shade_form.addRow("σ", self.shade_sigma)
-        shade_form.addRow("Strength", self.shade_strength)
-        layout.addWidget(self.shade_enable)
-        layout.addLayout(shade_form)
 
         self.denoise_enable = QCheckBox("Denoise")
         self.denoise_enable.setToolTip(
@@ -619,22 +652,13 @@ class _SpatialRows(QFrame):
         layout.addWidget(self.denoise_enable)
         layout.addLayout(denoise_form)
 
-        self.shade_enable.setChecked(cfg.shade.enabled)
         self.denoise_enable.setChecked(cfg.denoise.enabled)
-        for widget in (self.shade_enable, self.denoise_enable):
-            widget.toggled.connect(self.sig_changed)
-        for widget in (self.shade_sigma, self.shade_strength,
-                       self.denoise_d, self.denoise_sc, self.denoise_ss):
+        self.denoise_enable.toggled.connect(self.sig_changed)
+        for widget in (self.denoise_d, self.denoise_sc, self.denoise_ss):
             widget.valueChanged.connect(self.sig_changed)
 
     def values(self) -> dict:
-        return {"shade": self._shade(), "denoise": self._denoise()}
-
-    def _shade(self):
-        from talos.cv.preprocess import Shade
-        return Shade(enabled=self.shade_enable.isChecked(),
-                     sigma=float(self.shade_sigma.value()),
-                     strength=float(self.shade_strength.value()))
+        return {"denoise": self._denoise()}
 
     def _denoise(self):
         from talos.cv.preprocess import Denoise
@@ -644,49 +668,10 @@ class _SpatialRows(QFrame):
                        sigma_space=float(self.denoise_ss.value()))
 
     def load(self, cfg: PreprocessConfig) -> None:
-        self.shade_enable.setChecked(cfg.shade.enabled)
-        self.shade_sigma.setValue(cfg.shade.sigma)
-        self.shade_strength.setValue(cfg.shade.strength)
         self.denoise_enable.setChecked(cfg.denoise.enabled)
         self.denoise_d.setValue(cfg.denoise.diameter)
         self.denoise_sc.setValue(cfg.denoise.sigma_color)
         self.denoise_ss.setValue(cfg.denoise.sigma_space)
-
-
-class _ToneRows(QFrame):
-    """The plain point operations. They are all one LUT with the curve, so
-    they cost nothing to leave switched on but the identity."""
-
-    sig_changed = Signal()
-
-    def __init__(self, cfg: PreprocessConfig, parent: QWidget | None = None):
-        super().__init__(parent)
-        layout = QFormLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
-        layout.setVerticalSpacing(4)
-        self.exposure = _spin(cfg.exposure, (0.25, 4.0, 0.05), " ×")
-        self.brightness = _spin(cfg.brightness, (-64.0, 64.0, 1.0))
-        self.contrast = _spin(cfg.contrast, (0.25, 3.0, 0.05))
-        self.gamma = _spin(cfg.gamma, (0.2, 3.0, 0.05))
-        for label, widget in (("Exposure", self.exposure),
-                              ("Brightness", self.brightness),
-                              ("Contrast", self.contrast),
-                              ("Gamma", self.gamma)):
-            layout.addRow(label, widget)
-            widget.valueChanged.connect(self.sig_changed)
-
-    def values(self) -> dict:
-        return {"exposure": float(self.exposure.value()),
-                "brightness": float(self.brightness.value()),
-                "contrast": float(self.contrast.value()),
-                "gamma": float(self.gamma.value())}
-
-    def load(self, cfg: PreprocessConfig) -> None:
-        self.exposure.setValue(cfg.exposure)
-        self.brightness.setValue(cfg.brightness)
-        self.contrast.setValue(cfg.contrast)
-        self.gamma.setValue(cfg.gamma)
 
 
 class IdentifyGroup(QGroupBox):

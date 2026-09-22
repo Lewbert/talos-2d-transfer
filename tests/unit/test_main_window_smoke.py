@@ -1382,19 +1382,28 @@ def test_go_to_sample_submits_arguments_the_driver_accepts(window):
 
 
 def test_the_sample_move_refuses_while_a_job_owns_the_axes(window):
+    """It must SAY why — in the status line, not in a dialog: the operator
+    is looking at the sample, and a modal box between the click and the
+    motion is a click paid every time."""
     scan = _found_sample(window)
     window._state.set_mode("SCAN")
-    from PySide6.QtWidgets import QMessageBox
-
-    seen: list = []
-    original = QMessageBox.information
-    QMessageBox.information = staticmethod(lambda *a, **kw: seen.append(a))
     try:
         scan._on_go_to()
+        assert "in use" in scan.status.text()
     finally:
-        QMessageBox.information = original
-    assert seen, "it must say why, not silently do nothing"
+        window._state.set_mode("MANUAL")
     assert not any(s[1] == "move_rel_um" for s in window._manager.submits)
+
+
+def test_the_sample_move_does_not_ask_first(window):
+    """The confirmation dialog is gone: the move is the button's whole
+    purpose, and the distance is on the map."""
+    scan = _found_sample(window)
+    monkeypatch_target = window._manager
+    monkeypatch_target.submits.clear()
+    scan._on_go_to()
+    assert any(s[1] == "move_rel_um" for s in monkeypatch_target.submits)
+    assert "Moving to sample #" in scan.status.text()
 
 
 def test_selecting_a_table_row_enables_go_to(window):
@@ -1502,3 +1511,144 @@ def test_the_export_summary_does_not_overwrite_the_verdict(window):
     assert scan.status.objectName() == "error"
 
 
+
+
+def test_the_colour_rows_have_sliders_and_the_gates_do_not(window):
+    """The tolerance rows are hunted for by eye while watching the mask, so
+    they get the camera's number-plus-slider treatment; a gate's value is
+    typed once and left, so its rows stay compact."""
+    from talos.cv.identify import SizeStage
+    from talos.ui.widgets.identify_panel import StageEditor
+
+    colour = window._sample_finding.colour_group.editor
+    for name in ("tolerance", "min_saturation", "min_value"):
+        kind, box, slider = colour._editors[name]
+        assert kind == "num"
+        assert slider.minimum() == 0
+        assert slider.maximum() == (100 if name == "tolerance" else 255)
+        assert slider.value() == pytest.approx(round(box.value()))
+
+        # the slider moves the number, and the number moves the slider
+        slider.setValue(slider.minimum())
+        assert box.value() == slider.minimum()
+        box.setValue(box.maximum())
+        assert slider.value() == int(round(box.value()))
+
+    # The row is REGISTERED: ``stage()`` reads the parameters back out of
+    # ``_editors``, so a slider row that skipped it would be a value the
+    # operator sets and the pipeline never sees.
+    colour._editors["tolerance"][1].setValue(42.0)
+    assert colour.stage().tolerance == pytest.approx(42.0)
+
+    # a gate keeps the compact row
+    plain = StageEditor(SizeStage())
+    assert all(len(spec) == 2 for spec in plain._editors.values())
+
+
+# --- the stage origin card (shared with the Navigation tab) ---------------
+
+def test_the_origin_card_follows_the_state(window):
+    """It starts with its two actions disabled: an origin is something the
+    operator MARKS, and a seeded (0, 0) would be the stage's machine origin
+    wearing that label."""
+    group = window._sample_finding.origin_group
+    assert not group.go_btn.isEnabled()
+    assert not group.scan_btn.isEnabled()
+    assert "not set" in group._label.text()
+
+    from talos.models import StagePosition
+
+    window._state.set_stage_origin(StagePosition(x_um=12.5, y_um=-3.0))
+    assert group.go_btn.isEnabled() and group.scan_btn.isEnabled()
+    assert "12.5" in group._label.text() and "-3.0" in group._label.text()
+
+
+def test_the_origin_card_sets_the_shared_origin(window):
+    """ONE origin for both tabs: the card's Set button runs the same handler
+    as the Navigation quick action — so the value, the settings write and
+    the other tab's label cannot disagree.
+
+    The handler also has to WRITE the settings: it used to raise NameError
+    halfway through, which left the origin in memory, never saved, and no
+    log line — a bug that only shows up after a restart.
+    """
+    window._manager.last_position["zolix"] = {
+        "x_um": 111.0, "y_um": -222.0, "r_deg": 0.0,
+        "x_pulses": 1, "y_pulses": 2, "r_pulses": 0}
+    window._sample_finding.origin_group.set_btn.click()
+    assert window._state.stage_origin.x_um == pytest.approx(111.0)
+    assert window._settings.section("origin")["xyr"]["x_um"] \
+        == pytest.approx(111.0)
+    # the Navigation tab's label reads the same state object
+    assert "111.0" in window._navigation.quick_actions._origin_label.text()
+
+    # with no position to store, it says so instead of storing (0, 0)
+    window._state._stage_origin = None
+    window._manager.last_position.clear()
+    window._sample_finding.origin_group.set_btn.click()
+    assert window._state.stage_origin is None
+
+
+def test_go_to_origin_moves_there_at_the_scan_speed(window):
+    from talos.models import StagePosition
+
+    scan = window._sample_finding.scan_panel
+    window._manager.submits.clear()
+    window._manager.last_position["zolix"] = {
+        "x_um": 100.0, "y_um": 200.0, "r_deg": 0.0,
+        "x_pulses": 0, "y_pulses": 0, "r_pulses": 0}
+    window._state.set_stage_origin(StagePosition(x_um=50.0, y_um=100.0))
+    scan.go_to_origin()
+    move = [s for s in window._manager.submits if s[1] == "move_rel_um"]
+    assert len(move) == 1
+    assert move[0][2] == pytest.approx(-50.0)      # dx
+    assert move[0][3] == pytest.approx(-100.0)     # dy
+    assert "the origin" in scan.status.text()
+
+
+def test_scan_from_origin_anchors_the_plan_there_not_at_the_stage(
+        window, monkeypatch):
+    """The requested behaviour, in one test: the origin is the start of the
+    AREA, and the run's first move goes to the first tile's CENTRE — which
+    in the corner modes is inset by half a field of view. Moving to the
+    origin first and scanning from there would put the first frame half a
+    field away from where the operator marked the corner."""
+    from talos.cv.scan import plan_path
+    from talos.models import StagePosition
+
+    scan = window._sample_finding.scan_panel
+    window._manager.last_position["zolix"] = {
+        "x_um": 5000.0, "y_um": 5000.0, "r_deg": 0.0,
+        "x_pulses": 0, "y_pulses": 0, "r_pulses": 0}
+    origin = StagePosition(x_um=-1000.0, y_um=-500.0)
+    window._state.set_stage_origin(origin)
+
+    started: list = []
+    monkeypatch.setattr(scan, "_begin_scan", started.append)
+    scan.scan_from_origin()
+    assert len(started) == 1
+    assert (started[0].x_um, started[0].y_um) == (-1000.0, -500.0)
+
+    # the plan is anchored there, and the first waypoint is inset
+    scan.origin.set_value("corner_fit")
+    params = scan.params_for(origin)
+    fov = scan.fov()
+    first = plan_path(params, fov)[0]
+    assert first.x_um == pytest.approx(-1000.0 + fov[0] / 2)
+    assert first.y_um == pytest.approx(-500.0 + fov[1] / 2)
+
+    # the centre mode keeps waypoint 0 == the origin (that is what centre
+    # means), so the two modes differ in exactly the way described
+    scan.origin.set_value("centre")
+    assert plan_path(scan.params_for(origin), fov)[0].x_um == \
+        pytest.approx(-1000.0)
+
+
+def test_scan_from_origin_says_so_when_nothing_is_marked(window):
+    scan = window._sample_finding.scan_panel
+    window._state._stage_origin = None
+    started: list = []
+    scan._begin_scan = started.append
+    scan.scan_from_origin()
+    assert started == []
+    assert "No stage origin" in scan.status.text()

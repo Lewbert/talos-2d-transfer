@@ -45,7 +45,7 @@ from PySide6.QtWidgets import (
 from talos.cv.identify import IdentifyConfig, sample_hex
 from talos.ui.detect_engine import DetectionEngine
 from talos.ui.widgets.collapsible import CollapsibleGroup
-from talos.ui.widgets.control_groups import CameraGroup
+from talos.ui.widgets.control_groups import CameraGroup, OriginGroup
 from talos.ui.widgets.hardware_strip import parse_focus, parse_zolix
 from talos.ui.widgets.identify_panel import (ColourGroup, IdentifyGroup,
                                              PreprocessGroup)
@@ -70,6 +70,9 @@ class SampleFindingWorkspace(QWidget):
     #: A line for the log (a scan's folder, an export, a failed run). The
     #: main window owns the log panel; this tab just reports.
     sig_log = Signal(str)
+    #: "Store here as the origin" — handled by the main window, because the
+    #: origin is shared with the Navigation tab and persisted with it.
+    sig_set_stage_origin = Signal()
 
     def __init__(self, manager, settings, state, parent: QWidget | None = None,
                  autofocus_service=None, autogain=None,
@@ -127,6 +130,15 @@ class SampleFindingWorkspace(QWidget):
         column = QVBoxLayout(panel)
         column.setContentsMargins(4, 0, 4, 0)
         column.setSpacing(6)
+
+        # The origin card sits ABOVE the colour: it is three buttons and a
+        # line of text, and "scan from the origin" is the entry point to a
+        # session at the bench — mark the spot, then run.
+        self.origin_group = OriginGroup(self._state)
+        self.origin_group.sig_set_origin.connect(self.sig_set_stage_origin)
+        self.origin_group.sig_go_to_origin.connect(self.go_to_origin)
+        self.origin_group.sig_scan_from_origin.connect(self.scan_from_origin)
+        column.addWidget(self.origin_group)
 
         # Quick access, pinned: the one colour that drives two things.
         self.colour_group = ColourGroup(settings)
@@ -437,6 +449,16 @@ class SampleFindingWorkspace(QWidget):
     def update_telem(self, key: str, payload: dict) -> None:
         self.scan_panel.update_telem(key, payload)
         self._note_motion(key, payload)
+
+    # ------------------------------------------------------------------
+    # the stage origin (shared with the Navigation tab)
+    # ------------------------------------------------------------------
+
+    def go_to_origin(self) -> None:
+        self.scan_panel.go_to_origin()
+
+    def scan_from_origin(self) -> None:
+        self.scan_panel.scan_from_origin()
 
     # ------------------------------------------------------------------
     # what the processed views may show

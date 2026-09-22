@@ -116,6 +116,76 @@ class QuickActionsGroup(QGroupBox):
             " · ".join(parts) if parts else "origins: not set")
 
 
+class OriginGroup(QGroupBox):
+    """The software stage origin, and the two things worth doing with it.
+
+    The same origin the Navigation tab sets — one value in ``AppState``,
+    one copy in the settings — so a place marked on one tab is the place
+    the other tab means. It lives in the left column of Sample Finding
+    because that is where this tab's quick access already is, and because
+    "scan from the origin" is the whole reason the origin exists.
+
+    The widget owns no behaviour beyond the label: the buttons emit, and
+    the panel and the main window decide what each one means.
+    """
+
+    sig_set_origin = Signal()
+    sig_go_to_origin = Signal()
+    sig_scan_from_origin = Signal()
+
+    def __init__(self, state, parent: QWidget | None = None):
+        super().__init__("Stage origin", parent)
+        self._state = state
+        layout = QVBoxLayout(self)
+        layout.setSpacing(4)
+
+        row = QHBoxLayout()
+        row.setSpacing(4)
+        self.set_btn = QPushButton("Set origin")
+        self.set_btn.setObjectName("qa")
+        self.set_btn.setToolTip(
+            "Store the current XYR position as the software origin. The\n"
+            "Navigation tab sets and shows the same one.")
+        self.set_btn.clicked.connect(self.sig_set_origin.emit)
+        row.addWidget(self.set_btn)
+        self.go_btn = QPushButton("Go to origin")
+        self.go_btn.setObjectName("compact")
+        self.go_btn.setToolTip("Move the stage to the stored origin, at the "
+                               "scan's speed")
+        self.go_btn.clicked.connect(self.sig_go_to_origin.emit)
+        row.addWidget(self.go_btn)
+        layout.addLayout(row)
+
+        self.scan_btn = QPushButton("Scan from origin")
+        self.scan_btn.setObjectName("qa_primary")
+        self.scan_btn.setToolTip(
+            "Run the scan this panel is set up for, anchored at the origin\n"
+            "instead of at the stage. The first move goes to the first\n"
+            "tile's centre — which in the corner origin modes is inset half\n"
+            "a field of view, not the origin itself.")
+        self.scan_btn.clicked.connect(self.sig_scan_from_origin.emit)
+        layout.addWidget(self.scan_btn)
+
+        self._label = QLabel("origin: not set")
+        self._label.setObjectName("dim")
+        self._label.setWordWrap(True)
+        layout.addWidget(self._label)
+        if state is not None:
+            state.sig_stage_origin_changed.connect(
+                lambda _p: self.refresh())
+        self.refresh()
+
+    def refresh(self) -> None:
+        origin = getattr(self._state, "stage_origin", None)
+        if origin is None:
+            self._label.setText("origin: not set")
+        else:
+            self._label.setText(f"origin: {origin.x_um:.1f}, "
+                                f"{origin.y_um:.1f} µm")
+        self.go_btn.setEnabled(origin is not None)
+        self.scan_btn.setEnabled(origin is not None)
+
+
 class CaptureGroup(QGroupBox):
     """Capture settings: save directory, filename pattern, format and
     capture resolution (the live view stays 1080p either way)."""

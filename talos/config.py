@@ -77,6 +77,16 @@ _DEAD_KEYS: dict[str, set[str]] = {
     # nothing.
     "scan": {"min_flake_area_um2", "default_dir", "fov_auto", "fov_x_um",
              "fov_y_um", "slow_speed", "export_overview"},
+    # v9 continued: pre-processing is down to the two stages that earn
+    # their place. The tone operations (exposure/brightness/contrast/gamma)
+    # were a second set of controls for what the camera's own exposure,
+    # gain and white balance already do — they made every bench session a
+    # question about which layer was being tuned. The shade correction
+    # flattened illumination this bench does not have unevenly. What is
+    # left is the local-contrast curve and the denoise, in that order.
+    # A vignette correction is the version of the shade stage worth having
+    # if the field ever needs one; it is not this.
+    "preprocess": {"exposure", "brightness", "contrast", "gamma", "shade"},
 }
 
 

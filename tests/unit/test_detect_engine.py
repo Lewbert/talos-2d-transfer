@@ -16,18 +16,23 @@ import pytest
 from PySide6.QtWidgets import QApplication
 
 from talos.cv.identify import IdentifyConfig, ColourStage
-from talos.cv.preprocess import LocalContrast, PreprocessConfig
+from talos.cv.preprocess import LocalContrast, PreprocessConfig, build_lut
 from talos.models import ObjectiveCalibration
 from talos.ui.detect_engine import DetectJob, _DetectWorker
 
 CALIB = ObjectiveCalibration(objective_id=0, um_per_px_x=0.2, um_per_px_y=0.2)
 
-#: A blob that is NOT the picked colour until the chain runs on it: an
-#: exposure of 2.0 turns (100, 60, 60) into (200, 120, 120), which is what
-#: the operator picked.
+#: The frame: a 40 x 40 blob on a flat substrate. The blob is NOT the
+#: picked colour until the chain runs on it — the curve is centred on the
+#: substrate, which leaves the substrate pinned and pushes the blob 45 DN
+#: away from what it was — so finding it at all proves the chain ran
+#: before the mask, on the same pixels the mask then searched.
+SUBSTRATE = (60, 90, 120)
 RAW_BLOB = (100, 60, 60)
-FILTERED_BLOB = (200, 120, 120)
-PICKED = "#c87878"
+
+#: The curve, and the colour the blob comes out as. Read from the LUT the
+#: worker itself builds, so the test cannot drift from the implementation.
+CURVE_GAIN, CURVE_WIDTH = 4.0, 64.0
 
 
 @pytest.fixture(scope="module")
@@ -36,16 +41,32 @@ def qapp():
 
 
 def _frame() -> np.ndarray:
-    img = np.full((240, 320, 3), (60, 90, 120), np.uint8)
+    img = np.full((240, 320, 3), SUBSTRATE, np.uint8)
     img[80:120, 100:140] = RAW_BLOB
     return img
+
+
+def _preprocess() -> PreprocessConfig:
+    cfg = PreprocessConfig(enabled=True)
+    cfg.local = LocalContrast(enabled=True, gain=CURVE_GAIN,
+                              width=CURVE_WIDTH)
+    return cfg
+
+
+def _filtered_blob() -> tuple:
+    lut = build_lut(_preprocess(), SUBSTRATE)
+    return tuple(int(lut[channel][RAW_BLOB[channel]]) for channel in range(3))
+
+
+def _picked() -> str:
+    return "#%02x%02x%02x" % _filtered_blob()
 
 
 def _config() -> IdentifyConfig:
     stages = IdentifyConfig().stages
     for index, stage in enumerate(stages):
         if stage.NAME == "colour":
-            stages[index] = ColourStage(hex_color=PICKED, tolerance=10.0)
+            stages[index] = ColourStage(hex_color=_picked(), tolerance=10.0)
     return IdentifyConfig(stages=stages)
 
 
@@ -71,10 +92,10 @@ def _run(qapp, frame: np.ndarray | None = None, **job_kw):
 
 
 def test_the_chain_runs_before_the_mask(qapp):
-    """The blob only becomes the picked colour AFTER the exposure is
-    applied — so finding it at all proves the ordering."""
+    """The blob only reaches the picked colour AFTER the curve is applied —
+    so finding it at all proves the ordering."""
     _index, result, _pre, _overlay = _run(
-        qapp, preprocess=PreprocessConfig(enabled=True, exposure=2.0))
+        qapp, preprocess=_preprocess(), colour=SUBSTRATE)
     assert len(result.candidates) == 1
     cand = result.candidates[0]
     assert cand.x_px == pytest.approx(120.0, abs=4)
@@ -97,7 +118,7 @@ def test_the_two_views_are_built_from_the_preprocessed_layer(qapp):
     projected onto it. A darker filter, a brighter outline: if the two
     disagreed, the outlines would sit on the wrong pixels."""
     _index, _result, preprocessed, overlay = _run(
-        qapp, preprocess=PreprocessConfig(enabled=True, exposure=2.0))
+        qapp, preprocess=_preprocess(), colour=SUBSTRATE)
     assert overlay is not None
     assert overlay.shape == preprocessed.shape
     # inside the match the pre-processed pixels survive untouched
@@ -113,12 +134,12 @@ def test_the_curve_does_not_lose_the_colour_it_is_centred_on(qapp):
     the curve moved the picked value, switching it on would make the mask
     miss the very flake the operator pointed at — so the sample must
     survive its own filter."""
+    picked = _filtered_blob()
     img = _frame()
-    img[80:120, 100:140] = FILTERED_BLOB          # already the picked colour
-    pre = PreprocessConfig(enabled=True)
-    pre.local = LocalContrast(enabled=True, gain=4.0, width=24.0)
+    img[80:120, 100:140] = picked                 # already the picked colour
+    pre = _preprocess()
     _index, result, _pre, _overlay = _run(qapp, frame=img, preprocess=pre,
-                                          colour=FILTERED_BLOB)
+                                          colour=picked)
     assert len(result.candidates) == 1
 
 
@@ -175,7 +196,7 @@ def test_the_worker_emits_both_views_from_one_transform(qapp):
     """Both processed views and the mask come from ONE array, so the
     operator can only tune against pixels the pipeline also saw."""
     _index, result, preprocessed, overlay = _run(
-        qapp, preprocess=PreprocessConfig(enabled=True, exposure=2.0))
+        qapp, preprocess=_preprocess(), colour=SUBSTRATE)
     assert preprocessed is not None and overlay is not None
     assert result.mask is not None
     # the overlay is the pre-processed frame, annotated
@@ -183,8 +204,7 @@ def test_the_worker_emits_both_views_from_one_transform(qapp):
     # a tile job asks for no preview at all (render=False): the scan does
     # not pay for images it will not show
     _index, _result, tile_pre, tile_overlay = _run(
-        qapp, preprocess=PreprocessConfig(enabled=True, exposure=2.0),
-        render=False)
+        qapp, preprocess=_preprocess(), colour=SUBSTRATE, render=False)
     assert tile_overlay is None
     assert tile_pre is not None          # the layer is still handed back
 

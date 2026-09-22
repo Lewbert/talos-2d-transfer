@@ -13,20 +13,27 @@ mosaic are all the raw capture. That is the whole overlay rule — a scale
 bar, a timestamp or a crosshair must not be able to enter the pipeline,
 so nothing that could draw is allowed in here.
 
-**Order: spatial first, then the curves.**
-``shade -> denoise -> (exposure, brightness, contrast, gamma, local contrast)``.
-This is not arbitrary. The local-contrast curve multiplies small
-differences around the picked colour — including the differences that
-illumination unevenness and sensor noise put there. Flattening the
-illumination and smoothing the noise *before* the curve is what makes the
-curve multiply signal rather than lighting.
+**Two stages, and both of them earn their place.** ``denoise -> local
+contrast``, in that order, for the reason the curve exists at all: it
+multiplies small differences around the picked colour, and it would
+multiply the sensor noise just as eagerly. Smoothing first is what makes
+the curve multiply signal.
 
-The point operations all collapse into three 256-entry lookup tables and
-one :func:`cv2.LUT` call, which is why they are cheap enough to run on
-every previewed frame. The spatial stages are not, which is why
-:func:`apply` runs on the detection worker and never on the GUI thread
-(see ``ui/detect_engine.py``): a preview that lags is recoverable, a
-camera capture sequence that waits on a bilateral filter is not.
+What is NOT here is as deliberate. Tone operations (exposure, brightness,
+contrast, gamma) were removed in 2026-09-23: the camera's own exposure,
+gain and white balance already set the frame, and a second set of them
+behind the operator's back made every bench session a question about
+which layer was being tuned. Illumination flattening went the same way —
+this bench's lighting is even enough that the correction had nothing to
+correct — with a note that vignette correction is the version of it worth
+having if the field ever needs one.
+
+The curve is a 256-entry lookup table per channel and one :func:`cv2.LUT`
+call, which is why it is cheap enough to run on every previewed frame.
+Denoise is not, which is why :func:`apply` runs on the detection worker
+and never on the GUI thread (see ``ui/detect_engine.py``): a preview that
+lags is recoverable, a camera capture sequence that waits on a bilateral
+filter is not.
 """
 
 from __future__ import annotations
@@ -50,12 +57,6 @@ LUT_SIZE = 256
 #: Bounds for every tunable, shared by ``from_dict`` and the panel so a
 #: hand-edited settings file and a slider cannot disagree about the range.
 RANGES = {
-    "exposure": (0.25, 4.0),
-    "brightness": (-64.0, 64.0),
-    "contrast": (0.25, 3.0),
-    "gamma": (0.2, 3.0),
-    "shade_sigma": (4.0, 200.0),
-    "shade_strength": (0.0, 1.0),
     "denoise_diameter": (1.0, 25.0),
     "denoise_sigma_color": (0.0, 150.0),
     "denoise_sigma_space": (1.0, 25.0),
@@ -329,28 +330,6 @@ class LocalContrast:
 
 
 @dataclass
-class Shade:
-    """Illumination flattening: divide by a heavily blurred copy.
-
-    The useful half of the identification chain's old Contrast stage. It
-    lives here because its job is not segmentation but *preparation* —
-    removing a gradient the curve would otherwise amplify as eagerly as
-    it amplifies a flake.
-
-    ``sigma`` is in pixels of whatever frame it is given, so the live
-    preview's 50 % scale makes the same sigma cover twice the physical
-    distance it covers on a full-resolution tile. Tune it on the tiles
-    the way the results are produced.
-    """
-
-    enabled: bool = False
-    sigma: float = 60.0
-    strength: float = 1.0
-
-    RANGE_KEYS = {"sigma": "shade_sigma", "strength": "shade_strength"}
-
-
-@dataclass
 class Denoise:
     """Edge-preserving smoothing, for the noise the curve would amplify.
 
@@ -382,12 +361,7 @@ class PreprocessConfig:
     """
 
     enabled: bool = False
-    exposure: float = 1.0
-    brightness: float = 0.0
-    contrast: float = 1.0
-    gamma: float = 1.0
     local: LocalContrast = field(default_factory=LocalContrast)
-    shade: Shade = field(default_factory=Shade)
     denoise: Denoise = field(default_factory=Denoise)
 
     # -- serialisation (the bundled defaults ARE the schema) ------------
@@ -406,13 +380,7 @@ class PreprocessConfig:
         if not isinstance(data, dict):
             return cfg
         cfg.enabled = _as_bool(data.get("enabled"), cfg.enabled)
-        cfg.exposure = _as_float(data.get("exposure"), cfg.exposure, "exposure")
-        cfg.brightness = _as_float(data.get("brightness"), cfg.brightness,
-                                   "brightness")
-        cfg.contrast = _as_float(data.get("contrast"), cfg.contrast, "contrast")
-        cfg.gamma = _as_float(data.get("gamma"), cfg.gamma, "gamma")
         cfg.local = _as_section(LocalContrast, data.get("local"))
-        cfg.shade = _as_section(Shade, data.get("shade"))
         cfg.denoise = _as_section(Denoise, data.get("denoise"))
         return cfg
 
@@ -430,21 +398,13 @@ class PreprocessConfig:
                 and centre_rgb is not None)
 
     def points_identity(self, centre_rgb=None) -> bool:
-        """True when the point chain changes nothing (spatial stages
-        excluded — they are never the identity by accident)."""
-        return (
-            not self.local_active(centre_rgb)
-            and abs(self.exposure - 1.0) < 1e-9
-            and abs(self.brightness) < 1e-9
-            and abs(self.contrast - 1.0) < 1e-9
-            and abs(self.gamma - 1.0) < 1e-9
-        )
+        """True when the point chain changes nothing."""
+        return not self.local_active(centre_rgb)
 
     def is_identity(self, centre_rgb=None) -> bool:
         """True when :func:`apply` would return the frame unchanged."""
         return (not self.enabled
                 or (self.points_identity(centre_rgb)
-                    and not self.shade.enabled
                     and not self.denoise.enabled))
 
 
@@ -487,54 +447,29 @@ def _as_section(cls, data):
 # The point operations, as one LUT per channel
 # ----------------------------------------------------------------------
 
-def _point_lut(cfg: PreprocessConfig) -> np.ndarray:
-    """The four simple point operations as a (3, 256) uint8 table.
-
-    Evaluated in float and rounded ONCE, at the end: rounding after each
-    stage would compound the error of four roundings into a curve that no
-    longer matches its own parameters.
-    """
-    v = np.arange(LUT_SIZE, dtype=np.float64)
-    out = v * float(cfg.exposure)
-    out = out + float(cfg.brightness)
-    out = DN_MAX / 2.0 + (out - DN_MAX / 2.0) * float(cfg.contrast)
-    gamma = float(cfg.gamma)
-    if gamma > 0 and abs(gamma - 1.0) > 1e-9:
-        out = DN_MAX * np.power(np.clip(out, 0.0, DN_MAX) / DN_MAX,
-                                1.0 / gamma)
-    out = np.clip(np.round(out), 0, DN_MAX).astype(np.uint8)
-    # uint8 LUTs are indexed by pixel value, so they must stay sorted by
-    # construction; a non-monotone exposure/contrast pair is still
-    # monotone, but clamp anyway for the same belt-and-braces reason.
-    return np.stack([out, out, out])
-
-
 def build_lut(cfg: PreprocessConfig,
               centre_rgb: tuple[int, int, int] | None = None) -> np.ndarray:
-    """The whole point chain as a (3, 256) uint8 table, RGB order.
+    """The point chain as a (3, 256) uint8 table, RGB order.
 
     Channel-major — row 0 is red's 256 outputs — because that is the shape
-    the composition below needs and the shape a reader can check by
-    indexing. :func:`cv_lut` converts it to the one OpenCV wants; the two
-    are NOT the same memory layout, and reshaping between them without the
-    transpose silently applies red's curve to green.
+    a reader can check by indexing. :func:`cv_lut` converts it to the one
+    OpenCV wants; the two are NOT the same memory layout, and reshaping
+    between them without the transpose silently applies red's curve to
+    green.
 
-    The local-contrast curve is composed **last** — its input is the
-    output of the simple operations — so its fixed point lands on the
-    value the dropper actually sampled, which is a value in *output*
-    space. Composing it first would put the steepest part of the curve
-    somewhere the operator never pointed at.
+    The curve is the only point stage left, so this is the identity ramp
+    when it is off (or when no colour has been picked yet — a gain with no
+    centre is still the identity, which is what lets the panel enable the
+    curve before the operator has chosen anything).
     """
-    base = _point_lut(cfg)
     gain = float(cfg.local.gain)
     if not cfg.local.enabled or gain <= 1.0 + 1e-9 or centre_rgb is None:
-        return base
-    curves = np.stack([
+        ramp = np.arange(LUT_SIZE, dtype=np.uint8)
+        return np.stack([ramp, ramp, ramp])
+    return np.stack([
         channel_curve(float(centre_rgb[channel]), gain, cfg.local.width)
         for channel in range(3)
     ])
-    rows = np.arange(3)[:, None]
-    return curves[rows, base]
 
 
 # ----------------------------------------------------------------------
@@ -551,25 +486,6 @@ def cv_lut(lut: np.ndarray) -> np.ndarray:
     plausible, wrongly-tinted photograph.
     """
     return np.ascontiguousarray(lut.T).reshape(1, LUT_SIZE, 3)
-
-
-def shade_correct(img: np.ndarray, sigma: float = 60.0,
-                  strength: float = 1.0) -> np.ndarray:
-    """Divide by a heavily blurred copy of the frame.
-
-    Each channel keeps its own mean, so the correction moves illumination
-    without moving colour — the picked colour has to survive it, and a
-    single global reference would tint the whole frame by the ratio of
-    the channel means.
-    """
-    work = img.astype(np.float32)
-    background = cv2.GaussianBlur(work, (0, 0), max(1.0, float(sigma)))
-    flat = work / np.maximum(background, 1.0)
-    reference = work.reshape(-1, work.shape[2]).mean(axis=0)
-    flat = flat * reference
-    blend = float(np.clip(strength, 0.0, 1.0))
-    out = work * (1.0 - blend) + flat * blend
-    return np.clip(out, 0, DN_MAX).astype(np.uint8)
 
 
 def denoise(img: np.ndarray, diameter: int = 7, sigma_color: float = 40.0,
@@ -593,8 +509,6 @@ def apply(img: np.ndarray, cfg: PreprocessConfig | None,
     if img is None or cfg is None or cfg.is_identity(centre_rgb):
         return img
     out = img
-    if cfg.shade.enabled:
-        out = shade_correct(out, cfg.shade.sigma, cfg.shade.strength)
     if cfg.denoise.enabled:
         out = denoise(out, cfg.denoise.diameter, cfg.denoise.sigma_color,
                       cfg.denoise.sigma_space)
@@ -610,7 +524,6 @@ __all__ = [
     "Denoise",
     "LocalContrast",
     "PreprocessConfig",
-    "Shade",
     "apply",
     "build_lut",
     "channel_curve",
@@ -619,5 +532,4 @@ __all__ = [
     "denoise",
     "effective_gain",
     "effective_width",
-    "shade_correct",
 ]

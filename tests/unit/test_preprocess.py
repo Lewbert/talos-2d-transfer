@@ -18,21 +18,22 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
+import cv2
+
 from talos.cv.preprocess import (
     DN_MAX,
     MAX_FLAT_RUN,
     Denoise,
     LocalContrast,
     PreprocessConfig,
-    Shade,
     apply,
     build_lut,
     channel_curve,
     curve_values,
+    cv_lut,
     denoise,
     effective_gain,
     effective_width,
-    shade_correct,
 )
 
 CENTRES = (1.0, 8.0, 32.0, 80.0, 128.0, 200.0, 250.0, 254.0)
@@ -189,26 +190,10 @@ def test_the_curve_does_nothing_far_from_the_pick():
 # The point chain
 # ----------------------------------------------------------------------
 
-def test_the_point_ops_are_identity_by_default():
+def test_the_point_chain_is_the_identity_by_default():
     cfg = PreprocessConfig(enabled=True)
     assert cfg.points_identity() is True
     assert np.array_equal(build_lut(cfg), np.tile(np.arange(256), (3, 1)))
-
-
-def test_exposure_brightness_contrast_and_gamma():
-    cfg = PreprocessConfig(enabled=True, brightness=10.0)
-    lut = build_lut(cfg)[0]
-    assert lut[0] == 10 and lut[200] == 210
-
-    cfg = PreprocessConfig(enabled=True, contrast=0.5)
-    lut = build_lut(cfg)[0]
-    assert lut[128] == 128                      # the pivot is unchanged
-    assert lut[228] == pytest.approx(178, abs=1)  # 128 + 100*0.5
-
-    cfg = PreprocessConfig(enabled=True, gamma=2.0)
-    lut = build_lut(cfg)[0]
-    assert lut[0] == 0 and lut[255] == 255
-    assert lut[64] > 64                          # gamma > 1 lifts midtones
 
 
 def test_the_lut_is_per_channel_and_rgb_ordered():
@@ -222,16 +207,20 @@ def test_the_lut_is_per_channel_and_rgb_ordered():
     assert not np.array_equal(lut[2], np.arange(256))
 
 
-def test_the_curve_is_composed_after_the_point_ops():
+def test_the_curve_is_applied_after_the_spatial_stage():
     """The pick is a value the operator read off the PRE-PROCESSED frame,
-    so the curve has to be applied to the output of the point chain — not
-    fed the raw input and told about it."""
-    cfg = PreprocessConfig(enabled=True, brightness=20.0)
+    so the curve has to be applied to the output of the spatial stage —
+    not fed the raw frame and told about it. Denoise is that stage now
+    (the tone operations were removed in 2026-09-23), and the property is
+    the same one: what the LUT sees is what the operator saw."""
+    cfg = PreprocessConfig(enabled=True)
     cfg.local = LocalContrast(enabled=True, gain=3.0, width=8.0)
-    lut = build_lut(cfg, centre_rgb=(170, 170, 170))
-    # brightness moves 150 to 170 BEFORE the curve; the curve's fixed
-    # point is at 170, so 150 must come back out as 170.
-    assert lut[0][150] == 170
+    cfg.denoise = Denoise(enabled=True, diameter=5, sigma_color=40.0,
+                          sigma_space=5.0)
+    img = _frame(3)
+    expected = cv2.LUT(denoise(img, 5, 40.0, 5.0),
+                       cv_lut(build_lut(cfg, (128, 128, 128))))
+    assert np.array_equal(apply(img, cfg, (128, 128, 128)), expected)
 
 
 # ----------------------------------------------------------------------
@@ -264,9 +253,8 @@ def test_a_gain_with_no_colour_picked_is_still_identity():
 
 def test_apply_keeps_the_shape_and_dtype():
     img = _frame()
-    cfg = PreprocessConfig(enabled=True, brightness=5.0, gamma=1.4)
+    cfg = PreprocessConfig(enabled=True)
     cfg.local = LocalContrast(enabled=True, gain=3.0, width=16.0)
-    cfg.shade = Shade(enabled=True, sigma=8.0, strength=0.5)
     cfg.denoise = Denoise(enabled=True, diameter=3)
     out = apply(img, cfg, centre_rgb=(128, 128, 128))
     assert out.shape == img.shape and out.dtype == np.uint8
@@ -279,12 +267,8 @@ def test_apply_maps_every_channel_by_its_own_curve():
     checking actual pixel values catches it — the shape checks did not.
     """
     img = np.array([[[10, 20, 30], [250, 200, 150]]], np.uint8)
-    cfg = PreprocessConfig(enabled=True, brightness=5.0)
-    out = apply(img, cfg)
-    assert out.tolist() == [[[15, 25, 35], [255, 205, 155]]]
-
-    # and per-channel, with a curve on one channel only: the middle pixel
-    # of a per-channel table must survive, and the others must not move
+    # per-channel, with a curve on one channel only: the picked pixel must
+    # survive, and the other must move
     cfg = PreprocessConfig(enabled=True)
     cfg.local = LocalContrast(enabled=True, gain=4.0, width=8.0)
     lut = build_lut(cfg, centre_rgb=(10, 20, 30))
@@ -297,32 +281,15 @@ def test_apply_maps_every_channel_by_its_own_curve():
 def test_apply_never_mutates_the_input():
     img = _frame(3)
     before = img.copy()
-    cfg = PreprocessConfig(enabled=True, exposure=2.0)
-    apply(img, cfg)
+    cfg = PreprocessConfig(enabled=True)
+    cfg.local = LocalContrast(enabled=True, gain=3.0, width=8.0)
+    apply(img, cfg, centre_rgb=(128, 128, 128))
     assert np.array_equal(img, before)
 
 
 # ----------------------------------------------------------------------
-# The spatial stages
+# The spatial stage
 # ----------------------------------------------------------------------
-
-def test_shade_correct_keeps_each_channel_mean():
-    """The correction moves illumination, not colour — a single global
-    reference would tint the frame by the ratio of the channel means."""
-    img = _frame(7)
-    out = shade_correct(img, sigma=6.0, strength=1.0)
-    assert out.dtype == np.uint8 and out.shape == img.shape
-    assert np.allclose(out.reshape(-1, 3).mean(axis=0),
-                       img.reshape(-1, 3).mean(axis=0), rtol=0.05)
-
-
-def test_shade_correct_flattens_a_gradient():
-    ramp = np.tile(np.linspace(40, 220, 64, dtype=np.uint8), (32, 1))
-    img = np.stack([ramp] * 3, axis=-1)
-    out = shade_correct(img, sigma=10.0, strength=1.0)
-    column = out[16, :, 0].astype(float)
-    assert column.std() < img[16, :, 0].std() * 0.5
-
 
 def test_denoise_smooths_noise_but_keeps_an_edge():
     rng = np.random.default_rng(11)
@@ -345,10 +312,8 @@ def test_denoise_smooths_noise_but_keeps_an_edge():
 # ----------------------------------------------------------------------
 
 def test_round_trip_through_dict():
-    cfg = PreprocessConfig(enabled=True, exposure=1.5, brightness=-4.0,
-                           contrast=1.2, gamma=0.8)
+    cfg = PreprocessConfig(enabled=True)
     cfg.local = LocalContrast(enabled=True, gain=4.0, width=12.0)
-    cfg.shade = Shade(enabled=True, sigma=30.0, strength=0.5)
     cfg.denoise = Denoise(enabled=True, diameter=9, sigma_color=50.0,
                           sigma_space=6.0)
     again = PreprocessConfig.from_dict(cfg.to_dict())
@@ -362,17 +327,30 @@ def test_from_dict_is_forgiving():
     path, exactly like IdentifyConfig.from_dict."""
     assert PreprocessConfig.from_dict(None) == PreprocessConfig()
     assert PreprocessConfig.from_dict("nonsense") == PreprocessConfig()
-    assert PreprocessConfig.from_dict({"exposure": "loud"}).exposure == 1.0
-    assert PreprocessConfig.from_dict({"exposure": 99.0}).exposure == 4.0
-    assert PreprocessConfig.from_dict({"brightness": -999}).brightness == -64.0
     assert PreprocessConfig.from_dict({"local": {"gain": 1e9}}).local.gain == 8.0
     assert PreprocessConfig.from_dict({"denoise": {"diameter": 3.7}}).denoise.diameter == 4
-    assert PreprocessConfig.from_dict({"shade": {}}).shade.enabled is False
     assert PreprocessConfig.from_dict({"enabled": True}).enabled is True
 
 
 def test_from_dict_ignores_booleans_where_numbers_are_expected():
-    assert PreprocessConfig.from_dict({"exposure": True}).exposure == 1.0
+    assert PreprocessConfig.from_dict({"local": {"gain": True}}).local.gain \
+        == LocalContrast().gain
+
+
+def test_a_removed_stage_in_a_stored_file_is_ignored():
+    """The tone operations and the shade correction were dropped in
+    2026-09-23. A settings file that still carries them (or the sections
+    they lived in) must load as if they were never there — the migration
+    drops the keys, and even if one survived it means nothing here."""
+    cfg = PreprocessConfig.from_dict({
+        "enabled": True, "exposure": 2.0, "brightness": 20.0,
+        "contrast": 0.5, "gamma": 2.0,
+        "shade": {"enabled": True, "sigma": 30.0},
+        "local": {"enabled": True, "gain": 3.0},
+    })
+    assert cfg.enabled is True
+    assert cfg.local.enabled is True and cfg.local.gain == 3.0
+    assert not hasattr(cfg, "exposure") and not hasattr(cfg, "shade")
 
 
 def test_a_missing_section_keeps_the_defaults():
