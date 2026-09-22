@@ -346,19 +346,25 @@ class ScanPanel(QWidget):
         row.addWidget(self.go_origin_btn, 1)
         layout.addLayout(row)
 
+        # The readout and *Set origin* share the rows' 2:1 split, so the
+        # three buttons stack in one column: same width, same height, same
+        # weight. The button was a "compact" one — the size meant for a
+        # bare "…" — which made the smallest control in the card the one
+        # that WRITES something, and left it out of line with *Abort* and
+        # *Go to origin* above it.
         row = QHBoxLayout()
         row.setSpacing(6)
         self.origin_label = QLabel("origin: not set")
         self.origin_label.setObjectName("dim")
         self.origin_label.setWordWrap(True)
-        row.addWidget(self.origin_label, 1)
+        row.addWidget(self.origin_label, 2)
         self.set_origin_btn = QPushButton("Set origin")
-        self.set_origin_btn.setObjectName("compact")
+        self.set_origin_btn.setObjectName("qa")
         self.set_origin_btn.setToolTip(
             "Store the current XYR position as the origin. The Navigation\n"
             "tab sets and shows the same one.")
         self.set_origin_btn.clicked.connect(self.sig_set_origin.emit)
-        row.addWidget(self.set_origin_btn)
+        row.addWidget(self.set_origin_btn, 1)
         layout.addLayout(row)
 
         self.progress = QProgressBar()
