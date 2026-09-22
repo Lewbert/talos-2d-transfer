@@ -74,19 +74,31 @@ def test_y_grows_downwards():
     assert y_small < y_large
 
 
-def test_a_new_area_drops_the_tiles_but_the_same_area_keeps_them(qapp):
-    """A finished run must not erase what it captured — the window
-    re-states the plan when the job ends."""
+def test_a_finished_run_survives_the_plan_being_re_stated_and_edited(qapp):
+    """The tiles are the record of the run that HAPPENED; the plan is a
+    preview of one that might. Editing the area after a scan used to wipe
+    the mosaic the operator was reading samples off, and because the plan's
+    origin follows the stage, so did the stage simply coming back from a
+    run with a pulse of readback noise in where it came back to."""
     widget = ScanMapWidget()
     widget.set_plan(_plan())
     widget.add_tile(ScanMapTile(index=0, x_um=0.0, y_um=0.0))
     widget.set_markers([ScanMapMarker(x_um=0.0, y_um=0.0, label="1")])
     assert len(widget._tiles) == 1 and widget.marker_count == 1
 
-    widget.set_plan(_plan())                      # identical: kept
+    widget.set_plan(_plan())                      # identical
     assert len(widget._tiles) == 1 and widget.marker_count == 1
 
-    widget.set_plan(_plan(width_um=8000.0))       # a new area: dropped
+    widget.set_plan(_plan(width_um=8000.0))       # a new area: STILL kept
+    assert len(widget._tiles) == 1 and widget.marker_count == 1
+
+    # ... and the panel moves the plan's origin when the stage has moved,
+    # which is the same kind of change
+    widget.set_plan(_plan(x0_um=1234.0))
+    assert len(widget._tiles) == 1
+
+    # only an explicit clear takes them away
+    widget.clear_tiles()
     assert not widget._tiles and widget.marker_count == 0
 
 
@@ -287,10 +299,12 @@ def test_the_box_follows_the_tile_a_run_is_capturing(qapp):
     assert widget._active_tile is None
 
 
-def test_a_new_plan_drops_the_tile_the_box_was_marking(qapp):
+def test_a_new_plan_keeps_the_box_the_run_was_marking(qapp):
+    """The tile marker belongs to the run too, and the plan is re-stated
+    around it (the panel latches the run's origin for exactly this)."""
     widget = ScanMapWidget()
     widget.resize(800, 400)
     widget.set_plan(_plan())
     widget.set_active_tile(1500.0, 700.0)
     widget.set_plan(_plan(width_um=3000.0))
-    assert widget._highlight() is None
+    assert widget._highlight() == (1500.0, 700.0, "tile")

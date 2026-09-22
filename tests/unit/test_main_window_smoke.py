@@ -745,12 +745,60 @@ def test_scan_progress_and_tiles_reach_the_map(window):
     assert scan.map._tiles[1].x_um == 1500.0
     assert scan._scan_tiles[0] == (1000.0, 2000.0)
     assert "2 tiles" in scan.map._caption
-    # re-stating the SAME plan keeps them (a finished run must not erase
-    # what it captured), but a genuinely new area drops them
+    # The mosaic survives everything except a new run or an explicit clear:
+    # after a scan it is what the operator reads samples off, and the plan
+    # around it is only a preview of the next one.
     scan.map.set_plan(scan.map._plan)
     assert len(scan.map._tiles) == 2
-    scan.width.setValue(scan.width.value() * 2)
+    scan.width.setValue(scan.width.value() * 2)          # a new area
+    assert len(scan.map._tiles) == 2, "the finished run's mosaic was wiped"
+    scan.refresh_plan()
+    assert len(scan.map._tiles) == 2
+    scan.clear_results()                                  # the operator's act
     assert not scan.map._tiles
+
+
+def test_a_finished_run_keeps_its_mosaic_when_the_stage_has_moved(window):
+    """Regression, reported from the bench: after a scan the map came back
+    empty. The plan's origin is the live stage position, a run ends with
+    the stage back at the start (or at the last tile), and a pulse of
+    readback noise in where it ended was enough to change the plan's
+    identity — which dropped the tiles with it. The plan is now anchored to
+    the run's origin while its results are on the map."""
+    import numpy as np
+
+    from talos.models import StagePosition
+
+    scan = window._sample_finding.scan_panel
+    start = StagePosition(x_um=-1000.0, y_um=-500.0, r_deg=0.0)
+    window._manager.last_position["zolix"] = {
+        "x_um": start.x_um, "y_um": start.y_um, "r_deg": 0.0,
+        "x_pulses": 0, "y_pulses": 0, "r_pulses": 0}
+    scan._scan_tiles.clear()
+    scan._scan_hits.clear()
+    scan._origin = start
+    scan.refresh_plan()
+    scan._on_tile(0, -1000.0, -500.0, np.zeros((8, 16, 3), np.uint8))
+    scan._on_tile(1, -500.0, -500.0, np.zeros((8, 16, 3), np.uint8))
+    assert len(scan.map._tiles) == 2
+    anchored = scan.map._plan.x0_um
+
+    # the run ends and the stage reports itself 0.625 µm (a pulse) away
+    window._manager.last_position["zolix"] = {
+        "x_um": -999.375, "y_um": -500.0, "r_deg": 0.0,
+        "x_pulses": 1, "y_pulses": 0, "r_pulses": 0}
+    scan._set_job("scan")
+    scan._set_job(None)                     # what _on_scan_done does
+    scan.refresh_plan()
+    assert len(scan.map._tiles) == 2, "the finished run's mosaic was wiped"
+    assert scan.map._plan.x0_um == pytest.approx(anchored)
+    assert scan.map._highlight() is not None
+
+    # ... and the anchor is released when the operator clears the results
+    scan.clear_results()
+    assert scan._origin is None
+    scan.refresh_plan()
+    assert scan.map._plan.x0_um == pytest.approx(-999.375)
 
 
 def test_a_captured_tile_reaches_the_detection_queue(window):

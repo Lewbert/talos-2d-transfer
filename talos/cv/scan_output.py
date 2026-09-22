@@ -2,10 +2,10 @@
 
 ``frames/`` and ``manifest.csv`` are written by :class:`talos.cv.scan.GridScanner`
 as the run goes. This module writes the three optional summaries afterwards
-— the mosaic, the tile overview and the sample list — because detection
-deliberately outlives the capture: identification must never slow the
-stage down, so "the scan finished" and "the results are in" are different
-moments and these wait for the second one.
+— the mosaic, the mosaic with the found samples ringed, and the sample list
+— because detection deliberately outlives the capture: identification must
+never slow the stage down, so "the scan finished" and "the results are in"
+are different moments and these wait for the second one.
 
 Pure: no Qt, no camera, no widgets. The caller copies the results and the
 export flags out of its controls before handing them over, which is both
@@ -19,7 +19,7 @@ from pathlib import Path
 
 import cv2
 
-from talos.cv.stitch import build_mosaic, build_overview
+from talos.cv.stitch import build_mosaic, draw_sample_rings
 
 
 def candidate_rows(candidates) -> list[list[str]]:
@@ -78,16 +78,17 @@ def write_outputs(out_dir: Path, manifest_path: Path,
 
     # Read each frame at most once for the two image summaries.
     images = {}
-    if exports.get("mosaic") or exports.get("overview"):
+    if exports.get("mosaic") or exports.get("annotated"):
         for index, path in frames:
             image = cv2.imread(str(path))
             if image is not None:
                 images[index] = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
 
+    mosaic_tiles = [(tiles.get(index, (0.0, 0.0))[0],
+                     tiles.get(index, (0.0, 0.0))[1], image)
+                    for index, image in images.items()]
+
     if exports.get("mosaic"):
-        mosaic_tiles = [(tiles.get(index, (0.0, 0.0))[0],
-                         tiles.get(index, (0.0, 0.0))[1], image)
-                        for index, image in images.items()]
         mosaic = build_mosaic(mosaic_tiles, fov_um, flip=flip)
         if mosaic is not None:
             path = out_dir / "mosaic.png"
@@ -95,14 +96,16 @@ def write_outputs(out_dir: Path, manifest_path: Path,
             written.append(f"{path.name} ({mosaic.shape[1]}×"
                            f"{mosaic.shape[0]})")
 
-    if exports.get("overview"):
-        entries = [(image, hits.get(index, []))
-                   for index, image in images.items()]
-        sheet = build_overview(entries)
-        if sheet is not None:
-            path = out_dir / "overview.png"
-            cv2.imwrite(str(path), cv2.cvtColor(sheet, cv2.COLOR_RGB2BGR))
-            written.append(path.name)
+    if exports.get("annotated"):
+        # Built from the same tiles/fov/flip as mosaic.png, so a ring sits
+        # on the pixels of the sample it names.
+        mosaic = build_mosaic(mosaic_tiles, fov_um, flip=flip)
+        if mosaic is not None:
+            found = [cand for index in sorted(hits) for cand in hits[index]]
+            draw_sample_rings(mosaic, found, mosaic_tiles, fov_um, flip=flip)
+            path = out_dir / "mosaic_annotated.png"
+            cv2.imwrite(str(path), cv2.cvtColor(mosaic, cv2.COLOR_RGB2BGR))
+            written.append(f"{path.name} ({len(found)} sample(s))")
 
     return {"dir": out_dir, "written": written,
             "samples": sum(len(items) for items in hits.values())}

@@ -208,8 +208,8 @@ run writes live in **Preferences → Scan**.
 
 Identification runs on each captured frame on its own, at full resolution; the
 mosaic is an overview for the eye, and nothing measures from it. Every scan
-writes `manifest.csv` and the raw frames, and optionally a mosaic, an overview
-sheet and the candidate list.
+writes `manifest.csv` and the raw frames, and optionally a mosaic, that same
+mosaic with the found samples ringed and numbered, and the candidate list.
 
 A scan owns the axes while it runs: manual jogging is refused (the mode badge in
 the status bar says so), and **STOP ALL** — Esc or LB+RB — stops the stage and

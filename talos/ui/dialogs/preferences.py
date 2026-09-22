@@ -900,8 +900,11 @@ def _scan_page(settings, parent) -> QWidget:
     # path is two places for it to disagree with itself.
     page.add_bool("export_mosaic", "Write mosaic.png", True)
     page.add_bool("export_candidates", "Write candidates.csv", True)
-    page.add_bool("export_overview", "Write overview.png", True)
-    page.add_hint("Raw frames and manifest.csv are always written.")
+    page.add_bool("export_annotated", "Write mosaic_annotated.png", True)
+    page.add_hint("Raw frames and manifest.csv are always written. The "
+                  "annotated mosaic is the same image with every sample the "
+                  "chain found ringed and numbered, so a sample in the list "
+                  "can be found on the wafer.")
 
     page.add_group("Capture")
     # 0/1, the same encoding the Capture group's snapshot resolution uses.

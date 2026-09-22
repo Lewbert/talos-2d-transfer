@@ -24,7 +24,7 @@ SCAN_KEYS = ("width_um", "height_um", "origin", "overlap", "path",
              "serpentine", "start_axis", "x_dir", "y_dir", "speed_pps",
              "settle_ms", "resolution", "backlash_um", "backlash_approach",
              "return_to_start", "export_mosaic", "export_candidates",
-             "export_overview")
+             "export_annotated")
 
 #: What a scan is when nobody has said otherwise.
 DEFAULTS = {
@@ -50,9 +50,13 @@ DEFAULTS = {
     "backlash_um": 0.0,
     "backlash_approach": 1,
     "return_to_start": True,
+    #: The mosaic as the frames show it.
     "export_mosaic": True,
     "export_candidates": True,
-    "export_overview": True,
+    #: The mosaic again, with the found samples ringed and numbered. It
+    #: replaced the tile overview, which had no positions on it at all: a
+    #: sheet of thumbnails that says a sample exists but not where.
+    "export_annotated": True,
 }
 
 

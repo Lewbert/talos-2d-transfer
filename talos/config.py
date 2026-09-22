@@ -69,8 +69,14 @@ _DEAD_KEYS: dict[str, set[str]] = {
     # from the retired Scan window. It is a name→titles map that nothing
     # reads any more, and the mechanism here removes keys from a section,
     # not entries from inside one.
+    # v9 continued: the scan's "tile overview" export is gone. It was a
+    # sheet of thumbnails with no positions on it — it could tell the
+    # operator that a sample existed, never where on the wafer it was —
+    # and it is replaced by export_annotated (the mosaic with the samples
+    # ringed and numbered), which defaults ON, so dropping the key loses
+    # nothing.
     "scan": {"min_flake_area_um2", "default_dir", "fov_auto", "fov_x_um",
-             "fov_y_um", "slow_speed"},
+             "fov_y_um", "slow_speed", "export_overview"},
 }
 
 

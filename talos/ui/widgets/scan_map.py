@@ -188,19 +188,24 @@ class ScanMapWidget(QWidget):
         return mosaic_offset(x_um, y_um, self._flip)
 
     def set_plan(self, plan: ScanMapPlan) -> None:
-        """A NEW plan: the tiles and markers belong to the old one and are
-        dropped. Re-stating the same plan changes nothing (see key())."""
+        """A NEW plan — the shape of the next run.
+
+        The tiles and the markers are NOT dropped here, deliberately: they
+        are the record of the run that HAPPENED, and a plan is a preview of
+        the one that might. Editing the area after a run used to wipe the
+        mosaic the operator was reading samples off — and worse, the plan's
+        origin follows the stage, so the plain act of the stage returning
+        from a run (or a pulse of readback noise in where it returned to)
+        changed the plan's key and took the mosaic with it.
+        ``clear_tiles()`` is the way to drop them, and exactly two things
+        call it: a new run starting, and the operator clearing the results.
+        Re-stating the same plan changes nothing (see key())."""
         plan = plan or ScanMapPlan()
         if plan.key() == self._plan.key():
             self._plan = plan
             self.update()
             return
         self._plan = plan
-        self._tiles.clear()
-        self._images.clear()
-        self._markers.clear()
-        self._active_tile = None
-        self._selected = -1
         self._zoom = 1.0
         self._pan = QPointF(0.0, 0.0)
         self.update()
@@ -226,8 +231,8 @@ class ScanMapWidget(QWidget):
         self.update()
 
     def clear_tiles(self) -> None:
-        """Drop the captured tiles and markers but KEEP the plan — what a
-        new run of the same area needs."""
+        """Drop the captured tiles and markers but KEEP the plan — a new
+        run of the same area, or the operator clearing the results."""
         self._tiles.clear()
         self._images.clear()
         self._markers.clear()

@@ -174,6 +174,9 @@ class ScanPanel(QWidget):
         self._scan_started_at = 0.0
         self._latest_frame = None
         self._flip = False
+        #: Where the run whose results are on the map started (see
+        #: _plan_origin). None = nothing scanned, the plan follows the stage.
+        self._origin: StagePosition | None = None
         #: The last verdict's text and tone, so the export summary can
         #: append to it rather than overwrite it with a success message.
         self._status_base = ""
@@ -475,6 +478,9 @@ class ScanPanel(QWidget):
         export.clicked.connect(self._on_export_list)
         clear = QPushButton("Clear")
         clear.setObjectName("compact")
+        clear.setToolTip("Forget this run: the sample list, the markers on "
+                         "the map and its mosaic. The next scan clears them "
+                         "too.")
         clear.clicked.connect(self.clear_results)
         row.addWidget(self._go_to_btn)
         row.addWidget(export)
@@ -626,10 +632,28 @@ class ScanPanel(QWidget):
             backlash_approach=int(self._prefs["backlash_approach"]),
             return_to_start=bool(self.return_home.value()))
 
+    def _plan_origin(self) -> StagePosition:
+        """Where the plan is anchored.
+
+        Normally the stage: the map answers "what would a scan from here
+        cover?". But while a finished run's tiles are on the map, the
+        answer must be where that RUN started — the stage has since
+        returned to the start or stayed at the last tile, and letting the
+        plan follow it re-anchors the outline under a mosaic that is still
+        being read (and, with a pulse of readback noise, changes the plan's
+        identity and used to take the mosaic with it). The anchor is
+        released when the results are cleared, and re-latched by the next
+        run.
+        """
+        if self._scan_tiles and self._origin is not None:
+            return self._origin
+        return self.stage_position()
+
     def refresh_plan(self) -> None:
-        """The map always shows the plan the current fields would run."""
-        origin = self.stage_position()
-        params = self.params_for(origin)
+        """The map shows the plan the current fields would run — around the
+        run's origin while its results are on screen (:meth:`_plan_origin`),
+        and around the stage otherwise."""
+        params = self.params_for(self._plan_origin())
         fov = self.fov()
         waypoints = plan_path(params, fov)
         self.map.set_plan(ScanMapPlan(
@@ -780,12 +804,24 @@ class ScanPanel(QWidget):
         self.map.set_markers(
             [ScanMapMarker(x_um=c.x_um, y_um=c.y_um, label=str(index + 1))
              for index, c in enumerate(candidates)])
+        # nothing to say when there is nothing: "0 tiles · 0 sample(s)" is
+        # a caption about an empty map
         self.map.set_caption(
-            f"{len(self._scan_tiles)} tiles · {len(candidates)} sample(s)")
+            f"{len(self._scan_tiles)} tiles · {len(candidates)} sample(s)"
+            if self._scan_tiles or candidates else "")
 
     def clear_results(self) -> None:
+        """Forget the run: the table, the markers AND the mosaic.
+
+        The mosaic is the operator's own act here, deliberately. A finished
+        run's tiles stay on the map until this or the next run, because
+        after a scan the map is what they read samples off — and that is
+        also why this button, which used to leave the tiles behind, clears
+        them: it is the one place that means "I am done with this run".
+        """
         self._scan_hits.clear()
         self._scan_tiles.clear()
+        self._origin = None
         self._live_candidates = []
         self._candidates = []
         self._selected = -1
@@ -793,10 +829,12 @@ class ScanPanel(QWidget):
         self._table.setRowCount(0)
         self._table.clearSelection()
         self._table.blockSignals(False)
-        self.map.set_markers([])
-        self.map.set_caption("")
+        self.map.clear_tiles()
+        self.refresh_markers()          # drops the markers and the caption
         self._samples_note.setText("Results cleared.")
         self._go_to_btn.setEnabled(False)
+        # the plan follows the stage again now that nothing is anchored
+        self.refresh_plan()
 
     # ------------------------------------------------------------------
     # the run
@@ -853,9 +891,12 @@ class ScanPanel(QWidget):
         self._scan_abort.clear()
         self._scan_hits.clear()
         self._scan_tiles.clear()
+        # The new run's origin, latched BEFORE the plan is rebuilt: this is
+        # the moment the results are let go, so the plan re-anchors here.
+        self._origin = position
         self._pending_export = None
         self.refresh_plan()
-        self.map.clear_tiles()                 # the previous run's tiles
+        self.map.clear_tiles()                 # the PREVIOUS run's tiles
         self.map.clear_footprint()
         self._set_job("scan")
         self._state.set_mode("SCAN")
@@ -1116,7 +1157,7 @@ class ScanPanel(QWidget):
         payload["exports"] = {
             "mosaic": bool(self._prefs["export_mosaic"]),
             "candidates": bool(self._prefs["export_candidates"]),
-            "overview": bool(self._prefs["export_overview"])}
+            "annotated": bool(self._prefs["export_annotated"])}
         self._export_worker = _Worker(
             lambda: self._finish_exports(payload), self)
         self._export_worker.sig_done.connect(self._on_export_done)

@@ -1,4 +1,4 @@
-"""Assemble what a scan captured: a mosaic, and a tile overview.
+"""Assemble what a scan captured: the mosaic, and the rings on it.
 
 Both are OVERVIEWS, not the data. The frames in ``frames/`` are the data, and
 they are the only thing anything measures from: **identification runs per
@@ -21,6 +21,8 @@ Pure numpy/cv2, no Qt, no camera — unit-testable and usable from a CLI.
 
 from __future__ import annotations
 
+import math
+
 import cv2
 import numpy as np
 
@@ -29,9 +31,6 @@ from talos.cv.orientation import mosaic_offset
 #: Longest edge of the stitched mosaic. The tiles live on disk at full
 #: resolution; this is a summary, and 2048 px keeps it a few MB.
 DEFAULT_MAX_PX = 2048
-
-#: Thumbnail width in the tile overview.
-DEFAULT_THUMB_W = 240
 
 
 def mosaic_geometry(tiles, fov_um: tuple[float, float],
@@ -134,43 +133,54 @@ def build_mosaic(tiles, fov_um: tuple[float, float],
     return out
 
 
-def build_overview(entries, cols: int | None = None,
-                   thumb_w: int = DEFAULT_THUMB_W,
-                   colour: tuple[int, int, int] = (0, 200, 255)
-                   ) -> np.ndarray | None:
-    """A thumbnail per captured tile, in scan order, with boxes drawn.
+def draw_sample_rings(mosaic: np.ndarray, samples, tiles,
+                      fov_um: tuple[float, float], *,
+                      max_px: int = DEFAULT_MAX_PX, flip: bool = False,
+                      colour: tuple[int, int, int] = (0, 255, 90),
+                      label: bool = True) -> np.ndarray:
+    """Ring every found sample on the mosaic — in place, returns it.
 
-    ``entries``: ``[(rgb_uint8, [FlakeCandidate, ...]), ...]`` in the order
-    the scan visited them. Easier to read than a mosaic when the area is
-    large and the samples are small — and it shows WHICH tile a detection
-    came from.
+    Takes the SAME tiles, field of view and flip the mosaic was built from,
+    and derives their geometry rather than accepting one: a geometry from a
+    different call, or the flip left out, would put every ring somewhere
+    plausible and wrong. (The layout is the mosaic's own — the rule the map
+    follows too.)
+
+    A sample is ringed by the circle of equal AREA (``area_um2`` is on every
+    candidate already and is measurement-based, unlike a bbox corner), and
+    each ring carries its number from the sample list — the point of the
+    image is to go back and look at a specific one. Drawn dark-then-bright
+    so a ring reads on a dark field and on a bright one.
     """
-    usable = [(img, cands) for img, cands in entries
-              if img is not None and getattr(img, "size", 0)]
-    if not usable:
-        return None
-    cols = max(1, int(cols or round(len(usable) ** 0.5)))
-    scale = thumb_w / float(max(img.shape[1] for img, _ in usable))
-    thumb_h = max(1, int(round(max(img.shape[0] for img, _ in usable) * scale)))
-    rows = (len(usable) + cols - 1) // cols
-    pad = 4
-    sheet = np.full((rows * (thumb_h + pad) + pad, cols * (thumb_w + pad) + pad, 3),
-                    18, np.uint8)
-    for index, (img, cands) in enumerate(usable):
-        thumb = cv2.resize(img, (thumb_w, thumb_h),
-                           interpolation=cv2.INTER_AREA)
-        for cand in cands:
-            x, y, w, h = cand.bbox
-            cv2.rectangle(thumb,
-                          (int(x * scale), int(y * scale)),
-                          (int((x + w) * scale), int((y + h) * scale)),
-                          colour, 1)
-        row, col = divmod(index, cols)
-        top = pad + row * (thumb_h + pad)
-        left = pad + col * (thumb_w + pad)
-        sheet[top:top + thumb_h, left:left + thumb_w] = thumb
-    return sheet
+    if mosaic is None or mosaic.size == 0 or not samples:
+        return mosaic
+    px_per_um, x0, y0, shrink = mosaic_geometry(tiles, fov_um, max_px, flip)
+    scale = float(px_per_um) * float(shrink)
+    if scale <= 0:
+        return mosaic
+    height, width = mosaic.shape[:2]
+    font_scale = max(0.45, min(1.0, height / 900.0))
+    for index, cand in enumerate(samples):
+        x_um, y_um = mosaic_offset(cand.x_um, cand.y_um, flip)
+        cx = int(round((x_um - float(x0)) * scale))
+        cy = int(round((y_um - float(y0)) * scale))
+        radius_um = math.sqrt(max(float(cand.area_um2), 1.0) / math.pi)
+        radius = max(4, int(round(radius_um * scale)))
+        if not (-radius <= cx <= width + radius
+                and -radius <= cy <= height + radius):
+            continue                      # a sample off the mosaic's canvas
+        cv2.circle(mosaic, (cx, cy), radius, (0, 0, 0), 4, cv2.LINE_AA)
+        cv2.circle(mosaic, (cx, cy), radius, colour, 2, cv2.LINE_AA)
+        if not label:
+            continue
+        text = str(index + 1)
+        at = (cx + radius + 3, cy - radius - 3)
+        cv2.putText(mosaic, text, at, cv2.FONT_HERSHEY_SIMPLEX, font_scale,
+                    (0, 0, 0), 4, cv2.LINE_AA)
+        cv2.putText(mosaic, text, at, cv2.FONT_HERSHEY_SIMPLEX, font_scale,
+                    colour, 2, cv2.LINE_AA)
+    return mosaic
 
 
-__all__ = ["DEFAULT_MAX_PX", "DEFAULT_THUMB_W", "build_mosaic",
-           "build_overview"]
+__all__ = ["DEFAULT_MAX_PX", "build_mosaic", "draw_sample_rings",
+           "mosaic_geometry"]

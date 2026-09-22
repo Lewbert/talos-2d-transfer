@@ -285,7 +285,7 @@ browse + open row the Capture group uses: one editor for one path.
 | `manifest.csv` | One row per waypoint: frame name, **readback** x/y/r, unix time, objective id |
 | `meta.json` | The request (area, overlap, path, settle, backlash…), the FOV used, the frame shape, the counts, the phase timings |
 | `mosaic.png` | Optional: the tiles assembled at their readback positions |
-| `overview.png` | Optional: a thumbnail per tile with the detections drawn on it |
+| `mosaic_annotated.png` | Optional: the same image with every found sample ringed and numbered |
 | `candidates.csv` | Optional: every detection with its stage coordinates and the tile it came from |
 
 The manifest is the record of truth: a waypoint visited but not captured keeps
@@ -351,6 +351,37 @@ readback position, overlaps averaged (a stamp would leave a seam), and no
 registration, no seam blending and no rotation correction. The px→µm mapping is
 orthotropic for the same reason; the 2×2 jacobian is kept in reserve and would
 come back into play only if a merged image ever had to be metrologically useful.
+
+**`mosaic_annotated.png` is that same image with the samples on it** — one ring
+per candidate, drawn as the circle of equal area, with the number the sample
+list gives it. It exists because the alternative, a sheet of per-tile
+thumbnails with boxes drawn on them, answered "was there a sample in this
+tile?" and never "where on the wafer is sample 7?" — it had no positions on it
+at all. The rings come from the mosaic's own geometry (`mosaic_geometry`, the
+same call `build_mosaic` uses) and the candidates' stage µm, so a ring sits on
+the pixels of the sample it names rather than near them.
+
+## What the map keeps, and for how long
+
+A finished run's **mosaic and sample markers stay on the map** until the next
+run starts or the operator clears the results. After a scan the map is what a
+sample is read off — its position, its neighbours, which way the wafer ran —
+and losing that the moment the stage stopped made the map useless for exactly
+the job it is best at.
+
+Two mechanisms are behind that, and the second one was a bug:
+
+- `ScanMapWidget.set_plan` no longer drops the tiles. The tiles are the record
+  of the run that happened; the plan is a preview of one that might, so
+  editing the area after a scan does not (and should not) erase what was
+  captured.
+- The plan's **origin is latched to the run** while its results are on the
+  map. The plan is normally anchored to the stage — "what would a scan from
+  here cover?" — and a run ends with the stage back at the start or at the
+  last tile, so re-anchoring it changed the plan's identity and took the
+  mosaic with it. A single pulse (0.625 µm) of readback noise in where the
+  stage came back to was enough. The latch is released by clearing the
+  results, and re-taken by the next run.
 
 ## Aborting, and STOP ALL
 

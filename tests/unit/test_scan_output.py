@@ -76,11 +76,41 @@ def test_the_three_summaries_are_written_where_the_scan_is(tmp_path):
     summary = write_outputs(out, manifest, tiles=tiles, hits=hits,
                             fov_um=(100.0, 100.0),
                             exports={"mosaic": True, "candidates": True,
-                                     "overview": True})
+                                     "annotated": True})
     assert set(summary["written"]) != set()
-    for name in ("mosaic.png", "candidates.csv", "overview.png"):
+    for name in ("mosaic.png", "candidates.csv", "mosaic_annotated.png"):
         assert (out / name).exists(), name
     assert summary["samples"] == 2
+
+
+def test_the_annotated_mosaic_is_the_mosaic_with_the_samples_on_it(tmp_path):
+    """The same pixels, plus a ring per sample — that is what makes it
+    usable for "where is sample 7 on the wafer", which the tile overview
+    could not answer (it had no positions on it at all)."""
+    out, manifest = _scan(tmp_path)
+    tiles = {0: (0.0, 0.0), 1: (100.0, 0.0), 3: (0.0, 100.0)}
+    hits = {0: [_candidate(0.0, 0.0, area=200.0)],
+            3: [_candidate(20.0, 90.0, area=200.0)]}
+    write_outputs(out, manifest, tiles=tiles, hits=hits,
+                  fov_um=(100.0, 100.0),
+                  exports={"mosaic": True, "annotated": True})
+    plain = cv2.imread(str(out / "mosaic.png"))
+    marked = cv2.imread(str(out / "mosaic_annotated.png"))
+    assert plain.shape == marked.shape
+    assert not np.array_equal(plain, marked)
+    # the rings are drawn in the ring colour, and they are on the mosaic
+    # (BGR here: the colour is BGR-swapped on the way to disk)
+    ring = np.array([90, 255, 0], np.uint8)
+    assert (np.abs(marked.astype(int) - ring).sum(axis=2) < 60).any()
+
+
+def test_an_annotated_mosaic_with_no_samples_is_still_the_mosaic(tmp_path):
+    out, manifest = _scan(tmp_path)
+    tiles = {0: (0.0, 0.0), 1: (100.0, 0.0)}
+    write_outputs(out, manifest, tiles=tiles, hits={},
+                  fov_um=(100.0, 100.0), exports={"annotated": True})
+    assert (out / "mosaic_annotated.png").exists()
+    assert not (out / "mosaic.png").exists(), "only what was asked for"
 
 
 def test_candidates_csv_carries_the_tile_the_sample_came_from(tmp_path):
@@ -105,7 +135,7 @@ def test_a_scan_with_no_frames_still_reports_cleanly(tmp_path):
     out, manifest = _scan(tmp_path, frames=("", ""))
     summary = write_outputs(out, manifest, tiles={}, hits={},
                             fov_um=(100.0, 100.0),
-                            exports={"mosaic": True, "overview": True})
+                            exports={"mosaic": True, "annotated": True})
     assert summary["written"] == []
     assert summary["samples"] == 0
 

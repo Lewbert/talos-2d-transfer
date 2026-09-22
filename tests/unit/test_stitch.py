@@ -1,9 +1,12 @@
-"""Mosaic and tile-overview assembly for a finished scan."""
+"""Mosaic assembly for a finished scan, and the rings drawn on it."""
+
+import math
 
 import numpy as np
 import pytest
 
-from talos.cv.stitch import build_mosaic, build_overview
+from talos.cv.stitch import (build_mosaic, draw_sample_rings,
+                             mosaic_geometry)
 from talos.models import FlakeCandidate
 
 
@@ -78,29 +81,58 @@ def test_differently_sized_tiles_are_resized_to_match():
     assert mosaic.shape == (80, 200, 3)
 
 
-# --- the tile overview -----------------------------------------------------
+# --- the sample rings on the mosaic ---------------------------------------
 
-def test_overview_puts_a_thumbnail_per_tile_in_scan_order():
-    entries = [(tile(40 + 10 * i), []) for i in range(4)]
-    sheet = build_overview(entries, thumb_w=100)
-    # 2 × 2 thumbnails at 100 × 80, 4 px padding around and between
-    assert sheet.shape == (2 * 84 + 4, 2 * 104 + 4, 3)
-    assert int(sheet[10, 10, 0]) == 40            # the first tile
-    assert int(sheet[94, 10, 0]) == 60            # the third (row 2, col 1)
-
-
-def test_overview_draws_the_detection_boxes():
-    cand = FlakeCandidate(x_px=50.0, y_px=40.0, area_px2=100.0,
+def _sample(x_um: float, y_um: float, area_um2: float) -> FlakeCandidate:
+    return FlakeCandidate(x_px=50.0, y_px=40.0, area_px2=area_um2,
+                          area_um2=area_um2, x_um=x_um, y_um=y_um,
                           bbox=(20, 20, 40, 20))
-    plain = build_overview([(tile(30), [])], thumb_w=100)
-    boxed = build_overview([(tile(30), [cand])], thumb_w=100)
-    assert np.array_equal(plain, boxed) is False
-    # the box is drawn in the tint colour: bbox (20,20,40,20) scaled by the
-    # thumbnail factor (1.0) and offset by the sheet's 4 px padding
-    assert tuple(int(v) for v in boxed[30, 24]) == (0, 200, 255)
-    assert tuple(int(v) for v in plain[30, 24]) == (30, 30, 30)
 
 
-def test_overview_with_nothing_captured_is_not_an_error():
-    assert build_overview([]) is None
-    assert build_overview([(None, [])]) is None
+TILES = [(0.0, 0.0, None)]          # the tile is made inside the helpers
+FOV_ONE = (100.0, 100.0)
+
+
+def _one_tile_mosaic():
+    tiles = [(0.0, 0.0, tile(40))]
+    return build_mosaic(tiles, FOV_ONE), tiles
+
+
+def _ring(mosaic, tiles, samples, **kwargs):
+    return draw_sample_rings(mosaic, samples, tiles, FOV_ONE, **kwargs)
+
+
+def test_a_ring_lands_on_the_sample_it_names():
+    """A sample at the tile's centre is ringed at the image's centre: the
+    ring uses the mosaic's own layout, not a re-derivation of it."""
+    mosaic, tiles = _one_tile_mosaic()
+    height, width = mosaic.shape[:2]
+    _ring(mosaic, tiles, [_sample(0.0, 0.0, 400.0)])
+    px_per_um, _x0, _y0, shrink = mosaic_geometry(tiles, FOV_ONE)
+    radius = int(round(math.sqrt(400.0 / math.pi) * px_per_um * shrink))
+    cx, cy = width // 2, height // 2
+    # the ring's pixels are on the circle, not inside it
+    assert tuple(int(v) for v in mosaic[cy, cx + radius]) == (0, 255, 90)
+    assert tuple(int(v) for v in mosaic[cy, cx]) == (40, 40, 40)
+
+
+def test_the_rings_are_numbered_like_the_sample_list():
+    mosaic, tiles = _one_tile_mosaic()
+    before = mosaic.copy()
+    _ring(mosaic, tiles, [_sample(0.0, 0.0, 400.0)])
+    assert not np.array_equal(before, mosaic)
+    plain = before.copy()
+    _ring(plain, tiles, [_sample(0.0, 0.0, 400.0)], label=False)
+    # the label is the only difference between the two runs
+    assert not np.array_equal(plain, mosaic)
+
+
+def test_rings_survive_having_nothing_to_draw():
+    mosaic, tiles = _one_tile_mosaic()
+    untouched = mosaic.copy()
+    assert _ring(mosaic, tiles, []) is mosaic
+    assert np.array_equal(untouched, mosaic)
+    assert draw_sample_rings(None, [_sample(0, 0, 100)], tiles,
+                             FOV_ONE) is None
+    assert _ring(mosaic, tiles, [_sample(500.0, 500.0, 100.0)]) is mosaic
+    assert np.array_equal(untouched, mosaic), "off-canvas samples are skipped"
