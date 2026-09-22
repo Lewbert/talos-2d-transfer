@@ -1047,19 +1047,54 @@ def _tile_frame():
     return np.full((32, 48, 3), 200, np.uint8)
 
 
-def test_stop_all_aborts_the_run_not_just_the_motion(window):
+def test_stop_all_aborts_the_run_not_just_the_motion(window, monkeypatch):
     """Esc must end a scan. Without this wiring the abort flag stayed
     clear, the controller stopped, and the run continued at the next
-    waypoint — which looked exactly like Esc doing nothing."""
+    waypoint — which looked exactly like Esc doing nothing.
+
+    And it must end it WITHOUT stopping everything again: this slot runs
+    when a stop_all completes, so re-issuing one fired the signal again and
+    looped (the bench saw it as a scan that "aborted halfway and then
+    looped forever").
+    """
     scan = window._sample_finding.scan_panel
+    stops: list = []
+    monkeypatch.setattr(window._manager, "stop_all",
+                        lambda: stops.append("stop"))
     aborted: list = []
-    scan._on_abort = lambda reason="abort": aborted.append(reason)
+    monkeypatch.setattr(scan, "_abort_run",
+                        lambda reason: aborted.append(reason))
+    scan._scan_abort.clear()
     scan._set_job("scan")
     window._manager.sig_stop_all_done.emit()
     assert aborted == ["stop all"]
+    assert stops == [], "the abort re-stopped a stage that had stopped"
     scan._set_job(None)
     window._manager.sig_stop_all_done.emit()
     assert aborted == ["stop all"]              # idle: nothing to abort
+
+
+def test_the_panel_abort_button_does_stop_the_stage(window, monkeypatch):
+    """The operator's own Abort has to stop the motion — nothing else has."""
+    scan = window._sample_finding.scan_panel
+    stops: list = []
+    monkeypatch.setattr(window._manager, "stop_all",
+                        lambda: stops.append("stop"))
+    scanner_stops: list = []
+    monkeypatch.setattr(scan, "_scanner", type("_S", (), {
+        "request_abort": lambda self: scanner_stops.append("abort")})())
+    scan._scan_abort.clear()
+    scan._on_abort("abort")
+    assert stops == ["stop"]
+    assert scanner_stops == ["abort"]
+    assert scan._scan_abort.is_set()
+
+    # a second abort of the same run does not re-command the axis
+    scan._on_abort("stop all")
+    assert scanner_stops == ["abort"]
+    assert len(stops) == 2                      # only the operator's own
+    scan._scan_abort.clear()
+    monkeypatch.setattr(scan, "_scanner", None)
 
 
 def test_settings_applied_refreshes_every_cached_consumer(window):

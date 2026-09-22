@@ -3,6 +3,8 @@ zolix proxy (the scan must never open its own COM handle — a second
 driver on the same port cannot open, and a private device is invisible
 to STOP ALL)."""
 
+import time
+
 import pytest
 from PySide6.QtCore import QObject, Signal
 
@@ -214,3 +216,42 @@ def test_close_detaches_from_the_manager():
     adapter.close()
     adapter.close()  # idempotent
     assert adapter._done == {}
+
+
+def test_an_abort_does_not_wait_out_a_job_that_never_reports():
+    """An abort mid-run can arrive while a move is in flight, and a stop
+    that purges the queue or a link that drops the reply leaves a job that
+    never completes. The flag is what the operator asked for, so it wins
+    over a completion that may not be coming — otherwise an aborted scan
+    sits on the full job timeout (120 s for a move) with the stage already
+    stopped and the panel looping on stop-all."""
+    manager = StubManager()
+    adapter = ManagerStageAdapter(manager, {})
+    flag = {"abort": False}
+
+    def _never(*args, **kwargs):
+        flag["abort"] = True      # the operator hits Esc a moment later
+        return 99                 # accepted, but nothing will ever report
+
+    manager.submit = _never  # type: ignore[method-assign]
+    adapter._abort_check = lambda: flag["abort"]
+    started = time.monotonic()
+    with pytest.raises(DeviceError, match="abort"):
+        adapter._call("move_abs_um", 0.0, 0.0, timeout_s=120.0)
+    assert time.monotonic() - started < 1.0
+
+
+def test_wait_idle_still_returns_quietly_when_the_abort_lands_mid_read():
+    """The same check in the wait loop must stay a quiet return: the scan
+    reports "aborted", which is a different thing from a fault."""
+    manager = StubManager()
+    adapter = ManagerStageAdapter(manager, {})
+    flag = {"abort": False}
+
+    def _never(*args, **kwargs):
+        flag["abort"] = True
+        return 99
+
+    manager.submit = _never  # type: ignore[method-assign]
+    adapter._abort_check = lambda: flag["abort"]
+    adapter.wait_idle(timeout_s=120.0)      # returns, does not raise

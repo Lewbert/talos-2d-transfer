@@ -1097,15 +1097,28 @@ class ScanPanel(QWidget):
         self._pending_export = payload
         self._maybe_export()
 
-    def _on_abort(self, reason: str = "abort") -> None:
-        """Cooperative abort — never QThread.terminate() (it killed the
-        scan thread mid-serial-write once, leaving the port open)."""
+    def _abort_run(self, reason: str) -> None:
+        """Flag the run, stop the axis it owns, drop the holds.
+
+        The stop is the ADAPTER's (one priority Zolix job), deliberately not
+        ``manager.stop_all()``: that is the caller's business, and doing it
+        here is what made stop-all recurse (see ``on_stop_all_done``).
+        Once per run — a second abort contributes nothing but traffic on a
+        link that is already the flaky part of this bench.
+        """
+        first = not self._scan_abort.is_set()
+        self._scan_abort.set()
         scanner = self._scanner
-        if scanner is not None:
-            self._scan_abort.set()
+        if scanner is not None and first:
             scanner.request_abort()
         if self._input is not None:
             self._input.cancel_all_holds(reason)
+
+    def _on_abort(self, reason: str = "abort") -> None:
+        """Cooperative abort — never QThread.terminate() (it killed the
+        scan thread mid-serial-write once, leaving the port open). The
+        operator asked for a stop, so the whole stage gets one."""
+        self._abort_run(reason)
         self._manager.stop_all()
         self.set_status("Aborting…")
 
@@ -1115,9 +1128,20 @@ class ScanPanel(QWidget):
         Without this the scan's abort flag stayed clear, the controller
         stopped, and the run cheerfully continued at the next waypoint —
         Esc looked like it had not worked at all.
+
+        It aborts **without asking for another stop**, and that is not a
+        detail: this slot runs when a stop_all COMPLETES, so an abort that
+        stopped everything again fired this signal again — a loop that
+        re-stopped the already-stopped stage several times a second for as
+        long as the run took to unwind. On the bench it was reported as a
+        scan that "aborted halfway and then looped forever": the loop was
+        the visible symptom, and its fuel was the run still unwinding (a
+        move in flight, a capture window) while every iteration fed it
+        another round of stop jobs.
         """
         if self._job == "scan":
-            self._on_abort("stop all")
+            self._abort_run("stop all")
+            self.set_status("Aborting…")
 
     def _set_job(self, job: str | None) -> None:
         self._job = job

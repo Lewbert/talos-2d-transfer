@@ -98,6 +98,14 @@ class ManagerStageAdapter:
 
         The blocking happens on the CALLING thread (the scan worker), so
         the device worker stays free to run a priority stop.
+
+        The wait watches the abort as well as the deadline. It has to: an
+        abort mid-run can arrive while a move is in flight, and a stop that
+        purges the queue or a link that drops the reply can leave a job
+        that never reports — which would hold an aborted scan for the whole
+        timeout (120 s for a move) with the operator watching a stage that
+        had already stopped. The flag is what the operator asked for; it
+        wins over a completion that may not be coming.
         """
         if self._abort_check():
             raise DeviceError("scan aborted")
@@ -107,6 +115,8 @@ class ManagerStageAdapter:
         deadline = time.monotonic() + timeout_s
         with self._cond:
             while job_id not in self._done:
+                if self._abort_check():
+                    raise DeviceError("scan aborted")
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     raise DeviceTimeoutError(
