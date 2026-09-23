@@ -117,6 +117,21 @@ def sample_hex(img: np.ndarray, x_px: int, y_px: int,
     pre-processing is switched off. Sampling a composited display instead
     would pick up the darkening and the outlines rather than the sample.
     """
+    stats = sample_hex_stats(img, x_px, y_px, radius)
+    return stats[0] if stats is not None else None
+
+
+def sample_hex_stats(img: np.ndarray, x_px: int, y_px: int,
+                     radius: int = 4) -> tuple[str, float] | None:
+    """``(hex, spread)`` for the same patch :func:`sample_hex` averages.
+
+    The spread is the largest per-channel standard deviation in the patch —
+    how much the 9-px disc disagrees with itself. On a clean flake it is a
+    few DN of sensor noise; straddle a flake's edge and it is tens, because
+    half the disc is substrate. That is the case worth telling the operator
+    about: the mean of two materials is a colour NEITHER of them has, and it
+    then becomes the mask's target and the curve's centre.
+    """
     height, width = img.shape[:2]
     if not (0 <= x_px < width and 0 <= y_px < height):
         return None
@@ -129,8 +144,14 @@ def sample_hex(img: np.ndarray, x_px: int, y_px: int,
     mask = (xx * xx + yy * yy) <= radius * radius
     if not mask.any():
         mask = np.ones(patch.shape[:2], bool)
-    mean = patch[mask].mean(axis=0)
-    return "#{:02x}{:02x}{:02x}".format(*(int(round(v)) for v in mean))
+    inside = patch[mask]
+    if inside.shape[0] == 0:
+        return None
+    mean = inside.mean(axis=0)
+    spread = float(np.max(inside.std(axis=0))) if inside.shape[0] > 1 else 0.0
+    hex_color = "#{:02x}{:02x}{:02x}".format(
+        *(int(round(v)) for v in mean))
+    return hex_color, spread
 
 
 def hex_to_hsv(text: str) -> tuple[int, int, int]:
@@ -143,21 +164,43 @@ def hex_to_hsv(text: str) -> tuple[int, int, int]:
 
 
 def colour_mask(img: np.ndarray, hex_color: str, tolerance: float,
-                min_saturation: float = 40.0, min_value: float = 0.0
-                ) -> np.ndarray:
+                spread: float = 25.0, min_saturation: float = 40.0,
+                min_value: float = 0.0) -> np.ndarray:
     """Binary mask of the pixels within ``tolerance`` of the target colour.
 
-    The hue half-width is ``tolerance × 0.9`` (so 100 = ±90 = half the hue
-    wheel) and the saturation/value half-widths are ``tolerance × 2.55``.
-    The hue band WRAPS across the 0/179 seam: a red target (hue ≈ 0 or
-    179) gets exactly the same tolerance as any other — the reference
-    implementation clipped instead, which silently left red one-sided.
+    Two numbers, because they answer two different questions and the bench
+    proved they must be separable:
+
+    - ``tolerance`` is how far the HUE may drift — "the same material under
+      this illumination". Its half-width is ``tolerance × 0.9`` (so 100 =
+      ±90 = half the wheel), and the band WRAPS across the 0/179 seam: a red
+      target (hue ≈ 0 or 179) gets exactly the same tolerance as any other.
+      The reference implementation clipped instead, which silently left red
+      one-sided.
+    - ``spread`` is how far the SHADE may drift — "the same thickness of
+      it": the saturation and value half-widths, ``spread × 2.55`` each.
+
+    They were one number until 2026-09-23, and for a blue-on-blue sample
+    that was a trap: dark blue ``#1c3484`` is H113 S201 V132 and the lighter
+    layer ``#aacdf5`` is H106 S78 V245 — 7° of hue apart and about 120 units
+    of S and V. The hue band is irrelevant to that pair; what separates them
+    is the shade window, so widening the tolerance to tolerate illumination
+    also let the other layer in (it does so from ``tolerance ≈ 49``). With
+    the split, hue can be opened without opening the shade.
+
+    The window can never exclude the colour that was PICKED: the floors are
+    clamped to the target's own S and V. A mask the pick is outside of reads
+    as a broken detector and is silent — which is what a raised
+    ``min_saturation`` used to do to the very flake it was raised from. The
+    ceilings cannot do it (``sat + ds ≥ sat`` for any ``ds ≥ 0``), so only
+    the floors need this, and the consequence is deliberate: for a pale pick
+    ``min_saturation`` no longer applies to the pick itself.
     """
     hue, sat, val = hex_to_hsv(hex_color)
     tol = max(0.0, min(100.0, float(tolerance)))
+    sp = max(0.0, min(100.0, float(spread)))
     dh = int(round(tol * 0.9))
-    ds = int(round(tol * 2.55))
-    dv = ds
+    ds = dv = int(round(sp * 2.55))
     hsv = cv2.cvtColor(img, cv2.COLOR_RGB2HSV)
     h, s, v = hsv[:, :, 0], hsv[:, :, 1], hsv[:, :, 2]
 
@@ -172,9 +215,9 @@ def colour_mask(img: np.ndarray, hex_color: str, tolerance: float,
         else:
             hue_ok = (h >= lo) & (h <= hi)
 
-    sat_lo = max(float(min_saturation), sat - ds)
+    sat_lo = max(min(float(min_saturation), float(sat)), sat - ds)
     sat_hi = min(255.0, sat + ds)
-    val_lo = max(float(min_value), val - dv)
+    val_lo = max(min(float(min_value), float(val)), val - dv)
     val_hi = min(255.0, val + dv)
     keep = (hue_ok & (s >= sat_lo) & (s <= sat_hi)
             & (v >= val_lo) & (v <= val_hi))
@@ -217,19 +260,24 @@ class ColourStage(Stage):
     """Source: pixels within a tolerance of the picked colour."""
 
     hex_color: str = "#c8a2c8"
+    #: Hue half-width (× 0.9) — "the same material under this illumination".
     tolerance: float = 25.0
+    #: Saturation AND value half-widths (× 2.55) — "the same shade of it",
+    #: which is where layer thickness shows up. See :func:`colour_mask` for
+    #: why this is not the tolerance.
+    spread: float = 25.0
     min_saturation: float = 40.0
     min_value: float = 0.0
 
     NAME = "colour"
-    RANGES = {"tolerance": (0.0, 100.0, 5.0), "min_saturation": (0, 255, 5),
-              "min_value": (0, 255, 5)}
+    RANGES = {"tolerance": (0.0, 100.0, 5.0), "spread": (0.0, 100.0, 5.0),
+              "min_saturation": (0, 255, 5), "min_value": (0, 255, 5)}
     LABEL = "Colour match"
     KIND = "source"
 
     def source_mask(self, ctx: "_Ctx") -> np.ndarray:
         return colour_mask(ctx.img, self.hex_color, self.tolerance,
-                           self.min_saturation, self.min_value)
+                           self.spread, self.min_saturation, self.min_value)
 
 
 @_register
@@ -406,6 +454,22 @@ class IdentifyConfig:
             if stage_cls is ColourStage:
                 kwargs["hex_color"] = valid_hex(
                     kwargs.get("hex_color", ColourStage.hex_color))
+                if "spread" not in kwargs:
+                    # A file written before the shade window had a number of
+                    # its own carried both meanings in ``tolerance`` (hue
+                    # × 0.9 AND saturation/value × 2.55). Folding it into
+                    # ``spread`` reproduces the stored mask EXACTLY — the
+                    # same expression, the same rounding — because a colour
+                    # someone tuned on the bench must not move because the
+                    # controls were split. Logged, because it means the
+                    # screen will show a second number that was never set.
+                    kwargs["spread"] = kwargs.get("tolerance",
+                                                  ColourStage.spread)
+                    logger.info(
+                        "identification: colour tolerance %r split into hue "
+                        "tolerance and shade spread %r to keep the stored "
+                        "mask identical", kwargs.get("tolerance"),
+                        kwargs["spread"])
             try:
                 stored[stage_cls.NAME] = stage_cls(**kwargs)
             except (TypeError, ValueError):
@@ -460,17 +524,10 @@ class _Ctx:
         #: judged on, and only another resolution of the same field of view
         #: needs the ratio.
         self.frame_scale = float(frame_scale) or 1.0
-        self._hsv = None
         self._grad = None
         self._contours: dict[int, Any] = {}
         self._regions: list = []          # (candidate id, contour)
         self._failed: set[int] = set()
-
-    @property
-    def hsv(self) -> np.ndarray:
-        if self._hsv is None:
-            self._hsv = cv2.cvtColor(self.img, cv2.COLOR_RGB2HSV)
-        return self._hsv
 
     @property
     def grad(self) -> np.ndarray:

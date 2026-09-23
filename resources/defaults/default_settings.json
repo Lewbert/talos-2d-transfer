@@ -245,7 +245,8 @@
   "identify": {
     "stages": [
       {"name": "colour", "enabled": true, "hex_color": "#c8a2c8",
-       "tolerance": 25.0, "min_saturation": 40.0, "min_value": 0.0},
+       "tolerance": 25.0, "spread": 25.0, "min_saturation": 40.0,
+       "min_value": 0.0},
       {"name": "morphology", "enabled": true, "kernel": 3},
       {"name": "size", "enabled": true, "min_area_um2": 30.0,
        "max_area_um2": 100000.0},

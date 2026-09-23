@@ -42,7 +42,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from talos.cv.identify import IdentifyConfig, sample_hex
+from talos.cv.identify import IdentifyConfig, sample_hex_stats
 from talos.ui.detect_engine import DetectionEngine
 from talos.ui.widgets.collapsible import CollapsibleGroup
 from talos.ui.widgets.control_groups import CameraGroup
@@ -64,6 +64,12 @@ PREVIEW_SCALE = 0.5
 #: a blurry processed frame on every jog release is worse than one that
 #: waits a moment.
 MOTION_HOLD_MS = 300
+
+#: How much the dropper's 9-px patch may disagree with itself (the largest
+#: per-channel standard deviation, in DN) before the pick is called out as
+#: straddling an edge. On a clean flake it reads a couple of DN of sensor
+#: noise; on an edge, tens.
+_PICK_SPREAD_WARN = 12.0
 
 
 class SampleFindingWorkspace(QWidget):
@@ -260,13 +266,23 @@ class SampleFindingWorkspace(QWidget):
         colour the mask will look for. In samples mode the screen is
         darkened and outlined, and sampling that would return a colour the
         sample does not have.
+
+        It also judges the PATCH it just averaged: the dropper samples a
+        9-px disc, so a click near a flake's edge returns the mean of the
+        flake and its substrate — a colour neither of them has, which then
+        becomes the mask's target *and* the curve's centre. Silently. That
+        is the shape of the "it sometimes finds the other layer" report, so
+        a patch that disagrees with itself says so.
         """
         frame = self.live_view.pick_frame()
         if frame is None:
             return
-        colour = sample_hex(frame, int(x_px), int(y_px))
-        if colour:
-            self.colour_group.set_hex(colour)
+        stats = sample_hex_stats(frame, int(x_px), int(y_px))
+        if stats is None:
+            return
+        colour, spread = stats
+        self.colour_group.set_hex(colour)
+        self._note_pick(colour, spread)
 
     # ------------------------------------------------------------------
     # configuration
@@ -283,6 +299,34 @@ class SampleFindingWorkspace(QWidget):
 
     def colour_rgb(self):
         return self.colour_group.rgb()
+
+    def _note_pick(self, colour: str, spread: float) -> None:
+        """Say what the dropper sampled, and whether it trusted itself.
+
+        The spread threshold is a judgement, not a measurement: on a clean
+        flake the disc reads within a couple of DN of itself (sensor noise),
+        and on an edge it reads in the tens. 12 leaves room for a noisy
+        sensor and a textured flake without hiding the case this exists for.
+        """
+        from talos.cv.identify import hex_to_hsv
+
+        stage = self.colour_group.stage()
+        _hue, sat, val = hex_to_hsv(colour)
+        if spread >= _PICK_SPREAD_WARN:
+            self.colour_group.note(
+                f"picked {colour} — the patch it averaged is not uniform "
+                f"(±{spread:.0f}). Click further inside the flake: the mean "
+                f"of two materials is neither of them.", tone="warn")
+        elif sat < stage.min_saturation or val < stage.min_value:
+            # The clamp in colour_mask keeps the pick matchable by lowering
+            # the floor to it. Worth saying, because it means the floor the
+            # operator set no longer applies to the colour they picked.
+            self.colour_group.note(
+                f"picked {colour} — paler than the Min saturation/Min "
+                f"brightness floor, so that floor no longer applies to it. "
+                f"The mask still matches the pick.", tone="warn")
+        else:
+            self.colour_group.note(f"picked {colour} · patch ±{spread:.0f}")
 
     def _review_context(self):
         """``(pre-process config, picked colour)`` for the review window's

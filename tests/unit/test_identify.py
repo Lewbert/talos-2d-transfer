@@ -50,6 +50,13 @@ def config(**overrides) -> IdentifyConfig:
     return IdentifyConfig(stages=stages)
 
 
+def _ctx_for(img):
+    """A minimal _Ctx, so a stage can be asked for its own mask."""
+    from talos.cv.identify import _Ctx
+
+    return _Ctx(img, (0.2, 0.2), 1.0)
+
+
 MAGENTA = rgb_of_hsv(150)
 
 
@@ -104,17 +111,155 @@ def test_hue_wraparound_matches_red_on_both_sides_of_the_seam():
 
 def test_min_saturation_keeps_grey_out_of_a_hue_band():
     """A pixel with no saturation has no meaningful hue: a wide band around
-    a red target would otherwise match every grey in the frame."""
+    a red target would otherwise match every grey in the frame.
+
+    Both stages carry ``spread`` as well as ``tolerance`` now, and they have
+    to: the grey sits 120 units below the target's saturation, so a shade
+    window that only went ±64 would reject it for the wrong reason and this
+    test would pass without exercising ``min_saturation`` at all.
+    """
     img = scene([(60, 60, 50, 40, (200, 200, 200))])   # grey, not red
     target = hex_of(rgb_of_hsv(0, s=120, v=200))
     loose = IdentifyPipeline().run(
         img, CALIB, config=config(colour=ColourStage(
-            hex_color=target, tolerance=60.0, min_saturation=0.0)))
+            hex_color=target, tolerance=60.0, spread=60.0,
+            min_saturation=0.0)))
     strict = IdentifyPipeline().run(
         img, CALIB, config=config(colour=ColourStage(
-            hex_color=target, tolerance=60.0, min_saturation=60.0)))
+            hex_color=target, tolerance=60.0, spread=60.0,
+            min_saturation=60.0)))
     assert len(loose.candidates) == 1
     assert strict.candidates == []
+
+
+def test_the_shade_spread_is_what_separates_two_layers_of_one_material():
+    """The bench report: a dark-blue monolayer target that also accepted the
+    lighter layer.
+
+    Dark blue is H113 S201 V132 and the light layer is H106 S78 V245 — 7° of
+    hue apart, ~120 units of saturation and value. The hue band cannot
+    separate them at any sane tolerance; the shade window is the control
+    that can, which is why it has its own number.
+    """
+    dark = (28, 52, 132)          # the monolayer
+    light = (170, 205, 245)       # the layer above it
+    img = scene([(60, 60, 50, 40, dark), (200, 60, 50, 40, light)])
+    target = hex_of(dark)
+
+    wide = IdentifyPipeline().run(
+        img, CALIB, config=config(colour=ColourStage(
+            hex_color=target, tolerance=25.0, spread=60.0,
+            min_saturation=0.0)))
+    narrow = IdentifyPipeline().run(
+        img, CALIB, config=config(colour=ColourStage(
+            hex_color=target, tolerance=25.0, spread=20.0,
+            min_saturation=0.0)))
+    # ...and the shipped defaults already separate them, which is why the
+    # bench sighting was either a wider shade window or a pick that was not
+    # the monolayer at all (see the dropper's patch warning).
+    default = IdentifyPipeline().run(
+        img, CALIB, config=config(colour=ColourStage(hex_color=target)))
+
+    assert len(wide.candidates) == 2, "the reported symptom, as it behaves"
+    assert len(narrow.candidates) == 1, "the dark layer only"
+    assert len(default.candidates) == 1
+    assert narrow.candidates[0].x_px == pytest.approx(85, abs=6)
+
+
+def test_the_shade_window_follows_the_spread_not_the_hue_tolerance():
+    """Turning up the hue tolerance must not open the shade window: that is
+    the whole reason the two numbers exist."""
+    dark = (28, 52, 132)
+    light = (170, 205, 245)
+    img = scene([(60, 60, 50, 40, dark), (200, 60, 50, 40, light)])
+    target = hex_of(dark)
+    for hue_tolerance in (5.0, 25.0, 60.0, 100.0):
+        result = IdentifyPipeline().run(
+            img, CALIB, config=config(colour=ColourStage(
+                hex_color=target, tolerance=hue_tolerance, spread=20.0,
+                min_saturation=0.0)))
+        assert len(result.candidates) == 1, f"tolerance {hue_tolerance}"
+
+
+def test_the_picked_colour_is_always_inside_its_own_mask():
+    """A mask that excludes the colour just clicked reads as a broken
+    detector — and it is silent. A floor above the target's own saturation
+    or value used to do exactly that."""
+    for rgb in [(28, 52, 132), (200, 205, 210), (30, 120, 200), (250, 250, 250),
+                (60, 60, 60), (150, 155, 160)]:
+        img = np.full((8, 8, 3), rgb, np.uint8)
+        for spread in (0.0, 15.0, 50.0):
+            for min_sat in (0.0, 40.0, 120.0, 200.0):
+                for min_val in (0.0, 60.0, 150.0, 240.0):
+                    mask = colour_mask(img, hex_of(rgb), 25.0, spread,
+                                       min_sat, min_val)
+                    assert mask.all(), (
+                        f"the pick {rgb} is outside its own mask "
+                        f"(spread {spread}, min_sat {min_sat}, "
+                        f"min_val {min_val})")
+
+
+def test_a_stored_colour_stage_keeps_its_exact_window():
+    """The split must not move a colour someone tuned on the bench: a file
+    written before ``spread`` existed carried both meanings in ``tolerance``,
+    and it is folded in unchanged (same expression, same rounding)."""
+    stored = {"stages": [{"name": "colour", "enabled": True,
+                          "hex_color": "#1c3484", "tolerance": 50.0,
+                          "min_saturation": 40.0, "min_value": 0.0}]}
+    stage = IdentifyConfig.from_dict(stored).stage("colour")
+    assert stage.spread == 50.0
+    img = np.full((4, 4, 3), (28, 52, 132), np.uint8)
+    assert np.array_equal(colour_mask(img, "#1c3484", 50.0, 50.0, 40.0, 0.0),
+                          stage.source_mask(_ctx_for(img)))
+    # an explicit spread in the file wins over the fold
+    stored["stages"][0]["spread"] = 12.0
+    assert IdentifyConfig.from_dict(stored).stage("colour").spread == 12.0
+
+
+def test_a_colour_stage_round_trips_with_its_spread():
+    stage = ColourStage(hex_color="#123456", tolerance=30.0, spread=12.0)
+    back = IdentifyConfig.from_dict(IdentifyConfig(stages=[stage]).to_dict())
+    again = back.stage("colour")
+    assert again.tolerance == 30.0 and again.spread == 12.0
+
+
+# --- what the dropper sampled, and whether it trusted itself ---------------
+
+def test_the_dropper_reports_a_patch_that_straddles_an_edge():
+    """The "sometimes" in the bench report: the dropper averages a 9-px
+    disc, so a click near a flake's edge returns a colour NEITHER the flake
+    nor the substrate has — and that colour then becomes the mask's target
+    and the curve's centre."""
+    from talos.cv.identify import sample_hex_stats
+
+    img = np.zeros((40, 60, 3), np.uint8)
+    img[:, :30] = (28, 52, 132)          # the dark layer
+    img[:, 30:] = (170, 205, 245)        # the light one
+    well_inside = sample_hex_stats(img, 10, 20)
+    on_the_edge = sample_hex_stats(img, 30, 20)
+
+    assert well_inside[1] < 5.0, "a clean patch of one colour reads clean"
+    assert well_inside[0] == "#1c3484"
+    assert on_the_edge[1] > 60.0, "a patch spanning both reads as a mixture"
+    assert on_the_edge[0] not in ("#1c3484", "#aacdf5")
+
+
+def test_sample_hex_and_its_stats_agree():
+    """``sample_hex`` is the one the mask's target comes from; the stats
+    must describe the very same patch."""
+    from talos.cv.identify import sample_hex_stats
+
+    img = scene([(60, 60, 50, 40, (28, 52, 132))])
+    stats = sample_hex_stats(img, 85, 80)
+    assert sample_hex(img, 85, 80) == stats[0]
+
+
+def test_the_stats_survive_a_point_off_the_frame():
+    from talos.cv.identify import sample_hex_stats
+
+    assert sample_hex_stats(np.zeros((4, 4, 3), np.uint8), 10, 10) is None
+    assert sample_hex_stats(np.zeros((4, 4, 3), np.uint8), -1, 0) is None
+    assert sample_hex(np.zeros((4, 4, 3), np.uint8), 10, 10) is None
 
 
 # --- the source is the colour, and only the colour -------------------------

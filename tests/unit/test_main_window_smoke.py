@@ -1035,6 +1035,51 @@ def test_a_tile_never_becomes_the_live_display_layer(window):
     assert finding.live_view._preprocessed_frame is live_layer
 
 
+def test_the_dropper_says_when_its_patch_is_not_uniform(window):
+    """The "sometimes" in the bench report.
+
+    The dropper averages a 9-px disc, so a click near a flake's edge returns
+    the mean of the flake and its substrate — a colour NEITHER of them has,
+    which then becomes the mask's target AND the curve's centre. It is said
+    out loud now, where the operator is already looking.
+    """
+    finding = window._sample_finding
+    finding._note_pick("#1c3484", 3.0)
+    assert "#1c3484" in finding.colour_group._hint.text()
+    assert "not uniform" not in finding.colour_group._hint.text()
+    assert finding.colour_group._hint.objectName() == "dim"
+
+    finding._note_pick("#5672b2", 34.0)
+    assert "not uniform" in finding.colour_group._hint.text()
+    assert finding.colour_group._hint.objectName() == "warn"
+
+
+def test_picking_off_the_live_view_sets_the_colour_and_judges_the_patch(window):
+    finding = window._sample_finding
+    frame = np.zeros((40, 60, 3), np.uint8)
+    frame[:, :30] = (28, 52, 132)          # the dark layer
+    frame[:, 30:] = (170, 205, 245)        # the light one
+    finding.live_view.set_preprocessed_frame(frame)
+
+    finding.on_pick(30, 20)                # on the boundary between them
+    assert "not uniform" in finding.colour_group._hint.text()
+
+    finding.on_pick(8, 20)                 # well inside the dark one
+    assert finding.colour_group.hex_color() == "#1c3484"
+    assert "not uniform" not in finding.colour_group._hint.text()
+
+
+def test_a_pick_paler_than_the_floors_says_the_floor_no_longer_applies(window):
+    """The clamp in :func:`colour_mask` keeps the picked colour inside its
+    own mask by lowering the floor to it. That changes what Min saturation
+    means for that colour, so it is said rather than silently done."""
+    finding = window._sample_finding
+    finding.colour_group.editor._editors["min_saturation"][1].setValue(200)
+    finding._note_pick("#d0d0d0", 2.0)
+    assert "floor" in finding.colour_group._hint.text()
+    assert finding.colour_group._hint.objectName() == "warn"
+
+
 def _result_stub():
     class _Result:
         candidates: list = []
@@ -1713,11 +1758,12 @@ def test_the_colour_rows_have_sliders_and_the_gates_do_not(window):
     from talos.ui.widgets.identify_panel import StageEditor
 
     colour = window._sample_finding.colour_group.editor
-    for name in ("tolerance", "min_saturation", "min_value"):
+    for name in ("tolerance", "spread", "min_saturation", "min_value"):
         kind, box, slider = colour._editors[name]
         assert kind == "num"
         assert slider.minimum() == 0
-        assert slider.maximum() == (100 if name == "tolerance" else 255)
+        assert slider.maximum() == (100 if name in ("tolerance", "spread")
+                                    else 255)
         assert slider.value() == pytest.approx(round(box.value()))
 
         # the slider moves the number, and the number moves the slider
@@ -1730,7 +1776,10 @@ def test_the_colour_rows_have_sliders_and_the_gates_do_not(window):
     # ``_editors``, so a slider row that skipped it would be a value the
     # operator sets and the pipeline never sees.
     colour._editors["tolerance"][1].setValue(42.0)
-    assert colour.stage().tolerance == pytest.approx(42.0)
+    colour._editors["spread"][1].setValue(12.0)
+    stage = colour.stage()
+    assert stage.tolerance == pytest.approx(42.0)
+    assert stage.spread == pytest.approx(12.0)
 
     # a gate keeps the compact row
     plain = StageEditor(SizeStage())

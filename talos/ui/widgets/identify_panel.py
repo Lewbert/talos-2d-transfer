@@ -61,8 +61,25 @@ PARAM_LABELS = {
     "min_saturation": "Min saturation",
     "min_value": "Min brightness",
     "min_edge_strength": "Min edge",
-    "tolerance": "Tolerance",
+    # The two halves of what used to be one "Tolerance": the axis each one
+    # moves is in the name, because that is the whole reason they are two.
+    "tolerance": "Hue tolerance",
+    "spread": "Shade spread",
     "kernel": "Kernel",
+}
+
+#: What a parameter does, for the row's tooltip. Only where the name cannot
+#: carry it — the colour's shade window is the one an operator is most
+#: likely to set by trial and error.
+PARAM_TIPS = {
+    "tolerance": "How far the hue may drift and still count as the same "
+                 "material — illumination, not thickness.",
+    "spread": "How much lighter or darker a pixel may be and still count. "
+              "Layer thickness shows up here, not in the hue: narrow it to "
+              "keep a thin flake and reject the thicker one next to it.",
+    "min_saturation": "Reject anything less saturated than this — a floor "
+                      "for grey and white backgrounds.",
+    "min_value": "Reject anything darker than this.",
 }
 
 
@@ -276,6 +293,9 @@ class StageEditor(QFrame):
         else:
             limits = getattr(stage, "RANGES", {}).get(name, (0, 255, 1))
             box = _spin(value, limits)
+            tip = PARAM_TIPS.get(name)
+            if tip:
+                box.setToolTip(tip)
             if self._sliders and limits[1] > limits[0]:
                 container, slider = self._number_and_slider(box, limits)
                 # Registered like every other row: ``stage()`` reads its
@@ -317,6 +337,9 @@ class StageEditor(QFrame):
         row.setSpacing(0)
         row.addWidget(box)
         row.addWidget(slider)
+        if box.toolTip():
+            container.setToolTip(box.toolTip())
+            slider.setToolTip(box.toolTip())
         return container, slider
 
     def _refresh_swatch(self) -> None:
@@ -403,10 +426,31 @@ class ColourGroup(QGroupBox):
         self.editor.sig_dropper.connect(self.sig_dropper)
         layout.addWidget(self.editor)
 
-        hint = QLabel("Also centres the local-contrast curve.")
-        hint.setObjectName("dim")
-        hint.setWordWrap(True)
-        layout.addWidget(hint)
+        self._hint = QLabel(self.DEFAULT_HINT)
+        self._hint.setObjectName("dim")
+        self._hint.setWordWrap(True)
+        layout.addWidget(self._hint)
+
+    #: What the card's own line says when it has nothing else to report.
+    DEFAULT_HINT = "Also centres the local-contrast curve."
+
+    def note(self, text: str, tone: str | None = None) -> None:
+        """The card's one line, where the operator is already looking.
+
+        Used by the dropper to say what it sampled and whether the patch it
+        averaged was uniform: a 9-px disc that straddles a flake's edge
+        returns a colour neither the flake nor the substrate has, and the
+        click that produced it looked perfectly reasonable on screen.
+        """
+        self._hint.setText(text or self.DEFAULT_HINT)
+        wanted = tone or "dim"
+        if self._hint.objectName() != wanted:
+            self._hint.setObjectName(wanted)
+            # Qt only re-evaluates the stylesheet when told the widget
+            # changed; without this the colour never moves.
+            style = self._hint.style()
+            style.unpolish(self._hint)
+            style.polish(self._hint)
 
     def _colour_stage(self):
         stages = IdentifyConfig.from_dict(

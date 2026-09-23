@@ -86,11 +86,31 @@ prevention is structural now (see above). Both names are recorded in
 implementation — a `low ≤ h ≤ high` box — silently leaves red one-sided, which
 is the bug the reference project shipped with and this one has a test against.
 
-**Saturation has its own floor.** An unsaturated pixel's hue is meaningless, so
-a wide band around a red target would otherwise match every grey in the frame.
-`min_saturation` (default 40) is separate from the tolerance slider for exactly
-that reason; a grey or white target needs it lowered deliberately, and the UI
-gives it a row of its own.
+**Hue and shade are two numbers, and they must be.** The match is an HSV box:
+`Hue tolerance` sets the hue half-width (× 0.9), `Shade spread` sets the
+saturation **and** value half-widths (× 2.55). They were one number until
+2026-09-23, and on a blue-on-blue sample that was a trap worth documenting:
+
+| | H | S | V |
+|---|---|---|---|
+| monolayer, `#1c3484` | 113 | 201 | 132 |
+| the layer above it, `#aacdf5` | 106 | 78 | 245 |
+
+Seven degrees of hue apart, and ~120 units of saturation and value. **The hue
+band is irrelevant to that pair** — the shade window is the only thing that
+separates them, so widening the single old slider to tolerate illumination also
+let the other layer in (from ≈ 49 on). Two sliders mean hue can be opened
+without opening the shade, which is the whole point of having them.
+
+**Two floors, and the pick cannot be outside its own window.** An unsaturated
+pixel's hue is meaningless, so a wide band around a red target would otherwise
+match every grey in the frame: that is `min_saturation` (default 40), with
+`min_value` (default 0) as the brightness equivalent. Both are *clamped to the
+picked colour*, because a mask the pick is outside of reads as a broken
+detector and is silent — which is exactly what a raised `min_saturation` used
+to do to the very flake it was raised from. The consequence is deliberate and
+is reported in the colour card's own line: for a pick paler than the floor, the
+floor no longer applies to that pick.
 
 **The preview is honest, and so is the resolution.** A pixel-unit parameter —
 the edge margin, the merge gap, the sharpness floor — means pixels of the frame
@@ -246,6 +266,16 @@ layer IS the raw frame, byte for byte. It is also the array the identification
 ran on, so a colour picked off the screen is a colour the mask will look for,
 by construction rather than by coincidence.
 
+**...and it judges the patch it averaged, out loud.** The sample is a 9-px
+circular mean, not a pixel, so a click near a flake's edge returns the mean of
+the flake and its substrate — a colour *neither* material has, which then
+becomes the mask's target and the curve's centre. It is the "sometimes it finds
+the other layer" case, and it is now visible rather than silent: the colour
+card's line reports the patch's own spread, in warning colour above 12 DN,
+with the fix ("click further inside"). Two nearby consequences of the same
+click are reported there too: a patch spanning an edge, and a pick paler than
+the Min saturation/Min brightness floors (see the clamp above).
+
 ### The two processed views stand down while a stage moves, or a scan runs
 
 They cost a pre-process and a full identification per job, and while the
@@ -298,22 +328,27 @@ says whether it is doing anything useful.
    dropper on the Pre-processed view), then try the local-contrast curve: the
    gain is the slope at the picked colour, the band is how far either side it
    stays steep. A wide band with a high gain will be narrowed automatically;
-   the readout under the controls says what it actually used. Shade correction
-   is worth trying when the illumination is visibly uneven — it removes a
-   gradient the curve would otherwise amplify as eagerly as a flake.
-2. **Tolerance** until the flake family is caught without the substrate.
-3. **Min saturation** if the substrate (or the illumination gradient) comes in
+   the readout under the controls says what it actually used. A vignette
+   correction is the intended future of the removed shade stage (see "The
+   three stages that were removed").
+2. **Hue tolerance** until the flake family is caught without the substrate.
+3. **Shade spread** when two *thicknesses* of the same material arrive
+   together — the monolayer and the bilayer are close in hue and far apart in
+   brightness, so this is the slider that separates them. Narrow it until the
+   layer you do not want drops out, and check the colour card's line first: if
+   the pick itself was a mixture, fix the pick before touching this.
+4. **Min saturation** if the substrate (or the illumination gradient) comes in
    with it — this is the parameter that does the most work on a real wafer.
-4. **Clean up**: raise the kernel if a flake fragments into speckle; it also
+5. **Clean up**: raise the kernel if a flake fragments into speckle; it also
    merges broken edges, so watch that it does not eat small samples.
-5. **Size**: the µm² floor is the honest filter, and it is in physical units, so
+6. **Size**: the µm² floor is the honest filter, and it is in physical units, so
    it means the same thing at every objective. The µm² floor is the one filter
    here whose threshold is a fact about the sample rather than about the image.
-6. **Sharpness**: raise it to reject defocused blobs. Its default (4.0) is
+7. **Sharpness**: raise it to reject defocused blobs. Its default (4.0) is
    deliberately low, because a colour-matched contour traces the colour
    boundary and scores in the tens — a threshold picked without measuring would
    reject most real samples.
-7. **Merge**: raise the gap when one flake arrives as several boxes.
+8. **Merge**: raise the gap when one flake arrives as several boxes.
 
 The unit tests build synthetic frames with known truth (a blob of a known colour
 at a known place, and a substrate that is none of those), which is the fastest
