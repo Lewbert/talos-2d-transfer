@@ -182,5 +182,42 @@ def draw_sample_rings(mosaic: np.ndarray, samples, tiles,
     return mosaic
 
 
-__all__ = ["DEFAULT_MAX_PX", "build_mosaic", "draw_sample_rings",
+def mark_sample(frame: np.ndarray, x_px: float, y_px: float,
+                area_px2: float, *,
+                colour: tuple[int, int, int] = (0, 255, 90),
+                label: str | None = None) -> np.ndarray:
+    """Ring ONE sample on the frame it was found in. A COPY, never in place.
+
+    ``draw_sample_rings`` works in µm because a mosaic has nothing else; a
+    frame has the sample's own pixels, so this one is exact — the radius is
+    the circle of equal AREA in the frame's own pixel count, which is what
+    identification actually measured. It is the ring the operator can hold
+    against the flake's edge on screen, which is the whole point of looking.
+
+    Drawn dark-then-bright like the mosaic's: a ring has to read on a bright
+    flake and on a dark field. A frame that is not colour is returned
+    unchanged (there is no ring to draw on a plane of grey).
+    """
+    out = np.array(frame, copy=True, order="C")
+    if out.ndim != 3 or out.size == 0:
+        return out
+    height, width = out.shape[:2]
+    short = max(1, min(height, width))
+    radius = max(3, int(round(math.sqrt(max(float(area_px2), 1.0) / math.pi))))
+    centre = (int(round(float(x_px))), int(round(float(y_px))))
+    thickness = max(2, int(round(short / 400.0)))
+    cv2.circle(out, centre, radius, (0, 0, 0), thickness + 2, cv2.LINE_AA)
+    cv2.circle(out, centre, radius, colour, thickness, cv2.LINE_AA)
+    if label:
+        # Scaled to the frame, so the number reads at 4K and at 1080p alike.
+        font = max(0.6, min(2.5, short / 500.0))
+        at = (centre[0] + radius + 4, centre[1] - radius - 4)
+        cv2.putText(out, str(label), at, cv2.FONT_HERSHEY_SIMPLEX, font,
+                    (0, 0, 0), 4, cv2.LINE_AA)
+        cv2.putText(out, str(label), at, cv2.FONT_HERSHEY_SIMPLEX, font,
+                    colour, 2, cv2.LINE_AA)
+    return out
+
+
+__all__ = ["DEFAULT_MAX_PX", "build_mosaic", "draw_sample_rings", "mark_sample",
            "mosaic_geometry"]

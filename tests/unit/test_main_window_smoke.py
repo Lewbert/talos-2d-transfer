@@ -2,6 +2,8 @@
 bar, hidden LogWindow — with a stub manager (no hardware, no services).
 """
 
+import cv2
+import numpy as np
 import pytest
 from PySide6.QtCore import QObject, QSettings, Signal
 from PySide6.QtWidgets import QApplication
@@ -1332,9 +1334,10 @@ def _found_sample(window, x_um=1500.0, y_um=-250.0):
     from talos.models import FlakeCandidate
 
     scan = window._sample_finding.scan_panel
-    scan._show_candidates([FlakeCandidate(x_px=1.0, y_px=2.0, area_px2=10.0,
-                                          area_um2=42.0, x_um=x_um, y_um=y_um,
-                                          score=7.0)], "live view")
+    scan._show_candidates([(-1, FlakeCandidate(x_px=1.0, y_px=2.0,
+                                               area_px2=10.0, area_um2=42.0,
+                                               x_um=x_um, y_um=y_um,
+                                               score=7.0))], "live view")
     scan._table.selectRow(0)
     return scan
 
@@ -1420,14 +1423,203 @@ def test_the_samples_are_a_table_outside_the_settings_scroll(window):
 
     scan = window._sample_finding.scan_panel
     assert scan._table.rowCount() >= 0
-    assert [scan._table.horizontalHeaderItem(i).text() for i in range(5)] == \
-        ["#", "X µm", "Y µm", "Area µm²", "Edge"]
+    assert [scan._table.horizontalHeaderItem(i).text() for i in range(6)] == \
+        ["#", "X µm", "Y µm", "Area µm²", "Edge", "View"]
     # not inside any scroll area
     parent = scan._table.parentWidget()
     while parent is not None and parent is not scan:
         assert not isinstance(parent, QScrollArea), \
             "the samples must not scroll with the scan settings"
         parent = parent.parentWidget()
+
+
+# --- the View column: the frame a sample was found in ---------------------
+
+def _candidate(x_um=100.0, y_um=0.0, area_um2=42.0, x_px=20.0, y_px=15.0):
+    from talos.models import FlakeCandidate
+
+    return FlakeCandidate(x_px=x_px, y_px=y_px, area_px2=120.0,
+                          area_um2=area_um2, x_um=x_um, y_um=y_um,
+                          score=7.0, bbox=(10, 10, 20, 10))
+
+
+def _run_dir_with_frames(tmp_path, tiles=(3, 5), count=None):
+    """A run folder: a PNG per index in ``tiles`` and the manifest that
+    indexes them — one row per waypoint, as the writer leaves it (a miss
+    keeps its row with an empty frame cell)."""
+    import csv
+
+    out = tmp_path / "scan_20260923_101500"
+    (out / "frames").mkdir(parents=True)
+    for index in tiles:
+        cv2.imwrite(str(out / "frames" / f"frame_{index:05d}.png"),
+                    np.full((40, 60, 3), 10 * index, np.uint8))
+    rows = max(tiles) + 1 if count is None else int(count)
+    with open(out / "manifest.csv", "w", newline="", encoding="utf-8") as fh:
+        writer = csv.writer(fh)
+        writer.writerow(["frame", "x_um", "y_um", "r_deg", "t_unix",
+                         "objective_id", "focus_pos"])
+        for index in range(rows):
+            name = f"frame_{index:05d}.png" if index in tiles else ""
+            writer.writerow([name, 100.0 * index, 0.0, 0.0, 0.0, 0, 0])
+    return out
+
+
+def test_a_row_knows_which_tile_it_came_from(window, tmp_path):
+    """The table is flattened from per-tile results, so the tile index has
+    to travel WITH each row — the mosaic's ring numbering, the CSV's tile
+    column and this all have to agree."""
+    scan = window._sample_finding.scan_panel
+    scan.on_tile_result(3, [_candidate(), _candidate(area_um2=10.0)])
+    scan.on_tile_result(5, [_candidate(area_um2=99.0)])
+    assert scan._row_tiles == [3, 3, 5]
+    assert [c.area_um2 for c in scan._candidates] == [42.0, 10.0, 99.0]
+
+
+def test_the_view_column_opens_the_frame_the_row_came_from(window, tmp_path):
+    scan = window._sample_finding.scan_panel
+    scan._run_dir = _run_dir_with_frames(tmp_path)
+    scan.on_tile_result(3, [_candidate(area_um2=42.0)])
+    scan.on_tile_result(5, [_candidate(area_um2=99.0)])
+    scan._review_row(0)
+    assert scan._review.isVisible()
+    shot = scan._review._shot
+    assert shot.tile == 3
+    assert shot.frame is not None
+    assert int(shot.frame[0, 0, 0]) == 30, "tile 3's own pixels"
+    # ...and stepping to the next row reads the OTHER frame
+    scan._review.step(1)
+    assert scan._review._shot.tile == 5
+    assert int(scan._review._shot.frame[0, 0, 0]) == 50
+
+
+def test_the_ring_is_drawn_on_the_sample_not_the_frames_corner(window,
+                                                              tmp_path):
+    """The ring uses the candidate's own pixels — the window draws in the
+    frame's coordinates, so nothing can put it at the wrong scale."""
+    scan = window._sample_finding.scan_panel
+    scan._run_dir = _run_dir_with_frames(tmp_path)
+    scan.on_tile_result(3, [_candidate(x_px=20.0, y_px=15.0)])
+    scan._review_row(0)
+    marked = scan._review._marked
+    plain = scan._review._shot.frame
+    assert marked.shape == plain.shape
+    assert not np.array_equal(marked, plain), "something was drawn"
+    assert np.array_equal(plain, scan._review._shot.frame), \
+        "the cached frame is never drawn on"
+    # the drawn pixels are around (20, 15) — where the sample is
+    diff = (marked != plain).any(axis=2)
+    ys, xs = np.nonzero(diff)
+    assert abs(int(xs.mean()) - 20) <= 8 and abs(int(ys.mean()) - 15) <= 8
+
+
+def test_a_frame_the_writer_has_not_flushed_yet_is_not_a_blank_window(
+        window, tmp_path):
+    """Detection outruns the writer, so a row can exist a moment before its
+    frame is on disk. The window says so — and re-reads once the writer
+    catches up, rather than leaving the operator to guess."""
+    import csv
+
+    scan = window._sample_finding.scan_panel
+    out = _run_dir_with_frames(tmp_path, tiles=(3,), count=7)   # rows 0..6
+    scan._run_dir = out
+    scan._job = "scan"
+    try:
+        scan.on_tile_result(7, [_candidate()])       # row 7 not written yet
+        scan._review_row(0)
+        assert "still being written" in scan._review._shot.error
+        # the writer catches up: PNG and manifest row together
+        cv2.imwrite(str(out / "frames" / "frame_00007.png"),
+                    np.full((40, 60, 3), 70, np.uint8))
+        with open(out / "manifest.csv", "a", newline="",
+                  encoding="utf-8") as fh:
+            csv.writer(fh).writerow(["frame_00007.png", 700.0, 0.0, 0.0, 0.0,
+                                     0, 0])
+        scan._review.show_sample(0)
+        assert scan._review._shot.frame is not None
+        assert int(scan._review._shot.frame[0, 0, 0]) == 70
+    finally:
+        scan._job = None
+
+
+def test_a_missing_frame_says_why_instead_of_showing_nothing(window,
+                                                            tmp_path):
+    """A tile the run recorded as a MISS has no frame and never will: that
+    is a different message from the one above, not a permanent 'trying'."""
+    scan = window._sample_finding.scan_panel
+    scan._run_dir = _run_dir_with_frames(tmp_path)
+    scan.on_tile_result(9, [_candidate()])       # tile 9 has no row
+    scan._review_row(0)
+    assert "no frame for this tile" in scan._review._shot.error
+    assert scan._review._shot.frame is None
+
+
+def test_a_live_row_is_read_from_the_live_frame(window):
+    """Live rows have no file: their frame is the one the detector saw."""
+    scan = window._sample_finding.scan_panel
+    scan.live_frame_fn = lambda: np.full((20, 30, 3), 5, np.uint8)
+    scan.show_live_candidates([_candidate()])
+    assert scan._row_tiles == [-1]
+    scan._review_row(0)
+    assert scan._review._shot.tile == -1
+    assert int(scan._review._shot.frame[0, 0, 0]) == 5
+
+
+def test_clearing_the_results_drops_the_run_and_closes_the_review(window,
+                                                                 tmp_path):
+    scan = window._sample_finding.scan_panel
+    scan._run_dir = _run_dir_with_frames(tmp_path)
+    scan.on_tile_result(3, [_candidate()])
+    scan._review_row(0)
+    assert scan._review.isVisible()
+    scan.clear_results()
+    assert scan._run_dir is None and scan._frame_paths is None
+    assert not scan._review.isVisible()
+    assert scan._row_tiles == []
+
+
+def test_a_new_run_forgets_the_previous_runs_frames(window, tmp_path):
+    scan = window._sample_finding.scan_panel
+    scan._run_dir = _run_dir_with_frames(tmp_path)
+    scan.on_tile_result(3, [_candidate()])
+    scan._review_row(0)
+    assert scan._review.isVisible()
+    scan._forget_run()            # what _begin_scan calls
+    assert scan._run_dir is None
+    assert not scan._review.isVisible()
+
+
+def test_the_view_column_is_the_only_one_that_opens_the_review(window):
+    """A click on the numbers must not open a window, and a double-click
+    keeps meaning go-to everywhere else."""
+    scan = window._sample_finding.scan_panel
+    scan.on_tile_result(3, [_candidate()])
+    scan._on_cell_clicked(0, 1)
+    assert scan._review is None or not scan._review.isVisible()
+    scan._on_cell_clicked(0, 5)
+    assert scan._review is not None and scan._review.isVisible()
+    scan._review.hide()
+    scan._on_double_clicked(scan._table.model().index(0, 5))
+    assert scan._review.isVisible()
+
+
+def test_the_pre_processed_toggle_is_offered_only_when_the_chain_is_on(
+        window, tmp_path):
+    """A toggle that cannot change anything is a control that lies."""
+    from talos.cv.preprocess import PreprocessConfig
+
+    scan = window._sample_finding.scan_panel
+    scan._run_dir = _run_dir_with_frames(tmp_path)
+    scan.on_tile_result(3, [_candidate()])
+    scan.review_context_fn = lambda: None
+    assert scan._review_apply() is None
+    scan._review_row(0)
+    assert not scan._review.pre_btn.isEnabled()
+    # ...and switching the chain on offers it, on the next sample opened
+    scan.review_context_fn = lambda: (PreprocessConfig(), (200, 100, 50))
+    assert callable(scan._review_apply())
+    scan._review_row(0)
+    assert scan._review.pre_btn.isEnabled()
 
 
 def test_a_scan_that_stops_early_is_not_reported_as_done(window):

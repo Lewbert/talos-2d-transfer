@@ -205,6 +205,12 @@ class SampleFindingWorkspace(QWidget):
         # belongs to the app (the Navigation tab sets the same one).
         self.scan_panel.sig_set_origin.connect(self.sig_set_stage_origin)
         self.scan_panel.pending_tiles_fn = lambda: self._engine.pending_tiles
+        # The two things the sample list's View column needs from the tab:
+        # the frame a live row was found in, and what to pre-process a
+        # reviewed frame with. Both are callables, so the panel never has to
+        # know which layer holds the pixels or what the chain currently is.
+        self.scan_panel.live_frame_fn = lambda: self._last_frame
+        self.scan_panel.review_context_fn = self._review_context
         self.scan_panel.set_flip(self.camera_flip())
         column.addWidget(self.scan_panel, 1)
         panel.setMinimumWidth(320)
@@ -277,6 +283,16 @@ class SampleFindingWorkspace(QWidget):
 
     def colour_rgb(self):
         return self.colour_group.rgb()
+
+    def _review_context(self):
+        """``(pre-process config, picked colour)`` for the review window's
+        toggle — or None while the chain is off, because there is then
+        nothing to compare the frame against and the toggle would be a
+        control that cannot change anything."""
+        cfg = self.preprocess_config()
+        if cfg is None or not getattr(cfg, "enabled", False):
+            return None
+        return (cfg, self.colour_rgb())
 
     def camera_flip(self) -> bool:
         return bool(self._settings.device("camera").get("flip", True))

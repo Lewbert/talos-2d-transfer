@@ -13,7 +13,8 @@ Top to bottom, and in the order the work happens:
   directions, the path order, the start axis, whether to come back.
   Overlap, settle, speed, backlash and which extra files a run writes are
   set once in Preferences and not touched again;
-- **the found samples** — the list, with *go to* and an export.
+- **the found samples** — the list, with *go to*, an export, and a *View*
+  column that opens the frame the sample was found in.
 
 Two rules this panel keeps, both inherited from the console it replaces:
 
@@ -30,8 +31,9 @@ import threading
 import time
 from pathlib import Path
 
+import cv2
 import numpy as np
-from PySide6.QtCore import QThread, Qt, Signal
+from PySide6.QtCore import QThread, Qt, QTimer, Signal
 from PySide6.QtWidgets import (
     QDoubleSpinBox,
     QFileDialog,
@@ -56,7 +58,9 @@ from talos.cv.frame_source import LatestFrameSource
 from talos.cv.scan import (HILBERT, ONE_WAY, ORIGIN_LABELS, ORIGINS, PATHS,
                            SERPENTINE, SPIRAL, GridScanner, plan_path,
                            scan_speed_config)
-from talos.cv.scan_output import candidate_rows, write_outputs
+from talos.cv.scan_output import (candidate_rows, frames_from_manifest,
+                                  write_outputs)
+from talos.ui.widgets.sample_review import SampleReviewWindow, SampleShot
 from talos.models import (FlakeCandidate, ObjectiveCalibration, ScanParams,
                           StagePosition)
 from talos.scan_settings import (load_scan_settings, save_scan_settings,
@@ -103,6 +107,12 @@ PATH_OPTIONS = [
 #: The 4K sensor mode's width, which is also how a streamed frame says
 #: which mode the camera is in (``capture.resolution`` uses the same 0/1).
 _UHD_WIDTH_PX = 3840
+
+#: The sample list's "View" column — the frame the sample was found in. A
+#: table COLUMN rather than a button per row: the table is rebuilt on every
+#: tile result, so a widget per row would be built and thrown away hundreds
+#: of times in a run.
+_VIEW_COLUMN = 5
 
 
 def _path_kind(toggle_value: str) -> str:
@@ -193,6 +203,21 @@ class ScanPanel(QWidget):
         self._pending_scan_start: tuple[int, tuple[float, float]] | None = None
         #: The live mode to put back after a run that switched it.
         self._camera_mode_before_scan: int | None = None
+        #: The run whose frames the View column reads. Decided when the run
+        #: starts (a row can be reviewed while the table is still filling)
+        #: and dropped with the results.
+        self._run_dir: Path | None = None
+        self._frame_paths: dict[int, Path] | None = None
+        self._frame_cache: dict[int, object] = {}
+        #: row -> the tile the row came from (-1 = the live feed), parallel
+        #: to ``_candidates`` and in the same order.
+        self._row_tiles: list[int] = []
+        self._review: SampleReviewWindow | None = None
+        #: Set by the workspace: how to get the LIVE frame a live row came
+        #: from, and what to pre-process a reviewed frame with (None when
+        #: pre-processing is off, which disables the review's toggle).
+        self.live_frame_fn = None
+        self.review_context_fn = None
         # The camera's completion relay (the same signals the snapshot
         # busy-gate uses) — the run is sequenced on them.
         manager.sig_job_done.connect(self._on_camera_job_done)
@@ -502,9 +527,12 @@ class ScanPanel(QWidget):
         self._samples_note.setWordWrap(True)
         layout.addWidget(self._samples_note)
 
-        self._table = QTableWidget(0, 5)
+        self._table = QTableWidget(0, _VIEW_COLUMN + 1)
         self._table.setHorizontalHeaderLabels(
-            ["#", "X µm", "Y µm", "Area µm²", "Edge"])
+            ["#", "X µm", "Y µm", "Area µm²", "Edge", "View"])
+        self._table.setToolTip("Double-click a row to move the stage to that "
+                               "sample; the View column opens the frame it "
+                               "was found in")
         self._table.setEditTriggers(
             QTableWidget.EditTrigger.NoEditTriggers)
         self._table.setSelectionBehavior(
@@ -518,10 +546,16 @@ class ScanPanel(QWidget):
         self._table.setMinimumHeight(110)
         self._table.setMaximumHeight(180)
         header = self._table.horizontalHeader()
-        for column in range(5):
+        for column in range(_VIEW_COLUMN):
             header.setSectionResizeMode(column, header.ResizeMode.Stretch)
+        header.setSectionResizeMode(_VIEW_COLUMN, header.ResizeMode.Fixed)
+        self._table.setColumnWidth(_VIEW_COLUMN, 46)
+        item = self._table.horizontalHeaderItem(_VIEW_COLUMN)
+        if item is not None:
+            item.setToolTip("Open the frame this sample was found in")
         self._table.itemSelectionChanged.connect(self._on_row_changed)
-        self._table.doubleClicked.connect(lambda _index: self._on_go_to())
+        self._table.cellClicked.connect(self._on_cell_clicked)
+        self._table.doubleClicked.connect(self._on_double_clicked)
         layout.addWidget(self._table, 1)
 
         row = QHBoxLayout()
@@ -818,18 +852,27 @@ class ScanPanel(QWidget):
         """Detection finished for the live frame."""
         self._live_candidates = list(candidates)
         if self._job is None and not self._scan_hits:
-            self._show_candidates(self._live_candidates, "live view")
+            self._show_candidates([(-1, cand) for cand in self._live_candidates],
+                                  "live view")
 
-    def _flatten_scan_hits(self) -> list[FlakeCandidate]:
-        out: list[FlakeCandidate] = []
+    def _flatten_scan_hits(self) -> list[tuple[int, FlakeCandidate]]:
+        """(tile index, candidate) for every found sample, in table order.
+
+        The tile index travels WITH the candidate rather than living on it:
+        identification is deliberately frame-agnostic (it never sees which
+        frame it ran on), and the panic index is a property of the feed, not
+        of the flake. Row N of the table is element N here — which is also
+        the numbering the annotated mosaic rings by."""
+        out: list[tuple[int, FlakeCandidate]] = []
         for index in sorted(self._scan_hits):
-            out.extend(self._scan_hits[index])
+            out.extend((index, cand) for cand in self._scan_hits[index])
         return out
 
-    def _show_candidates(self, candidates, source: str) -> None:
+    def _show_candidates(self, pairs, source: str) -> None:
         """Rebuild the table. The rows come from the same formatter the CSV
         export uses, so what is exported is what was shown."""
-        self._candidates = list(candidates)
+        self._row_tiles = [int(tile) for tile, _cand in pairs]
+        self._candidates = [cand for _tile, cand in pairs]
         self._selected = -1
         rows = candidate_rows(self._candidates)
         self._table.blockSignals(True)
@@ -837,6 +880,10 @@ class ScanPanel(QWidget):
         for row, cells in enumerate(rows):
             for column, text in enumerate(cells):
                 self._table.setItem(row, column, QTableWidgetItem(text))
+            view = QTableWidgetItem("View")
+            view.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            view.setToolTip("Show the frame this sample was found in")
+            self._table.setItem(row, _VIEW_COLUMN, view)
         self._table.clearSelection()
         self._table.blockSignals(False)
         count = len(self._candidates)
@@ -846,6 +893,161 @@ class ScanPanel(QWidget):
         # an enabled button that only ever answers "select a sample first"
         # is a button that lies
         self._go_to_btn.setEnabled(count > 0 and self._job is None)
+
+    def _on_cell_clicked(self, row: int, column: int) -> None:
+        """The View column opens the sample's frame."""
+        if column == _VIEW_COLUMN:
+            self._review_row(int(row))
+
+    def _on_double_clicked(self, index) -> None:
+        """Double-click keeps meaning *go to* — except on the View column,
+        where it means the same as a single click there (an operator who
+        double-clicks a button expects it to do the one thing it says)."""
+        if index.column() == _VIEW_COLUMN:
+            self._review_row(int(index.row()))
+        else:
+            self._on_go_to()
+
+    # ------------------------------------------------------------------
+    # the frame behind a row
+    # ------------------------------------------------------------------
+
+    def _review_row(self, row: int, retry: bool = True) -> None:
+        """Show the frame this row's sample was found in."""
+        if not 0 <= row < len(self._candidates):
+            return
+        window = self._review_window()
+        window.set_source(lambda r: self._sample_shot(r, retry=retry),
+                          len(self._candidates), self._review_apply())
+        window.show_sample(row)
+        self._show_review(window)
+
+    def _review_window(self) -> SampleReviewWindow:
+        if self._review is None:
+            self._review = SampleReviewWindow(self._input, self.window())
+        return self._review
+
+    def _show_review(self, window: SampleReviewWindow) -> None:
+        window.show()
+        window.raise_()
+        window.activateWindow()
+
+    def _sample_shot(self, row: int, retry: bool = True) -> SampleShot:
+        """What the review window shows for one row.
+
+        The pixels are read at their own resolution: the tile's PNG for a
+        scan row, the live frame for a live one. No resampling anywhere —
+        the candidate's ``x_px/y_px`` are pixels of exactly this frame, so
+        the ring lands on the flake identification measured.
+        """
+        if not 0 <= row < len(self._candidates):
+            return SampleShot(error="That row is gone.")
+        cand = self._candidates[row]
+        tile = self._row_tiles[row] if row < len(self._row_tiles) else -1
+        shot = SampleShot(
+            number=row + 1, tile=tile,
+            source=(self._run_dir.name if tile >= 0 and self._run_dir
+                    else "live view"),
+            x_um=float(cand.x_um), y_um=float(cand.y_um),
+            area_um2=float(cand.area_um2), score=float(cand.score),
+            x_px=float(cand.x_px), y_px=float(cand.y_px),
+            area_px2=float(cand.area_px2))
+        if tile < 0:
+            frame = self.live_frame_fn() if self.live_frame_fn else None
+            shot.frame = frame
+            if frame is None:
+                shot.error = ("The live frame is not available yet — the "
+                              "view-mode layer it lives in has not been "
+                              "computed.")
+            return shot
+        frame, why = self._tile_frame(tile)
+        shot.frame = frame
+        if frame is None:
+            shot.error = why
+            if self._job == "scan" and retry:
+                # The writer thread can be a tile behind the detector, so a
+                # row can exist a moment before its frame is on disk. One
+                # re-read, then the operator decides.
+                QTimer.singleShot(250, lambda: self._review_retry(row))
+        return shot
+
+    def _review_retry(self, row: int) -> None:
+        """One re-read of a frame the writer had not flushed yet."""
+        if self._review is None or not self._review.isVisible():
+            return
+        if row != self._review.current_row() or not 0 <= row < len(self._candidates):
+            return
+        self._review.show_sample(row)
+
+    def _tile_frame(self, tile: int):
+        """``(frame, why not)`` — the tile's captured frame as RGB.
+
+        The two ways to have no frame are told apart, because they mean
+        different things to the operator: *the run has not written this tile
+        yet* (wait) and *it never will* (this row's frame is not coming).
+        """
+        if tile in self._frame_cache:
+            return self._frame_cache[tile], ""
+        if self._run_dir is None:
+            return None, "No run to read this frame from."
+        path = self._frame_paths_for_run().get(int(tile))
+        if path is None:
+            return None, ("This frame is still being written — trying again…"
+                          if self._job == "scan" else
+                          "The manifest has no frame for this tile — it was "
+                          "recorded as a miss.")
+        image = cv2.imread(str(path))
+        if image is None:
+            return None, f"The frame file could not be read ({path.name})."
+        frame = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+        # Three frames is what stepping through the list needs; a full-plan
+        # cache would be gigabytes at 4K.
+        self._frame_cache[tile] = frame
+        while len(self._frame_cache) > 3:
+            self._frame_cache.pop(next(iter(self._frame_cache)))
+        return frame, ""
+
+    def _frame_paths_for_run(self) -> dict[int, Path]:
+        """waypoint index -> frame path, from the run's own manifest.
+
+        Re-read while a run is filling it (the manifest is appended and
+        flushed per tile, so a reader sees exactly the tiles written so far)
+        and cached once the run is over."""
+        if self._frame_paths is not None and self._job is None:
+            return self._frame_paths
+        manifest = (self._run_dir / "manifest.csv") if self._run_dir else None
+        paths: dict[int, Path] = {}
+        if manifest is not None and manifest.exists():
+            try:
+                paths = dict(frames_from_manifest(manifest, self._run_dir))
+            except (OSError, ValueError):
+                paths = {}
+        if self._job is None:
+            self._frame_paths = paths
+        return paths
+
+    def _review_apply(self):
+        """The pre-processing function for the review's toggle, or None.
+
+        None (which disables the toggle) whenever the chain is off: there is
+        nothing to compare against then, and the checkbox would be a control
+        that cannot change anything."""
+        context = self.review_context_fn() if self.review_context_fn else None
+        if context is None:
+            return None
+        from talos.cv import preprocess as pre
+
+        cfg, colour = context
+        return lambda frame: pre.apply(frame, cfg, colour)
+
+    def _forget_run(self) -> None:
+        """Drop the run the View column reads from."""
+        self._run_dir = None
+        self._frame_paths = None
+        self._frame_cache.clear()
+        self._row_tiles = []
+        if self._review is not None:
+            self._review.hide()
 
     def _on_row_changed(self) -> None:
         """Follow the SELECTION, not the current index.
@@ -869,7 +1071,7 @@ class ScanPanel(QWidget):
         self._select(index)
 
     def refresh_markers(self) -> None:
-        candidates = self._flatten_scan_hits()
+        candidates = [cand for _tile, cand in self._flatten_scan_hits()]
         self.map.set_markers(
             [ScanMapMarker(x_um=c.x_um, y_um=c.y_um, label=str(index + 1))
              for index, c in enumerate(candidates)])
@@ -891,6 +1093,7 @@ class ScanPanel(QWidget):
         self._scan_hits.clear()
         self._scan_tiles.clear()
         self._origin = None
+        self._forget_run()
         self._live_candidates = []
         self._candidates = []
         self._selected = -1
@@ -1011,6 +1214,12 @@ class ScanPanel(QWidget):
         # the moment the results are let go, so the plan re-anchors here.
         self._origin = position
         self._pending_export = None
+        self._forget_run()                     # the PREVIOUS run's frames
+        # ... and the new run's folder, decided HERE rather than on the scan
+        # thread: a sample can be reviewed while the run is still filling the
+        # table, and the reader of that frame needs to know where frames go.
+        self._run_dir = scan_directory(self._settings) / time.strftime(
+            "scan_%Y%m%d_%H%M%S")
         self.refresh_plan()
         self.map.clear_tiles()                 # the PREVIOUS run's tiles
         self.map.clear_footprint()
@@ -1019,7 +1228,9 @@ class ScanPanel(QWidget):
         self._scan_started_at = time.monotonic()
         self.progress.setValue(0)
         self.set_status("Scanning — Esc or Abort stops it")
-        self._scan_worker = _Worker(lambda: self._run_scan(position), self)
+        out_dir = self._run_dir
+        self._scan_worker = _Worker(lambda: self._run_scan(position, out_dir),
+                                    self)
         self._scan_worker.sig_log.connect(self._log)
         self._scan_worker.sig_done.connect(self._on_scan_done)
         # deleteLater AND drop the reference: keeping a Python handle to a
@@ -1084,7 +1295,7 @@ class ScanPanel(QWidget):
     def _forget_scan_worker(self) -> None:
         self._scan_worker = None
 
-    def _run_scan(self, origin: StagePosition):
+    def _run_scan(self, origin: StagePosition, out_dir: Path):
         """The scan thread. Owns the adapter and the scanner; every UI
         update comes back as a queued signal."""
         from talos.hal.proxies.stage_adapter import ManagerStageAdapter
@@ -1112,8 +1323,6 @@ class ScanPanel(QWidget):
             # then end as "stopped early — scan aborted", which is the
             # operator's own abort reported as a fault.
             scanner.request_abort()
-        out_dir = scan_directory(self._settings) / time.strftime(
-            "scan_%Y%m%d_%H%M%S")
         try:
             result = scanner.run(
                 params, out_dir,

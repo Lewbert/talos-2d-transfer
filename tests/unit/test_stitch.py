@@ -5,7 +5,7 @@ import math
 import numpy as np
 import pytest
 
-from talos.cv.stitch import (build_mosaic, draw_sample_rings,
+from talos.cv.stitch import (build_mosaic, draw_sample_rings, mark_sample,
                              mosaic_geometry)
 from talos.models import FlakeCandidate
 
@@ -136,3 +136,56 @@ def test_rings_survive_having_nothing_to_draw():
                              FOV_ONE) is None
     assert _ring(mosaic, tiles, [_sample(500.0, 500.0, 100.0)]) is mosaic
     assert np.array_equal(untouched, mosaic), "off-canvas samples are skipped"
+
+
+# --- one sample, on the frame it was found in -----------------------------
+
+def test_the_ring_lands_on_the_flake_in_the_frames_own_pixels():
+    """The frame path is exact where the mosaic path is not: the candidate's
+    x_px/y_px ARE pixels of this frame, so the ring is the circle of equal
+    AREA at that centre — no geometry, no calibration, no convention."""
+    frame = tile(30, shape=(200, 300))
+    area_px2 = math.pi * 40.0 ** 2          # radius 40 px
+    marked = mark_sample(frame, 120.0, 90.0, area_px2)
+    assert marked.shape == frame.shape
+    assert tuple(int(v) for v in marked[90, 120 + 40]) == (0, 255, 90)
+    assert tuple(int(v) for v in marked[90 + 40, 120]) == (0, 255, 90)
+    # ...and the inside of the ring is untouched
+    assert tuple(int(v) for v in marked[90, 120]) == (30, 30, 30)
+
+
+def test_marking_never_touches_the_caller_s_frame():
+    """The panel caches the decoded frame and hands it back on every step
+    through the list: drawing in place would stack a ring per visit."""
+    frame = tile(30, shape=(120, 120))
+    before = frame.copy()
+    marked = mark_sample(frame, 60.0, 60.0, 500.0)
+    assert marked is not frame
+    assert np.array_equal(frame, before), "the caller's frame is untouched"
+    assert not np.array_equal(marked, before), "the copy carries the ring"
+
+
+def test_a_tiny_flake_still_gets_a_visible_ring():
+    """A 4-px² flake has a radius of about 1 px: a ring that small is a dot
+    the operator cannot see, so there is a floor."""
+    marked = mark_sample(tile(0, shape=(60, 60)), 30.0, 30.0, 4.0)
+    assert tuple(int(v) for v in marked[30, 33]) == (0, 255, 90)
+
+
+def test_marking_survives_what_it_cannot_draw():
+    """No colour to draw on, or no pixels at all — returned unchanged
+    rather than raising inside a click handler."""
+    grey = np.zeros((40, 40), np.uint8)
+    assert np.array_equal(mark_sample(grey, 20.0, 20.0, 100.0), grey)
+    empty = np.zeros((0, 0, 3), np.uint8)
+    assert mark_sample(empty, 0.0, 0.0, 100.0).size == 0
+    # a sample at the very edge is clipped, not an error
+    assert mark_sample(tile(5, shape=(60, 60)), 0.0, 0.0, 900.0).shape \
+        == (60, 60, 3)
+
+
+def test_the_label_is_the_samples_number():
+    frame = tile(30, shape=(400, 400))
+    plain = mark_sample(frame, 200.0, 200.0, 4000.0)
+    labelled = mark_sample(frame, 200.0, 200.0, 4000.0, label="7")
+    assert not np.array_equal(plain, labelled)
