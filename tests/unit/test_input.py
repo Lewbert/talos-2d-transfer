@@ -354,6 +354,30 @@ def test_gamepad_start_toggles_the_selected_stage_enable(tmp_path):
     assert manager.enabled == {"sigmakoki": True}
 
 
+def test_gamepad_start_cannot_disable_a_stage_a_scan_is_using(tmp_path):
+    """Disabling a stage mid-scan drops every later command (manager.submit
+    refuses), which the scan reads as a dead device and ends the run on.
+    Enabling one back is harmless and still allowed. The emergency stop is
+    LB+RB, not this."""
+    system, manager, GamepadState = _gamepad_system(tmp_path)
+    system._resolver.toggle_dpad_stage()          # sigmakoki -> zolix
+    assert system._resolver.dpad_stage == "zolix"
+    manager.enabled["zolix"] = True
+    system._state.mode = "SCAN"
+
+    state = GamepadState(connected=True)
+    state.edges = {"start": True}
+    system._on_state(state)
+    assert manager.enabled.get("zolix") is True, "the gate was dropped"
+
+    # ...but a stage that is already disabled may be enabled back
+    manager.enabled["zolix"] = False
+    state = GamepadState(connected=True)
+    state.edges = {"start": True}
+    system._on_state(state)
+    assert manager.enabled["zolix"] is True
+
+
 def test_gamepad_start_follows_the_back_button(tmp_path):
     system, manager, GamepadState = _gamepad_system(tmp_path)
     back = GamepadState(connected=True)

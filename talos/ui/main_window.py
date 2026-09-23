@@ -94,6 +94,10 @@ class MainWindow(QMainWindow):
         # The camera flip rotates every frame 180° — remember the value the
         # ROI and the flake table were built against (see _sync_camera_flip).
         self._camera_flip = bool(settings.device("camera").get("flip", True))
+        #: Work a running scan held back, applied when it ends (see
+        #: _flush_deferred): a camera profile switch and a flip reaction.
+        self._profile_pending = False
+        self._flip_pending = False
 
         # --- workspaces -------------------------------------------------
         self._tabs = QTabWidget()
@@ -140,6 +144,11 @@ class MainWindow(QMainWindow):
         # STOP ALL must abort a running SCAN, not just the motion in flight.
         manager.sig_stop_all_done.connect(
             self._sample_finding.scan_panel.on_stop_all_done)
+        # A run owns the devices as well as the axes: the strip's enable
+        # gates are fixed for its length (the workspace greys its own
+        # groups from the same signal).
+        self._sample_finding.scan_panel.sig_busy_changed.connect(
+            self._on_scan_busy_changed)
         manager.sig_job_done.connect(self._on_job_done)
         manager.sig_job_failed.connect(self._on_job_failed)
         self._snapshot_job: int | None = None
@@ -545,7 +554,7 @@ class MainWindow(QMainWindow):
 
         dialog = PreferencesDialog(self._manager, self._settings,
                                    QApplication.instance(), self._autofocus,
-                                   parent=self)
+                                   parent=self, input_system=self._input)
         # Apply keeps the dialog open: the calibration cache (scale bar,
         # snapshot burn) must pick up new µm/px values immediately, not
         # when the dialog is finally closed.
@@ -623,9 +632,22 @@ class MainWindow(QMainWindow):
         carried over: the AF region is mirrored, and the detected-flake
         table is dropped (its pixel centroids are stale, and
         "go to flake" would command a mirrored physical move).
+
+        Deferred for the length of a run: the tiles captured after the flip
+        would be mirrored while the ones the mosaic already holds are not,
+        and dropping the results mid-run would erase the samples it has
+        found — detection never revisits a tile. The state work is done
+        when the run ends instead (see _on_mode_changed).
         """
         flip = bool(self._settings.device("camera").get("flip", True))
         if flip == self._camera_flip:
+            return
+        if self._scan_running():
+            self._flip_pending = True
+            self._on_log_message(
+                "warning",
+                "Camera flip changed — its effect on the scan results is "
+                "held until the run ends")
             return
         self._camera_flip = flip
         roi = self._af_roi.roi()
@@ -637,6 +659,18 @@ class MainWindow(QMainWindow):
             "Camera flip changed — the scan map and the live sample "
             "positions were reset; re-check the µm/px calibration if saved "
             "images are used for measurements")
+
+    def _scan_running(self) -> bool:
+        """Does a run own the hardware right now?"""
+        panel = getattr(getattr(self, "_sample_finding", None),
+                        "scan_panel", None)
+        return bool(panel is not None and panel.is_scanning())
+
+    def _on_scan_busy_changed(self, busy: bool) -> None:
+        """A run started or ended: fix or release the app-level controls."""
+        strip = getattr(self, "_strip", None)
+        if strip is not None:
+            strip.set_enable_locked(busy)
 
     def _on_about(self) -> None:
         QMessageBox.about(
@@ -673,6 +707,16 @@ class MainWindow(QMainWindow):
         self._route_af_roi_to(self._active_live_view())
 
     def _apply_camera_profile(self, profile) -> None:
+        if self._scan_running():
+            # A run captures every tile with the profile it started on. A
+            # tab click is not a reason to change the camera's exposure or
+            # gain half way through — and _applied_profile is deliberately
+            # NOT updated, so the switch still writes what the operator
+            # asked for once the run is over.
+            self._profile_pending = True
+            self._on_log_message(
+                "info", "Camera profile change held — a scan is running")
+            return
         # Diff against the last profile WE applied — manager.camera_props
         # is a connect-time snapshot (get_properties runs once) and would
         # re-write every key on every switch after any live edit.
@@ -751,6 +795,13 @@ class MainWindow(QMainWindow):
             self._state.set_focus_origin(int(origin["focus"]))
 
     def _on_snapshot(self) -> None:
+        if self._scan_running() or self._state.mode != "MANUAL":
+            # The snapshot switches the camera's sensor mode and pauses the
+            # stream: mid-run that is 4K tiles the run did not ask for, and
+            # waypoints recorded as missing frames.
+            self._on_log_message(
+                "warning", "Snapshot refused — a job owns the camera")
+            return
         cfg = load_capture_config(self._settings)
         path = next_snapshot_path(cfg)
         snapshot_dir(cfg)
@@ -784,6 +835,15 @@ class MainWindow(QMainWindow):
             return
         if getattr(self._autofocus, "busy", False):
             self._on_log_message("warning", "Autofocus already running")
+            return
+        if self._state.mode != "MANUAL":
+            # An autofocus run rewrites the mode (it becomes AUTOFOCUS),
+            # which gates nothing — so mid-scan it would sweep the focus
+            # axis under a running scan AND unfreeze the manual inputs.
+            # AutofocusService refuses the same thing at its own door.
+            self._on_log_message(
+                "warning", f"Autofocus refused — {self._state.mode} owns "
+                           f"the axes")
             return
         self._on_log_message("info", "Autofocus requested")
         bounds = self._navigation.af_group.bounds_steps(
@@ -831,6 +891,19 @@ class MainWindow(QMainWindow):
         self._sample_finding.shutdown()
 
     def closeEvent(self, event) -> None:  # noqa: N802
+        if self._scan_running():
+            # Closing mid-run used to leave the scan thread walking the plan
+            # while the process tore down around it: the waits expired, a
+            # running QThread was destroyed, and Qt aborted the process.
+            answer = QMessageBox.question(
+                self, "TALOS",
+                "A scan is running. Stop it and quit?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No)
+            if answer != QMessageBox.StandardButton.Yes:
+                event.ignore()
+                return
+            self._sample_finding.scan_panel.shutdown()
         qs = QSettings("TALOS", "TALOS")
         qs.setValue("geometry", self.saveGeometry())
         qs.setValue("maximized", self.isMaximized())
@@ -935,6 +1008,24 @@ class MainWindow(QMainWindow):
         # mid-scan would silently invalidate the FOV the running scan is
         # tiling at, and the objective id the manifest records.
         self._objective.setEnabled(not busy)
+        # A run ends by leaving SCAN, so this is the one place that has to
+        # run the work a run held back (see _apply_camera_profile and
+        # _sync_camera_flip). It is a mode change, not a panel signal,
+        # because the panel clears its job *before* the mode moves.
+        if not busy:
+            self._flush_deferred()
+
+    def _flush_deferred(self) -> None:
+        """Apply what a run held back. Runs on the mode leaving SCAN."""
+        if self._profile_pending:
+            self._profile_pending = False
+            profile = (nav_profile(self._settings)
+                       if self._tabs.currentIndex() == 0
+                       else scan_profile(self._settings))
+            self._apply_camera_profile(profile)
+        if self._flip_pending:
+            self._flip_pending = False
+            self._sync_camera_flip()
 
     def _on_gamepad_state(self, state) -> None:
         self._strip.trigger_bar().set_state(

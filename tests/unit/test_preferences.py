@@ -357,3 +357,33 @@ def test_the_scan_page_round_trips_the_real_section(dialog):
     saved = load_scan_settings(settings)
     assert saved["speed_pps"] == 250
     assert saved["overlap"] == pytest.approx(0.25)
+
+
+def test_escape_here_is_the_global_stop_too(dialog, qapp):
+    """Every other window routes Esc to the input system before closing
+    (MapWindow, FocusWindow, StageControlWindow). This dialog is the one
+    that can rebuild device connections, so it is the last place the panic
+    key may be inert — QDialog would otherwise swallow it into reject()
+    while the stage kept moving.
+
+    The event is dispatched to the dialog directly rather than through
+    ``QTest.keyClick``: key delivery goes to the FOCUS widget of the active
+    window, and in a full-suite run that is not always this dialog.
+    """
+    from PySide6.QtCore import QEvent
+    from PySide6.QtGui import QKeyEvent
+
+    class StubInput:
+        def __init__(self):
+            self.escapes = 0
+
+        def on_escape(self):
+            self.escapes += 1
+
+    stub = StubInput()
+    dialog._input = stub
+    event = QKeyEvent(QEvent.Type.KeyPress, Qt.Key.Key_Escape,
+                      Qt.KeyboardModifier.NoModifier)
+    dialog.keyPressEvent(event)
+    assert stub.escapes == 1
+    assert event.isAccepted()

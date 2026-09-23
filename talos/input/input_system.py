@@ -166,6 +166,13 @@ class InputSystem(QObject):
         if t is not None:
             self._released_times[keysym] = t
 
+    @property
+    def esc_latched(self) -> bool:
+        """Is the Esc latch up? Motion is suppressed until every source is
+        released — and any command that does NOT come through ``_dispatch``
+        (the stage panel's ZERO/home) has to ask this itself."""
+        return self._esc_latch
+
     def on_escape(self) -> None:
         self._esc_latch = True
         # Drop every on-screen hold too: a claim that survives ESC would
@@ -236,11 +243,20 @@ class InputSystem(QObject):
                 f"({'enabled' if self._manager.is_enabled(new_stage) else 'DISABLED'})")
         if state.edges.get("start"):
             stage_id = self._resolver.dpad_stage
-            enabled = not self._manager.is_enabled(stage_id)
-            self._manager.set_enabled(stage_id, enabled)
-            self.sig_log.emit(
-                f"gamepad Start: {stage_id} "
-                f"{'enabled' if enabled else 'DISABLED — commands dropped'}")
+            mode = getattr(self._state, "mode", "MANUAL")
+            if mode != "MANUAL" and self._manager.is_enabled(stage_id):
+                # Disabling a stage mid-scan drops every later command
+                # (manager.submit refuses), which the scan reports as a dead
+                # device and stops the run on. Enabling one back is harmless.
+                # The emergency stop is LB+RB, not this.
+                self.sig_log.emit(
+                    f"gamepad Start: refused — {mode} owns the axes")
+            else:
+                enabled = not self._manager.is_enabled(stage_id)
+                self._manager.set_enabled(stage_id, enabled)
+                self.sig_log.emit(
+                    f"gamepad Start: {stage_id} "
+                    f"{'enabled' if enabled else 'DISABLED — commands dropped'}")
         self._check_combos(state)
         self._gamepad_state = state
 

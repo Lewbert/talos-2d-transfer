@@ -1478,6 +1478,129 @@ def test_the_samples_are_a_table_outside_the_settings_scroll(window):
         parent = parent.parentWidget()
 
 
+# --- a run owns the hardware (the scan lock) ------------------------------
+
+def test_a_run_disables_the_cv_and_camera_controls(window):
+    """The bench finding: a mid-run edit of the chain changes how the tiles
+    captured after it are detected, so the run stops being one experiment —
+    and the dropper would sample a frame the stage has already left."""
+    finding = window._sample_finding
+    scan = finding.scan_panel
+    for widget in (finding.colour_group, finding.camera_group,
+                   finding.preprocess_group, finding.identify_group):
+        assert widget.isEnabled(), "a disabled control at rest"
+
+    scan._set_job("scan")
+    for widget in (finding.colour_group, finding.camera_group,
+                   finding.preprocess_group, finding.identify_group):
+        assert not widget.isEnabled()
+    assert not scan._clear_btn.isEnabled()
+    assert not scan.scan_btn.isEnabled()
+    assert scan.abort_btn.isEnabled()
+
+    scan._set_job(None)
+    for widget in (finding.colour_group, finding.camera_group,
+                   finding.preprocess_group, finding.identify_group):
+        assert widget.isEnabled()
+
+
+def test_the_strip_and_the_snapshot_are_locked_by_a_run(window):
+    strip = window._strip
+    strip.set_enable_locked(False)
+    assert strip._xyr._enable.isEnabled()
+    strip.set_enable_locked(True)
+    assert not strip._xyr._enable.isEnabled()
+    assert "owns this stage" in strip._xyr._enable.toolTip()
+    strip.set_enable_locked(False)
+
+    window._manager.submits.clear()
+    window._manager.camera_submits.clear()
+    window._sample_finding.scan_panel._set_job("scan")
+    window._on_snapshot()
+    assert not window._manager.camera_submits, "a snapshot mid-run"
+    window._sample_finding.scan_panel._set_job(None)
+
+
+def test_a_camera_profile_is_held_for_the_run_not_dropped(window, monkeypatch):
+    """A tab click mid-run must not change the camera's exposure — but the
+    operator's setting must not be lost either."""
+    from talos.ui.camera_profiles import nav_profile
+
+    window._manager.camera_submits.clear()
+    window._sample_finding.scan_panel._set_job("scan")
+    window._state.set_mode("SCAN")
+    try:
+        window._apply_camera_profile(nav_profile(window._settings))
+        assert not window._manager.camera_submits, "wrote the camera mid-run"
+        assert window._profile_pending
+    finally:
+        window._state.set_mode("MANUAL")
+        window._sample_finding.scan_panel._set_job(None)
+    # ending the run applies it
+    window._flush_deferred()
+    assert not window._profile_pending
+
+
+def test_autofocus_is_refused_while_a_scan_owns_the_axes(window):
+    """An autofocus run rewrites the mode to AUTOFOCUS, which unfreezes the
+    manual inputs — mid-scan that means a moving focus axis under a run and
+    a gate that no longer holds."""
+    window._manager.submits.clear()
+    window._sample_finding.scan_panel._set_job("scan")
+    window._state.set_mode("SCAN")
+    try:
+        window._on_quick_af()
+        assert not window._autofocus.starts, "autofocus started mid-scan"
+        assert window._state.mode == "SCAN", "and it stole the mode"
+    finally:
+        window._state.set_mode("MANUAL")
+        window._sample_finding.scan_panel._set_job(None)
+
+
+def test_closing_the_window_asks_and_stops_the_run(window, monkeypatch):
+    from PySide6.QtGui import QCloseEvent
+    from PySide6.QtWidgets import QMessageBox
+
+    scan = window._sample_finding.scan_panel
+    scan._set_job("scan")
+    window._state.set_mode("SCAN")
+    asked: list = []
+
+    def refuse(*args, **kwargs):
+        asked.append(args)
+        return QMessageBox.StandardButton.No
+
+    monkeypatch.setattr(QMessageBox, "question", staticmethod(refuse))
+    event = QCloseEvent()
+    window.closeEvent(event)
+    assert asked, "closing mid-run did not ask"
+    assert not event.isAccepted(), "No must leave the window open"
+
+    scan._set_job(None)
+    window._state.set_mode("MANUAL")
+
+
+def test_the_camera_switch_is_watched_and_can_be_cancelled(window):
+    """A camera job that never reports used to leave the panel saying
+    "Switching…" with the lock held and no run — forever."""
+    from talos.models import StagePosition
+
+    scan = window._sample_finding.scan_panel
+    monkeypatch_target = window._manager
+    monkeypatch_target.camera_submits.clear()
+    scan._pending_scan_start = (4242, StagePosition(x_um=1.0, y_um=2.0))
+    scan._camera_mode_before_scan = None
+    scan._set_job("scan")
+    window._state.set_mode("SCAN")
+
+    # the watchdog fires: no run, no lock, and it says why
+    scan._on_start_timeout()
+    assert scan._pending_scan_start is None
+    assert not scan.is_scanning()
+    assert window._state.mode == "MANUAL"
+    assert "did not answer" in scan.status.text()
+
+
 # --- the View column: the frame a sample was found in ---------------------
 
 def _candidate(x_um=100.0, y_um=0.0, area_um2=42.0, x_px=20.0, y_px=15.0):
@@ -1898,8 +2021,16 @@ def test_scan_from_origin_anchors_the_plan_there_not_at_the_stage(
     scan.refresh_plan()
     assert scan.map._plan.waypoints[0][0] == pytest.approx(-1000.0)
 
-    # and clearing the results releases the anchor: the plan previews from
-    # the stage again
+    # A run owns its results: Clear is refused while it is filling them
+    # (detection never revisits a tile, so what it drops is gone for good).
+    scan.clear_results()
+    assert scan._origin is not None, "Clear dropped a running run's anchor"
+    assert "filling this list" in scan.status.text(), "and it did not say so"
+
+    # ...and once the run is over, clearing releases the anchor: the plan
+    # previews from the stage again.
+    scan._set_job(None)
+    window._state.set_mode("MANUAL")
     scan.clear_results()
     scan.refresh_plan()
     assert scan.map._plan.x0_um == pytest.approx(5000.0)

@@ -248,7 +248,15 @@ class ReferenceStagePanel(QGroupBox):
     def _motion_allowed(self) -> bool:
         """ZERO/home commands motion (Zolix re-homes, hardware-unvalidated):
         it must obey the same mode gate as every jog — before this it was
-        reachable mid-scan and mid-autofocus."""
+        reachable mid-scan and mid-autofocus — and the same Esc latch, which
+        it used to skip: this command never goes through the input system's
+        dispatch, so the latch could not see it."""
+        # getattr, like the service checks elsewhere: a test double that
+        # does not carry the latch reads as "not latched", which is what
+        # every caller but the input system is.
+        if self._input is not None and getattr(self._input, "esc_latched",
+                                               False):
+            return False
         return getattr(self._state, "mode", "MANUAL") == "MANUAL"
 
     def _on_zero(self) -> None:

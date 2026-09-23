@@ -442,6 +442,48 @@ Two known gaps here, both older than the retry and neither fixed by it:
   cannot interrupt a job already on the wire; the adapter's own check covers
   the wait for that job.
 
+## What a run owns
+
+A scan is one experiment, and the tab is built so that it stays one. From the
+moment the camera switch is submitted (not from the first move) until the run's
+result is reported, the run owns:
+
+- **the axes** — `AppState.mode` is `SCAN`, which is the gate every manual
+  input goes through (`InputSystem._dispatch`), and the jog hold buttons,
+  keyboard keys and gamepad sticks all read it. *Set origin* stays live: it
+  only reads a position, and marking the spot mid-run is useful.
+- **the camera** — a Snapshot is refused (it switches the sensor mode and
+  pauses the stream: mid-run that is tiles the run did not ask for, and
+  waypoints recorded as missing), the Camera group's controls are disabled,
+  and a workspace switch's camera profile — or a Preferences flip — is **held**
+  and applied when the run ends rather than written into the middle of it.
+- **the identification chain** — the colour, pre-processing and gate editors
+  are disabled and the dropper is disarmed. The config is rebuilt per tile,
+  so an edit mid-run would change how the tiles captured after it are
+  detected: the run would be two experiments wearing one sample list, and
+  nothing in the artefacts would say so. The dropper's own reason is that the
+  live feed is suspended during a run, so a pick would sample a frame the
+  stage has already left.
+- **the results** — *Clear* is refused: detection never revisits a tile, so the
+  samples dropped that way are gone for good, and the plan would re-anchor to
+  a stage that is halfway through the area.
+- **the device enable gates** — the strip's *Enable* boxes and the gamepad's
+  *Start* are fixed. Disabling a device mid-run makes every later command
+  refused, which the scan reads as a dead device and stops the run on — a
+  checkbox that silently kills a run is not a control, it is a trap.
+- **autofocus** — refused at the service, not only in the menu, because a
+  focus job reached from the AF Detail window never passes through the input
+  system. It would sweep the focus axis under a run whose tiles are being
+  captured, and rewrite the mode to `AUTOFOCUS`, which unfreezes the manual
+  inputs and loses the scan's ownership of them for the rest of the run.
+
+**The escape hatches stay open, by design**: Esc, STOP ALL and the gamepad's
+LB+RB all reach the run and abort it (see the abort section above) — and Abort
+is enabled during the camera switch, where it cancels the start instead of
+being forgotten. Closing the window offers to stop the run first, because a
+scan thread walking the plan while the process tears down is how Qt aborts a
+process that had already printed "exited cleanly".
+
 ## Three ways a run can end, and why they must not be confused
 
 A scan ends because the operator aborted it, because it finished, or because

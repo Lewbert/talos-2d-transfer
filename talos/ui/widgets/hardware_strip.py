@@ -328,7 +328,8 @@ class _StageSection(_Section):
         super().__init__(title, tooltip, parent)
         self._enable = QCheckBox("Enable")
         self._enable.setChecked(True)  # matches the manager's default gate
-        self._enable.setToolTip(f"Enable commands for {tooltip or title}")
+        self._enable_tip = f"Enable commands for {tooltip or title}"
+        self._enable.setToolTip(self._enable_tip)
         self._enable.toggled.connect(
             lambda on: manager.set_enabled(device_key, on))
         self.add(self._enable)
@@ -371,6 +372,13 @@ class _StageSection(_Section):
             self._estop.hide()   # NO reserved slot: an E-STOP appearing must
             # shove the neighbours — that is what makes it noticed.
         self._last_pos: tuple | None = None
+
+    def set_enable_locked(self, locked: bool) -> None:
+        """A running scan owns the gate (see HardwareStrip.set_enable_locked)."""
+        self._enable.setEnabled(not locked)
+        self._enable.setToolTip(
+            "A scan owns this stage — the gate is fixed for the run"
+            if locked else self._enable_tip)
 
     def set_compact(self, compact: bool) -> None:
         """Drop the optional indicators when the window is too narrow for
@@ -539,6 +547,17 @@ class HardwareStrip(QWidget):
 
     def trigger_bar(self) -> TriggerBarWidget:
         return self._triggers
+
+    def set_enable_locked(self, locked: bool) -> None:
+        """Fix the enable gate for the length of a scan.
+
+        Dropping it mid-run does not stop one tile — every later command is
+        refused by the manager (``submit`` returns -1), which the scan reads
+        as a dead device and ends the run on. The emergency stop is STOP
+        ALL, not this checkbox.
+        """
+        for section in (self._xyr, self._xyz):
+            section.set_enable_locked(locked)
 
     def update_telem(self, device_key: str, payload: dict) -> None:
         # The enable gate can change from outside this checkbox (the

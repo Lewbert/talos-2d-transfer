@@ -207,6 +207,9 @@ class SampleFindingWorkspace(QWidget):
         self.scan_panel.sig_tile_captured.connect(self._on_tile_captured)
         self.scan_panel.sig_log.connect(self._log)
         self.scan_panel.sig_plan_changed.connect(self.refresh_settings)
+        # A run owns the camera and the identification chain, not just the
+        # axes: see _on_scan_busy.
+        self.scan_panel.sig_busy_changed.connect(self._on_scan_busy)
         # The origin card is the scan's own run card, and the origin itself
         # belongs to the app (the Navigation tab sets the same one).
         self.scan_panel.sig_set_origin.connect(self.sig_set_stage_origin)
@@ -299,6 +302,23 @@ class SampleFindingWorkspace(QWidget):
 
     def colour_rgb(self):
         return self.colour_group.rgb()
+
+    def _on_scan_busy(self, busy: bool) -> None:
+        """A run owns the configuration as well as the axes.
+
+        The detection config is built per JOB, so an edit mid-run lands on
+        every tile captured after it: the run stops being one experiment,
+        and nothing records which chain produced which row. The camera group
+        is closed for the same reason (a mid-run exposure or gain write
+        changes the tiles' appearance), and so is the dropper — while a scan
+        runs the live feed is suspended, so a pick would sample a frame the
+        stage has already left.
+        """
+        for widget in (self.colour_group, self.camera_group,
+                       self.preprocess_group, self.identify_group):
+            widget.setEnabled(not busy)
+        if busy:
+            self.live_view.set_pick_mode(False)
 
     def _note_pick(self, colour: str, spread: float) -> None:
         """Say what the dropper sampled, and whether it trusted itself.

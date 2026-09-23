@@ -303,6 +303,32 @@ def test_arm_cancel_does_not_clobber_scan_mode(rig):
     assert state.mode == "SCAN"
 
 
+def test_a_scan_owns_the_axes_and_autofocus_is_refused(rig):
+    """The service's own door, not just the menu's.
+
+    Reached from a menu or a window, an autofocus job never passes through
+    the input system — so the gate every manual input goes through cannot
+    stop it. What it would do mid-scan is sweep the focus axis under a run
+    whose tiles are being captured, and rewrite the mode to AUTOFOCUS,
+    which unfreezes the manual inputs and loses the scan's ownership of
+    them for the rest of the run.
+    """
+    manager, _settings, state, _slot, service = rig
+    logged: list[str] = []
+    service.sig_af_log.connect(logged.append)
+    state.mode = "SCAN"
+
+    assert service.start_af_s() is False
+    assert manager.submits == [], "autofocus was armed under a scan"
+    assert not service.busy
+    assert state.mode == "SCAN", "and it did not steal the mode"
+
+    service.calibrate_backlash()
+    assert manager.submits == [], "calibration was armed under a scan"
+    assert state.mode == "SCAN"
+    assert logged and all("scan" in line for line in logged)
+
+
 def test_af_s_refused_when_focus_not_connected(rig):
     """A dead focus worker must refuse starts (an armed job into a dead
     event loop strands the service in AUTOFOCUS/busy forever)."""

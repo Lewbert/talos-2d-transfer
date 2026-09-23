@@ -1003,8 +1003,11 @@ class PreferencesDialog(QDialog):
     sig_applied = Signal()
 
     def __init__(self, manager, settings, qapp, autofocus_service,
-                 parent=None):
+                 parent=None, input_system=None):
         super().__init__(parent)
+        #: Only used by Esc: this dialog can rebuild device connections, so
+        #: it is the last place the global stop may be inert.
+        self._input = input_system
         self.setWindowTitle("Preferences")
         self.resize(920, 620)
         root = QVBoxLayout(self)
@@ -1092,3 +1095,20 @@ class PreferencesDialog(QDialog):
     def _on_ok(self) -> None:
         self._on_apply()
         self.accept()
+
+    def keyPressEvent(self, event) -> None:  # noqa: N802
+        """Esc is the global STOP ALL — here too.
+
+        Every other window in the app routes Esc to the input system first
+        (MapWindow, FocusWindow, StageControlWindow); this dialog is the one
+        that can rebuild device connections, so it is the last place the
+        panic key may be inert. ``QDialog`` would otherwise swallow it into
+        ``reject()`` and the stage would keep moving.
+        """
+        if event.key() == Qt.Key.Key_Escape:
+            if self._input is not None:
+                self._input.on_escape()
+            self.reject()
+            event.accept()
+            return
+        super().keyPressEvent(event)

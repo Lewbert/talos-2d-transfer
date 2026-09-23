@@ -232,6 +232,8 @@ class AutofocusService(QObject):
         if self.busy:
             logger.warning("Autofocus: busy (%s) — ignoring start", self._job_kind)
             return False
+        if self._scan_owns_the_axes("autofocus"):
+            return False
         if not self._focus_connected:
             logger.warning("Autofocus: focus stage not connected — refusing start")
             self.sig_af_finished.emit(AutofocusResult(
@@ -250,9 +252,30 @@ class AutofocusService(QObject):
     # Backlash calibration
     # ------------------------------------------------------------------
 
+    def _scan_owns_the_axes(self, what: str) -> bool:
+        """True (and says so) while a grid scan owns the axes.
+
+        A scan sets the mode to SCAN and keeps it for the run, so this is
+        the same gate every manual input goes through — the service needs
+        its own copy because a focus job reached from a menu does not pass
+        through the input system at all. What it prevents is specific: an
+        autofocus or a calibration *sweeps the focus axis* under a run whose
+        tiles are being captured (every tile after the sweep is out of
+        focus), and because it rewrites the mode to AUTOFOCUS it also
+        unfreezes the manual inputs and loses the scan's ownership of them
+        for the rest of the run.
+        """
+        if getattr(self._state, "mode", "") != "SCAN":
+            return False
+        logger.warning("Autofocus: a scan owns the axes — refusing %s", what)
+        self.sig_af_log.emit(f"{what} refused — a scan is running")
+        return True
+
     def calibrate_backlash(self) -> None:
         if self.busy:
             logger.warning("Autofocus: busy (%s) — ignoring calibrate", self._job_kind)
+            return
+        if self._scan_owns_the_axes("backlash calibration"):
             return
         if not self._focus_connected:
             logger.warning("Autofocus: focus stage not connected — "

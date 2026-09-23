@@ -189,8 +189,13 @@ twice (sigmakoki's `STATUS?` carries both).
   flag is off.
 - **Stop path**: `STOP ALL` walks stop jobs through the motion devices' queues
   (focus first) with a 1.5 s budget, and reports when acks are missing.
-- **Session ownership**: scan and autofocus cannot both own the axes
-  (`_set_job`); only the owner clears its mode.
+- **Session ownership**: one owner at a time, and the gate is
+  `AppState.mode`. A scan takes it before the first move (and before the
+  camera switch that precedes it) and holds it for the whole run; manual
+  motion, autofocus, snapshot and the device enable gates are refused while
+  it does — see "What a run owns" in `docs/SCAN.md`. Autofocus takes it for
+  its own run and clears it only if the mode is still AUTOFOCUS (a scan that
+  started meanwhile keeps it).
 
 ## Autofocus
 

@@ -114,6 +114,12 @@ _UHD_WIDTH_PX = 3840
 #: of times in a run.
 _VIEW_COLUMN = 5
 
+#: How long a run waits for the camera's sensor-mode switch before giving up
+#: on it. The switch re-inits the stream and normally lands in well under a
+#: second; a camera that never answers would otherwise leave the panel saying
+#: "Switching…" with the lock held and no run — forever, silently.
+_CAMERA_SWITCH_TIMEOUT_MS = 8000
+
 
 def _path_kind(toggle_value: str) -> str:
     """The stored ``scan.path`` for the one path toggle.
@@ -164,6 +170,10 @@ class ScanPanel(QWidget):
     sig_set_origin = Signal()
     #: Something that affects the plan changed (the workspace persists).
     sig_plan_changed = Signal()
+    #: A run started or ended. Everything that must not be touched while it
+    #: owns the hardware follows this one signal — the camera and CV groups,
+    #: the frame a live sample is reviewed against, the device enable boxes.
+    sig_busy_changed = Signal(bool)
 
     def __init__(self, manager, settings, state, calibration_context=None,
                  input_system=None, parent: QWidget | None = None):
@@ -203,6 +213,11 @@ class ScanPanel(QWidget):
         self._pending_scan_start: tuple[int, tuple[float, float]] | None = None
         #: The live mode to put back after a run that switched it.
         self._camera_mode_before_scan: int | None = None
+        #: Guards the camera switch: see _CAMERA_SWITCH_TIMEOUT_MS.
+        self._start_watchdog = QTimer(self)
+        self._start_watchdog.setSingleShot(True)
+        self._start_watchdog.setInterval(_CAMERA_SWITCH_TIMEOUT_MS)
+        self._start_watchdog.timeout.connect(self._on_start_timeout)
         #: The run whose frames the View column reads. Decided when the run
         #: starts (a row can be reviewed while the table is still filling)
         #: and dropped with the results.
@@ -569,15 +584,17 @@ class ScanPanel(QWidget):
         export = QPushButton("Export CSV")
         export.setObjectName("compact")
         export.clicked.connect(self._on_export_list)
-        clear = QPushButton("Clear")
-        clear.setObjectName("compact")
-        clear.setToolTip("Forget this run: the sample list, the markers on "
-                         "the map and its mosaic. The next scan clears them "
-                         "too.")
-        clear.clicked.connect(self.clear_results)
+        # Kept as an attribute: a run disables it (see _set_job) — Clear
+        # while the table is filling would drop the samples already found.
+        self._clear_btn = QPushButton("Clear")
+        self._clear_btn.setObjectName("compact")
+        self._clear_btn.setToolTip(
+            "Forget this run: the sample list, the markers on the map and "
+            "its mosaic. The next scan clears them too.")
+        self._clear_btn.clicked.connect(self.clear_results)
         row.addWidget(self._go_to_btn)
         row.addWidget(export)
-        row.addWidget(clear)
+        row.addWidget(self._clear_btn)
         layout.addLayout(row)
         self._candidates: list[FlakeCandidate] = []
         self._selected = -1
@@ -1090,6 +1107,13 @@ class ScanPanel(QWidget):
         also why this button, which used to leave the tiles behind, clears
         them: it is the one place that means "I am done with this run".
         """
+        if self._job is not None:
+            # Also reachable from a camera flip and from the shortcut above;
+            # a refusal here covers every caller. Detection never revisits a
+            # tile, so a sample dropped this way is gone for good.
+            self.set_status("A run is filling this list — Clear would drop "
+                            "the samples it has already found.", tone="warn")
+            return
         self._scan_hits.clear()
         self._scan_tiles.clear()
         self._origin = None
@@ -1184,6 +1208,12 @@ class ScanPanel(QWidget):
         if mode is None:
             self._begin_scan(position)
             return True
+        # The lock and the mode are taken HERE, not in _begin_scan: waiting
+        # for the camera is part of the run (no second scan, no manual
+        # control, and STOP ALL must cancel the start rather than be
+        # forgotten), and the camera job is already on its way.
+        self._set_job("scan")
+        self._state.set_mode("SCAN")
         self.set_status("Switching the camera for the scan…")
         job = self._manager.submit_camera("set_property", "resolution", mode)
         if int(job) < 0:
@@ -1193,6 +1223,7 @@ class ScanPanel(QWidget):
             return True
         self._camera_mode_before_scan = self._current_camera_mode()
         self._pending_scan_start = (int(job), position)
+        self._start_watchdog.start()
         return True
 
     def _begin_scan(self, position: StagePosition) -> None:
@@ -1265,6 +1296,13 @@ class ScanPanel(QWidget):
         if pending is None or int(job_id) != pending[0]:
             return
         self._pending_scan_start = None
+        self._start_watchdog.stop()
+        if self._scan_abort.is_set():
+            # Esc or STOP ALL landed during the switch: the operator asked
+            # for everything to stop, and starting a run that crosses the
+            # whole area would be the opposite of that.
+            self._cancel_pending_start("aborted while the camera switched")
+            return
         self._begin_scan(pending[1])
 
     def _on_camera_job_failed(self, job_id: int, exc_type: str,
@@ -1273,10 +1311,39 @@ class ScanPanel(QWidget):
         if pending is None or int(job_id) != pending[0]:
             return
         self._pending_scan_start = None
+        self._start_watchdog.stop()
         self._camera_mode_before_scan = None
+        if self._scan_abort.is_set():
+            self._cancel_pending_start("aborted while the camera switched")
+            return
         self._log(f"camera resolution switch refused ({exc_type}: {message}) "
                   f"— the run will capture at the live resolution")
         self._begin_scan(pending[1])
+
+    def _on_start_timeout(self) -> None:
+        """The camera never answered the switch: do not start the run.
+
+        Starting anyway would be worse than not starting — the switch job is
+        still out there, so the camera could change mode *during* the run and
+        the tiles would silently stop matching each other.
+        """
+        if self._pending_scan_start is None:
+            return
+        self._log("the camera did not answer the resolution switch")
+        self._cancel_pending_start("the camera did not answer")
+
+    def _cancel_pending_start(self, reason: str) -> None:
+        """Give up on a run whose camera switch never landed."""
+        self._pending_scan_start = None
+        self._start_watchdog.stop()
+        if self._state.mode == "SCAN":
+            self._state.set_mode("MANUAL")
+        self._set_job(None)
+        # The switch is queued ahead of this one, so the live mode wins —
+        # and a camera left in the scan's mode would outlive the session.
+        self._restore_camera_mode()
+        self.set_status(f"Scan not started — {reason}.", tone="warn")
+        self._log(f"scan not started: {reason}")
 
     def _restore_camera_mode(self) -> None:
         """Put the live stream back the way the operator had it. Best
@@ -1488,11 +1555,12 @@ class ScanPanel(QWidget):
         # origin actions, whose enable state refresh_origin owns.
         for widget in (self.origin, self.x_dir, self.y_dir, self.path,
                        self.start_axis, self.return_home,
-                       self.width, self.height, self._dir):
+                       self.width, self.height, self._dir, self._clear_btn):
             widget.setEnabled(not busy)
         self.refresh_origin()
         if not busy:
             self._refresh_fov_label()
+        self.sig_busy_changed.emit(busy)
 
     # ------------------------------------------------------------------
     # what a finished scan writes
@@ -1653,12 +1721,24 @@ class ScanPanel(QWidget):
         self.sig_log.emit(str(message))
 
     def shutdown(self) -> None:
-        """App teardown: let the threads finish before the process exits.
+        """App teardown: END the run, then let the threads finish.
 
+        The abort flag goes up FIRST. Without it the scan thread keeps
+        walking the plan while the process tears down around it — the waits
+        below expire, the QThread is destroyed while still running, and Qt
+        aborts the process (with a truncated manifest as the parting gift).
         Guarded against a worker whose C++ object is already gone — a
         finished QThread deletes itself, and asking a deleted one whether
         it is running raises rather than answering.
         """
+        self._start_watchdog.stop()
+        self._scan_abort.set()
+        scanner = self._scanner
+        if scanner is not None:
+            try:
+                scanner.request_abort()
+            except Exception:  # noqa: BLE001 - teardown never raises
+                pass
         for worker in (self._scan_worker, self._export_worker):
             if worker is None:
                 continue
