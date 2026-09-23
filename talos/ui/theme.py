@@ -206,6 +206,15 @@ QPushButton#qa_primary {{
 }}
 QPushButton#qa_primary:hover {{ background: {accent_light}; }}
 QPushButton#qa_primary:pressed {{ background: {accent_dark}; }}
+/* A disabled primary button must not look armed, for the same reason the
+   danger one may not: "Scan from here" is still on screen while a run owns
+   the axes, and an accent-coloured button that refuses every click reads as
+   broken rather than as busy. */
+QPushButton#qa_primary:disabled {{
+    background: {PANEL_ALT};
+    color: {TEXT_DIM};
+    border: 1px solid {BORDER};
+}}
 QFrame#card {{
     border: 1px solid {BORDER};
     border-radius: 5px;

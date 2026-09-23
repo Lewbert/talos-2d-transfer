@@ -42,7 +42,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from talos.cv.identify import IdentifyConfig, sample_hex_stats
+from talos.cv.identify import IdentifyConfig, hex_to_hsv, sample_hex_stats
 from talos.ui.detect_engine import (LIVE_FULL, LIVE_NONE, LIVE_PREPROCESS,
                                     DetectionEngine)
 from talos.ui.widgets.collapsible import CollapsibleGroup
@@ -391,8 +391,6 @@ class SampleFindingWorkspace(QWidget):
         and on an edge it reads in the tens. 12 leaves room for a noisy
         sensor and a textured flake without hiding the case this exists for.
         """
-        from talos.cv.identify import hex_to_hsv
-
         stage = self.colour_group.stage()
         _hue, sat, val = hex_to_hsv(colour)
         if spread >= _PICK_SPREAD_WARN:

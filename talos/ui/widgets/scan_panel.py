@@ -891,8 +891,8 @@ class ScanPanel(QWidget):
         cost linear — rebuilding it is O(rows), once per tile, on the GUI
         thread, which is quadratic over a run.
         """
-        if not self._row_tiles or self._selected >= 0:
-            return False                     # live rows, or a chosen row
+        if not self._row_tiles:
+            return False                     # nothing shown yet (live rows)
         return all(tile >= 0 for tile in self._row_tiles) \
             and index > self._row_tiles[-1]
 

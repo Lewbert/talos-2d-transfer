@@ -280,6 +280,74 @@ def main() -> int:
         window.grab().save(str(path))
         print(f"saved {path}")
     finding.set_view_mode("original")
+
+    # --- the sample-review window (the View column) ---------------------
+    #
+    # Posed from a real run folder rather than by handing the window a
+    # picture: the frame it shows is the PNG in `frames/`, found through the
+    # manifest — which is the part worth looking at in a screenshot.
+    import csv as _csv
+
+    from talos.models import FlakeCandidate
+
+    run_dir = Path(os.environ["TALOS_APPDATA"]) / "posed_scan"
+    (run_dir / "frames").mkdir(parents=True, exist_ok=True)
+    tile = np.full((1080, 1920, 3), 40, np.uint8)
+    rng = np.random.default_rng(3)
+    tile = np.clip(tile.astype(np.int16)
+                   + rng.integers(-6, 6, tile.shape), 0, 255).astype(np.uint8)
+    import cv2 as _cv2
+
+    colour = (28, 52, 132)                     # a dark-blue flake
+    cx, cy, half = 690, 470, 210
+    _cv2.ellipse(tile, (cx, cy), (half, int(half * 0.7)), 12, 0, 360, colour,
+                 -1)
+    _cv2.imwrite(str(run_dir / "frames" / "frame_00003.png"),
+                 _cv2.cvtColor(tile, _cv2.COLOR_RGB2BGR))
+    with open(run_dir / "manifest.csv", "w", newline="",
+              encoding="utf-8") as handle:
+        writer = _csv.writer(handle)
+        writer.writerow(["frame", "x_um", "y_um", "r_deg", "t_unix",
+                         "objective_id", "focus_pos"])
+        for index in range(4):
+            name = "frame_00003.png" if index == 3 else ""
+            writer.writerow([name, 100.0 * index, 0.0, 0.0, 0.0, 0, 0])
+    scan_panel = finding.scan_panel
+    scan_panel._run_dir = run_dir
+    scan_panel.on_tile_result(3, [FlakeCandidate(
+        x_px=float(cx), y_px=float(cy), area_px2=float(np.pi * 150.0 ** 2),
+        area_um2=7600.0, x_um=12.5, y_um=-4.0, score=41.0,
+        bbox=(cx - half, cy - half, 2 * half, 2 * half))])
+    flush(200)
+    scan_panel._review_row(0)
+    flush(400)
+    review = scan_panel._review
+    review.resize(980, 700)
+    review.repaint()
+    path = args.out / f"sample_review{tag}.png"
+    review.grab().save(str(path))
+    print(f"saved {path}")
+    review.hide()
+    flush(150)
+
+    # --- the tab while a run owns it (the scan lock) --------------------
+    #
+    # Posed, not run: the lock is what the image is about, and a real run
+    # would walk the stage and repaint the status line every tile.
+    scan_panel._set_job("scan")
+    window._state.set_mode("SCAN")
+    scan_panel.set_status("Tile 12/48 · 0:41 left")
+    flush(250)
+    scan_panel.repaint()
+    path = args.out / f"scan_locked{tag}.png"
+    scan_panel.grab().save(str(path))
+    print(f"saved {path}")
+    scan_panel._set_job(None)
+    window._state.set_mode("MANUAL")
+    scan_panel.set_status("Ready")
+    scan_panel.clear_results()
+    flush(150)
+
     window._tabs.setCurrentIndex(0)
     flush(200)
 

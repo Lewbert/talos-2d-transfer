@@ -564,6 +564,32 @@ map's own window alike: Esc does what it does everywhere else, so there is
 no window in this application where the panic key has been quietly
 repurposed.
 
+## The sample list, and looking at what was found
+
+The list is a table — the row IS the selection — with a trailing **View**
+column. *Go to* moves the stage to the chosen row; *View* opens the frame that
+row's sample was found in.
+
+Two things make that window honest rather than decorative. The frame is the
+one that was **captured** (the PNG in the run's `frames/`, found through the
+manifest, or the live frame for a row the live feed found), and the ring is
+drawn at the candidate's **own** `x_px`/`y_px` with the circle of equal
+`area_px2` — the pixels identification measured, in the frame it measured them
+in. Nothing is re-derived from µm, so no calibration or orientation convention
+enters the drawing, and the ring lands on the flake rather than near it.
+
+The tile index travels *beside* the candidate rather than on it
+(`ScanPanel._row_tiles`): identification is deliberately frame-agnostic — it
+never sees which frame it ran on — and the index is a property of the feed,
+not of the flake. Row *N* of the table stays ring *N* of the annotated mosaic
+and row *N* of `candidates.csv`.
+
+A row can be reviewed **while its run is still going**, which is why the run's
+folder is decided before the first move rather than on the scan thread, and why
+the manifest is re-read while a run is live (the writer flushes a row as it
+writes the frame). A frame the writer has not reached yet says so and is
+re-read once, rather than showing a blank window.
+
 ## What the operator changes, and what they set once
 
 The panel carries the settings that change *between* runs: the area, the

@@ -201,8 +201,11 @@ tone controls, deliberately: one set of them, not two.
 local-contrast curve at ×4: the colour and the camera/CV groups on the left
 (with the filter's three channel curves plotted against the identity), the live
 view in the middle, and on the right the scan map, the run card, the scan
-settings and the list of what the chain found. Everything the chain did not
-match is darkened; each match keeps its own pixels and takes a bright outline.*
+settings and the list of what the chain found — each row with a *View* that
+opens the frame it was found in, ringed. Everything the chain did not match is
+darkened; each match keeps its own pixels and takes a bright outline.
+(The live list and the stage counts come from the chain, so they fill in
+*Samples* mode — the other two views do not run it.)*
 
 **The scan** covers a rectangle of the sample and records where every frame was
 taken. You choose what the start position *means* — the centre of the first
