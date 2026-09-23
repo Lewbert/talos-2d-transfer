@@ -838,9 +838,12 @@ def render_overlay(img: np.ndarray, result: IdentifyResult,
     out = img.copy()
     mask = result.mask
     if mask is not None and mask.shape[:2] == out.shape[:2] and mask.any():
-        outside = mask == 0
-        darkened = out[outside].astype(np.float32) * (1.0 - float(darken))
-        out[outside] = np.clip(darkened, 0, 255).astype(np.uint8)
+        # One multiply over the whole frame rather than a fancy-index copy,
+        # a float upcast and a clip of the OUTSIDE pixels only: at 4K that
+        # path allocated a few hundred megabytes per frame (three full-size
+        # temporaries), on the thread that also runs the scan's tiles.
+        factor = np.where(mask[:, :, None] == 0, 1.0 - float(darken), 1.0)
+        out = (out.astype(np.float32) * factor).astype(np.uint8)
     for region in result.regions:
         contour = region.contour
         if contour is None or not len(contour):

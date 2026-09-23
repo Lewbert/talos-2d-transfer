@@ -35,7 +35,8 @@ Dependencies point downwards only: UI → input → manager → proxies → driv
 | focus worker (same thread as the focus proxy) | also runs the autofocus job inline | see below |
 | scan `_Worker` QThread | a `GridScanner` run | submitted jobs, waits for completions |
 | scan writer thread (`FrameWriter`) | `frames/`, `manifest.csv` | one queue, bounded: the encode, the thumbnail and the row leave the scan thread the moment a tile is captured |
-| detection `_DetectWorker` QThread | the pre-processing chain and the identification pipeline, plus the scan's exports | one queue: live preview frames drop, scan tiles never do. Owned by the Sample Finding tab |
+| detection `_DetectWorker` QThread | the pre-processing chain and the identification pipeline | one queue: live preview frames drop, scan tiles never do. Owned by the Sample Finding tab |
+| export `_Worker` QThread (per run) | the mosaic, the annotated mosaic and `candidates.csv` — it reads every frame back from disk, so it gets its own thread and waits for the detection queue to drain first | |
 
 **Rules that keep this safe**
 
@@ -302,23 +303,34 @@ is order-respecting and kind-dispatched (`source` / `mask` / `gate` /
 `merge`), so a new stage is a dataclass and a `RANGES` entry — no UI code and
 no pipeline change.
 
-**In front of the chain is pre-processing** (`cv/preprocess.py`): shade
-correction, an edge-preserving denoise, the tone operations and the
-local-contrast curve, in that order, off until switched on. It is a pure
-transform — it never draws and is never written to disk, so the raw capture is
-still what a snapshot, a scan tile and the mosaic contain. The point of it is
-that the operator tunes filters against the same pixels the mask segments: the
-dropper samples the pre-processed layer, the pipeline runs on it, and the curve
-is pinned at the picked colour so that switching it on cannot make the sample
-the operator pointed at disappear from the mask.
+**In front of the chain is pre-processing** (`cv/preprocess.py`): an
+edge-preserving denoise and the local-contrast curve, in that order, off until
+switched on. (The shade correction and the tone operations were removed
+deliberately — `docs/IDENTIFICATION.md` carries the reasons and the future of
+the first.) It is a pure transform — it never draws and is never written to
+disk, so the raw capture is still what a snapshot, a scan tile and the mosaic
+contain. The point of it is that the operator tunes filters against the same
+pixels the mask segments: the dropper samples the pre-processed layer (while
+that layer is the one on screen — see below), the pipeline runs on it, and the
+curve is pinned at the picked colour so that switching it on cannot make the
+sample the operator pointed at disappear from the mask.
 
-**The pipeline is fed from the frame slot and from nothing that draws.** The
-live stream, the frame slot and every scan tile are raw; the only overlay burn
-in the application is the opt-in scale bar on a snapshot copy, applied inside
-the camera backend. That is worth stating as a rule rather than as a fact,
+**The pipeline is fed from raw frames and from nothing that draws.** The live
+stream, the frame slot and every scan tile are raw; the only overlay burn in
+the application is the opt-in scale bar on a snapshot copy, applied inside the
+camera backend. Note the two different raw sources, because they are easy to
+confuse: the LIVE feed is fed from `manager.camera.sig_frame` (the stream the
+operator is watching), while a SCAN captures through the frame slot, so a tile
+is a frame delivered after the stage settled rather than whatever the stream
+happened to be showing. That is worth stating as a rule rather than as a fact,
 because the rule is what a future overlay would have to be checked against —
 and it is why there is no longer a stage whose job was to reject the
 application's own annotation.
+
+**The live feed computes what is on screen, and nothing else.** Original costs
+nothing (the raw frame is already displayed), Pre-processed runs the chain
+without the mask, Samples runs everything — and nothing runs at all while
+another workspace is the visible page or a scan owns the worker.
 
 **It always runs on ONE frame.** A scan's tiles are each identified on their
 own, at full resolution, and the mosaic is never an input: merging tens or

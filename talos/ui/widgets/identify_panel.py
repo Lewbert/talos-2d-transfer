@@ -280,7 +280,7 @@ class StageEditor(QFrame):
             layout.addWidget(dialog)
             self._editors[name] = ("hex", edit, swatch, dropper, dialog)
             form.addRow("Colour", row)
-            edit.editingFinished.connect(self._on_changed)
+            edit.editingFinished.connect(self._normalise_hex)
             dropper.clicked.connect(self.sig_dropper)
             dialog.clicked.connect(self._pick_from_dialog)
             self._refresh_swatch()
@@ -341,6 +341,21 @@ class StageEditor(QFrame):
             container.setToolTip(box.toolTip())
             slider.setToolTip(box.toolTip())
         return container, slider
+
+    def _normalise_hex(self) -> None:
+        """Put the CLAMPED colour back in the field, then apply.
+
+        The field is free text and the swatch shows whatever ``valid_hex``
+        made of it, so a typo left the two disagreeing — the colour the mask
+        would search was the swatch's while the box showed what was typed.
+        """
+        entry = self._editors.get("hex_color")
+        if entry is not None:
+            text = entry[1].text()
+            clean = valid_hex(text, self.hex_color())
+            if clean != text:
+                entry[1].setText(clean)
+        self._on_changed()
 
     def _refresh_swatch(self) -> None:
         entry = self._editors.get("hex_color")

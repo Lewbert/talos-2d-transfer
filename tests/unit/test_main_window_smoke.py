@@ -9,6 +9,7 @@ from PySide6.QtCore import QObject, QSettings, Signal
 from PySide6.QtWidgets import QApplication
 
 from talos.app import AppState
+from talos.cv.identify import valid_hex
 from talos.ui.main_window import MainWindow
 
 
@@ -2300,3 +2301,19 @@ def test_a_worker_that_outlives_its_wait_is_reported(window):
     window.threads_still_running = window._threads_alive()
     # after a real stop the worker is gone, so a clean exit is safe
     assert window.threads_still_running is False
+
+
+def test_a_typo_in_the_colour_field_does_not_leave_it_disagreeing(window):
+    """The field is free text and the swatch shows what valid_hex made of
+    it, so a typo left the colour the mask searches on the swatch and the
+    hex the operator typed in the box."""
+    finding = window._sample_finding
+    editor = finding.colour_group.editor
+    edit = editor._editors["hex_color"][1]
+
+    edit.setText("#zzzzzz")
+    edit.editingFinished.emit()
+    assert "z" not in edit.text(), "the field kept a colour the mask cannot use"
+    assert valid_hex(edit.text(), None) == edit.text(), "and it is a colour"
+    assert editor.hex_color() == edit.text(), \
+        "the field and the colour the mask searches disagree"

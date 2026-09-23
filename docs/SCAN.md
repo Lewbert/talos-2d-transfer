@@ -267,7 +267,10 @@ properties the callers rely on:
   (`MAX_PENDING_TILES`): tiles are never dropped, so an uncapped queue is how
   a 4K scan runs out of memory (25 MB a frame). Past the cap the *stage*
   waits for the detector instead — slower, and bounded. A safety valve keeps
-  a wedged detector from parking the run mid-plan.
+  a wedged detector from parking the run mid-plan. The valve is WIRED BY THE
+  PANEL (`GridScanner(pending_tiles_fn=…)`): the scanner's default is no
+  pacing, which is right for the CLI benches and was, until 2026-09-23,
+  silently the app's behaviour too.
 
 A writer failure is a fault like any other: the run stops with
 `stopped_early` and the reason. `ScanResult.failed` exists because a failure
