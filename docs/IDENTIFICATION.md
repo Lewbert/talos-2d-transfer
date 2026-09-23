@@ -16,6 +16,18 @@ things that are not samples: speckle, the frame edge, diffuse smudges. It
 answers *"where are the flakes that look like this?"*, which is the question a
 transfer workflow actually starts from.
 
+**Where it lives in the tab.** The pinned card at the top-left is only the
+*picker*: the colour being looked for, the buttons that take it, and how large
+a patch a pick averages. Everything that shapes the *match* — the method, the
+tolerance, the shade window, the floors — is the first entry of the
+**Identification** card, in pipeline order with the gates it feeds:
+
+![The identification chain](images/identification.png)
+
+The colour appears in both places (the picker has to show what it picked);
+editing either one updates the other, and the chain card's copy is the one the
+pipeline is built from.
+
 It does **not** judge thickness, rank materials, or decide whether a flake is
 worth transferring. Colour is not thickness — interference colours overlap
 across layer counts under varying illumination — and a number that pretends

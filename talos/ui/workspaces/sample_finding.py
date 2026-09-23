@@ -42,7 +42,8 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from talos.cv.identify import IdentifyConfig, hex_to_hsv, sample_hex_stats
+from talos.cv.identify import (IdentifyConfig, hex_to_hsv, hex_to_rgb,
+                               sample_hex_stats)
 from talos.ui.detect_engine import (LIVE_FULL, LIVE_NONE, LIVE_PREPROCESS,
                                     DetectionEngine)
 from talos.ui.widgets.collapsible import CollapsibleGroup
@@ -146,6 +147,8 @@ class SampleFindingWorkspace(QWidget):
         self.colour_group = ColourGroup(settings)
         self.colour_group.sig_changed.connect(self._on_colour_changed)
         self.colour_group.sig_dropper.connect(self.arm_colour_pick)
+        # (the Identification card's colour row arms the same dropper: the
+        # picker is duplicated there, the pipeline is not)
         # The patch size is a display property of the dropper, so it goes to
         # the view (which draws it) and nowhere near the pipeline.
         self.colour_group.sig_patch_changed.connect(
@@ -176,6 +179,7 @@ class SampleFindingWorkspace(QWidget):
                                           state_key="scan"))
         self.identify_group = IdentifyGroup(settings)
         self.identify_group.sig_changed.connect(self._on_identify_changed)
+        self.identify_group.sig_dropper.connect(self.arm_colour_pick)
         groups.addWidget(CollapsibleGroup("Identification",
                                           self.identify_group,
                                           settings=settings,
@@ -359,16 +363,25 @@ class SampleFindingWorkspace(QWidget):
     # ------------------------------------------------------------------
 
     def identify_config(self) -> IdentifyConfig:
-        """A FRESH config per job: the colour stage from the quick-access
-        group, the gates from the chain. The worker never reads a widget."""
-        return IdentifyConfig(
-            stages=[self.colour_group.stage()] + self.identify_group.stages())
+        """A FRESH config per job: the whole chain from the pipeline card,
+        colour stage first — its canonical order. The worker never reads a
+        widget.
+
+        The pinned picker is a PROJECTION of that colour (its own editor
+        shows only the colour and mirrors it), so there is one source of
+        truth and no way for the swatch and the mask to disagree.
+        """
+        return IdentifyConfig(stages=self.identify_group.stages())
 
     def preprocess_config(self):
         return self.preprocess_group.config()
 
+    def colour_stage(self):
+        """The colour stage the pipeline uses (see ``identify_config``)."""
+        return self.identify_group.colour_stage()
+
     def colour_rgb(self):
-        return self.colour_group.rgb()
+        return hex_to_rgb(self.colour_stage().hex_color)
 
     def _on_scan_busy(self, busy: bool) -> None:
         """A run owns the configuration as well as the axes.
@@ -402,7 +415,7 @@ class SampleFindingWorkspace(QWidget):
         and on an edge it reads in the tens. 12 leaves room for a noisy
         sensor and a textured flake without hiding the case this exists for.
         """
-        stage = self.colour_group.stage()
+        stage = self.colour_stage()          # the rows live in the chain card
         _hue, sat, val = hex_to_hsv(colour)
         if spread >= _PICK_SPREAD_WARN:
             self.colour_group.note(
@@ -467,13 +480,12 @@ class SampleFindingWorkspace(QWidget):
         return self.calibration_for(self._last_frame)
 
     def _sync_curve_centre(self) -> None:
-        self.preprocess_group.set_centre(self.colour_group.rgb())
+        self.preprocess_group.set_centre(self.colour_rgb())
 
     def _on_colour_changed(self) -> None:
-        self._sync_curve_centre()
-        self._persist_identify()
-        self._refresh_live_feed()
-        self._refresh_processed_views()
+        """The pinned picker changed: push it into the pipeline card."""
+        self.identify_group.show_colour(self.colour_group.hex_color())
+        self._after_config_change()
 
     def _on_preprocess_changed(self) -> None:
         self._persist_preprocess()
@@ -481,6 +493,13 @@ class SampleFindingWorkspace(QWidget):
         self._refresh_processed_views()
 
     def _on_identify_changed(self) -> None:
+        """Something in the chain changed — including its colour, which the
+        pinned picker mirrors."""
+        self.colour_group.show_hex(self.identify_group.colour_stage().hex_color)
+        self._after_config_change()
+
+    def _after_config_change(self) -> None:
+        self._sync_curve_centre()
         self._persist_identify()
         self._refresh_live_feed()
         self._refresh_processed_views()
@@ -582,6 +601,9 @@ class SampleFindingWorkspace(QWidget):
         workspace switch, the camera flip, a new calibration."""
         self.scan_panel.reload_preferences()
         self.scan_panel.set_flip(self.camera_flip())
+        # The chain card first: the pinned picker mirrors ITS colour, so a
+        # reload in the other order could leave the swatch a step behind.
+        self.identify_group.reload()
         self.colour_group.reload()
         self.preprocess_group.reload()
         self._sync_curve_centre()

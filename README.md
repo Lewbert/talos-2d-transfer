@@ -198,14 +198,16 @@ tone controls, deliberately: one set of them, not two.
 ![The Sample Finding workspace](docs/images/sample_finding.png)
 
 *The Sample Finding tab in **Samples** mode, with pre-processing on and a
-local-contrast curve at ×4: the colour and the camera/CV groups on the left
-(with the filter's three channel curves plotted against the identity), the live
-view in the middle, and on the right the scan map, the run card, the scan
-settings and the list of what the chain found — each row with a *View* that
-opens the frame it was found in, ringed. Everything the chain did not match is
-darkened; each match keeps its own pixels and takes a bright outline.
-(The live list and the stage counts come from the chain, so they fill in
-*Samples* mode — the other two views do not run it.)*
+local-contrast curve at ×4: the pinned colour picker (the colour, the dropper
+and the patch size) and the camera/CV groups on the left — the filter's three
+channel curves plotted against the identity, and the identification chain in
+pipeline order, colour match first — the live view in the middle, and on the
+right the scan map, the run card, the scan settings and the list of what the
+chain found, each row with a *View* that opens the frame it was found in,
+ringed. Everything the chain did not match is darkened; each match keeps its
+own pixels and takes a bright outline. (The live list and the stage counts come
+from the chain, so they fill in *Samples* mode — the other two views do not
+run it.)*
 
 **The scan** covers a rectangle of the sample and records where every frame was
 taken. You choose what the start position *means* — the centre of the first
@@ -344,7 +346,7 @@ docs/                         design, architecture, hardware notes, camera inter
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | Layers, threading and proxy life-cycle, the job model, safety interlocks, known weaknesses |
 | [docs/AUTOFOCUS.md](docs/AUTOFOCUS.md) | The axis physics, the algorithm and its safety invariants, the measured numbers, the tuning ladder |
 | [docs/SCAN.md](docs/SCAN.md) | The grid scan: the geometry and its coverage proof, the path orders, settling and backlash, capture through the frame slot, what a scan writes, which way is up |
-| [docs/IDENTIFICATION.md](docs/IDENTIFICATION.md) | The identification chain: the eight stages, the three rules it must keep, the processed view, tuning it on a real wafer |
+| [docs/IDENTIFICATION.md](docs/IDENTIFICATION.md) | The identification chain: the eight stages, the three matching methods, the rules it must keep, the processed view, tuning it on a real wafer |
 | [docs/CAMERA_208.md](docs/CAMERA_208.md) | What the Axiocam 208 can and cannot do, and how to coexist with ZEN |
 | [docs/SMARTCAM_API.md](docs/SMARTCAM_API.md) | Interoperability notes for the SmartCamApi DLL |
 | [docs/hardware/focus/protocol.md](docs/hardware/focus/protocol.md) | The focus controller's complete serial protocol |

@@ -1082,7 +1082,7 @@ def test_a_pick_paler_than_the_floors_says_the_floor_no_longer_applies(window):
     own mask by lowering the floor to it. That changes what Min saturation
     means for that colour, so it is said rather than silently done."""
     finding = window._sample_finding
-    finding.colour_group.editor._editors["min_saturation"][1].setValue(200)
+    _chain_colour_editor(window)._editors["min_saturation"][1].setValue(200)
     finding._note_pick("#d0d0d0", 2.0)
     assert "floor" in finding.colour_group._hint.text()
     assert finding.colour_group._hint.objectName() == "warn"
@@ -2104,7 +2104,7 @@ def test_the_colour_rows_have_sliders_and_the_gates_do_not(window):
     from talos.cv.identify import SizeStage
     from talos.ui.widgets.identify_panel import StageEditor
 
-    colour = window._sample_finding.colour_group.editor
+    colour = _chain_colour_editor(window)
     for name in ("tolerance", "spread", "min_saturation", "min_value"):
         kind, box, slider = colour._editors[name]
         assert kind == "num"
@@ -2321,6 +2321,13 @@ def test_a_typo_in_the_colour_field_does_not_leave_it_disagreeing(window):
 
 # --- matching method, patch size, and the circle ---------------------------
 
+def _chain_colour_editor(window):
+    """The colour stage's FULL editor — in the Identification card, first in
+    the pipeline order. The pinned card above the scroll shows only the
+    colour and the patch size."""
+    return window._sample_finding.identify_group.colour_editor()
+
+
 def _click_segment(toggle, value) -> None:
     """Press one option's button — what the operator does.
 
@@ -2330,13 +2337,17 @@ def _click_segment(toggle, value) -> None:
     toggle._buttons[value].click()
 
 
-def test_the_colour_card_switches_the_matching_method(window):
+def test_the_chain_card_switches_the_matching_method(window):
     """Three methods, one selector, like the scan panel's path row — and the
-    choice has to reach the pipeline, not just the settings file."""
+    choice has to reach the pipeline, not just the settings file. The
+    selector lives in the Identification card, first, because that is where
+    the pipeline order starts."""
     from talos.cv.identify import METHOD_RGB, METHOD_WINDOW
 
     finding = window._sample_finding
-    editor = finding.colour_group.editor
+    editor = _chain_colour_editor(window)
+    assert finding.identify_group._editors[0] is editor, \
+        "the colour stage is not first in the chain card"
     kind, toggle = editor._editors["method"]
     assert kind == "choice"
     assert toggle.value() == METHOD_WINDOW, "the default must not change masks"
@@ -2349,27 +2360,44 @@ def test_the_colour_card_switches_the_matching_method(window):
                  if s.NAME == "colour")
     assert stage.method == METHOD_RGB
 
-    # the rows whose meaning depends on it follow
+    # the rows the method does NOT have are gone, not greyed
     spread_label, spread_row = editor._rows["spread"]
-    assert not spread_row.isEnabled()
-    assert not spread_label.isEnabled()
+    # isHidden(), not isVisible(): a widget of a window that was never shown
+    # reports isVisible() False for everything.
+    assert spread_row.isHidden()
+    assert spread_label.isHidden()
     assert editor._rows["tolerance"][0].text() == "Tolerance"
-    assert "Window method only" in spread_row.toolTip()
+    assert not editor._method_note.isHidden()
+    assert "not used" in editor._method_note.text()
 
     _click_segment(toggle, METHOD_WINDOW)
-    assert spread_row.isEnabled()
+    assert not spread_row.isHidden() and not spread_label.isHidden()
     assert editor._rows["tolerance"][0].text() == "Hue tolerance"
+    assert "thicknesses" in editor._method_note.text()
 
 
-def test_reloading_the_card_restores_the_method_and_its_rows(window):
+def test_switching_the_method_does_not_lose_the_spread(window):
+    """Spread is hidden under a distance method, not cleared: coming back to
+    the window must find the value the operator tuned."""
+    from talos.cv.identify import METHOD_RGB
+
+    finding = window._sample_finding
+    editor = _chain_colour_editor(window)
+    editor._editors["spread"][1].setValue(12.0)
+    _click_segment(editor._editors["method"][1], METHOD_RGB)
+    _click_segment(editor._editors["method"][1], "window")
+    assert editor.stage().spread == pytest.approx(12.0)
+
+
+def test_reloading_the_chain_card_restores_the_method_and_its_rows(window):
     """`reload()` runs on every workspace switch and Preferences apply, and
     its kind dispatch used to end in `setValue` — which a segmented row does
     not have. It also has to re-apply the rows that depend on the method, or
-    a reloaded card would show the window's labels over a distance mask."""
+    a reloaded card would show the window's rows over a distance mask."""
     from talos.cv.identify import METHOD_HSV
 
     finding = window._sample_finding
-    editor = finding.colour_group.editor
+    editor = _chain_colour_editor(window)
     settings = window._settings
     stages = settings.section("identify").setdefault("stages", [])
     entry = next((s for s in stages if s.get("name") == "colour"), None)
@@ -2379,10 +2407,53 @@ def test_reloading_the_card_restores_the_method_and_its_rows(window):
     entry["method"] = METHOD_HSV
     entry["hex_color"] = "#1c3484"
 
-    finding.colour_group.reload()          # what refresh_settings() calls
+    finding.identify_group.reload()        # what refresh_settings() calls
     assert editor._editors["method"][1].value() == METHOD_HSV
-    assert not editor._rows["spread"][1].isEnabled()
+    assert editor._rows["spread"][1].isHidden()
     assert editor._rows["tolerance"][0].text() == "Tolerance"
+
+
+def test_the_pinned_card_is_only_the_picker(window):
+    """The quick-access card shows the colour, the buttons and the patch size
+    — nothing that shapes the match, which lives with the pipeline it
+    shapes. A second copy of the parameters would be two places for one
+    value to disagree with itself."""
+    finding = window._sample_finding
+    quick = finding.colour_group.editor
+    assert list(quick._editors) == ["hex_color"]
+    assert "Method" not in quick._rows
+    assert not hasattr(finding.colour_group, "_method_rows")
+    # ...and the things that ARE the picker stay
+    assert finding.colour_group._patch_slider is not None
+    assert finding.colour_group._hint is not None
+
+
+def test_the_two_colour_editors_stay_in_step(window):
+    """One stage, two views: the pinned picker and the chain card's first
+    editor. Editing either must show up in the other, and neither may report
+    the other's refresh as an edit (that would re-persist and re-run the mask
+    on every workspace switch)."""
+    finding = window._sample_finding
+    quick = finding.colour_group
+    chain = _chain_colour_editor(window)
+
+    # the picker → the chain (what the dropper does)
+    quick.set_hex("#1c3484")
+    assert chain.hex_color() == "#1c3484"
+    assert finding.colour_stage().hex_color == "#1c3484"
+    assert finding.colour_rgb() == (28, 52, 132)
+
+    # the chain → the picker
+    chain.set_hex("#aacdf5")
+    assert quick.hex_color() == "#aacdf5"
+    assert finding.colour_rgb() == (170, 205, 245)
+
+    # a silent reload does not look like an edit
+    edits: list = []
+    quick.sig_changed.connect(lambda: edits.append(1))
+    chain.load(chain._stage)
+    quick.reload()
+    assert edits == [], "a reload reported itself as an edit"
 
 
 def test_the_patch_slider_is_what_the_dropper_averages(window, monkeypatch):

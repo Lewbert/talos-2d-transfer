@@ -39,6 +39,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QPushButton,
+    QSizePolicy,
     QSlider,
     QSpinBox,
     QVBoxLayout,
@@ -100,6 +101,19 @@ PARAM_TIPS = {
 
 def param_label(name: str) -> str:
     return PARAM_LABELS.get(name, name.replace("_", " ").capitalize())
+
+
+#: What each matching method means, under its own rows — the two lines an
+#: operator needs to read the parameters they are looking at.
+METHOD_NOTES = {
+    "window": "A box: hue ±0.9 × Tolerance, saturation and shade ±2.55 × "
+              "Spread. Only method that separates two thicknesses.",
+    "hsv_distance": "One radius: hue counts as 0.9 × Tolerance, saturation "
+                    "and shade as 2.55 ×. Spread is not used.",
+    "rgb_distance": "One radius in RGB (2.55 × Tolerance DN). No hue axis: "
+                    "sharpest for one shade under one lamp, first to fail "
+                    "when the illumination moves. Spread is not used.",
+}
 
 
 def _set_quietly(box, value) -> None:
@@ -231,14 +245,24 @@ class StageEditor(QFrame):
 
     def __init__(self, stage: Stage, parent: QWidget | None = None,
                  show_enable: bool = True, framed: bool = True,
-                 sliders: bool = False):
+                 sliders: bool = False,
+                 only: tuple[str, ...] | None = None):
         super().__init__(parent)
         self._stage = stage
+        #: Build only these fields. The colour stage is edited in two places
+        #: — the pinned picker (its colour, nothing else) and the pipeline
+        #: card (everything) — and the second editor must be a PROJECTION of
+        #: the same stage rather than a second copy of it.
+        self._only = tuple(only) if only else None
         #: Give every numeric row a slider under its number box, the way the
         #: camera's controls are laid out. Off by default: the values in a
         #: gate are typed once and left, while the colour's three are
         #: hunted for by eye while watching the mask change.
         self._sliders = bool(sliders)
+        #: True while a programmatic load is writing the widgets: those
+        #: writes must not look like edits (a workspace switch would persist
+        #: the settings file and re-run the mask for a change nobody made).
+        self._loading = False
         if framed:
             self.setObjectName("card")
         outer = QVBoxLayout(self)
@@ -264,16 +288,34 @@ class StageEditor(QFrame):
         #: inside it: two tests pin the shape of those tuples (a 2- or
         #: 3-tuple whose [1] is the value widget), and a label is not a value.
         self._rows: dict[str, tuple[QLabel, QWidget]] = {}
+        #: The build order, so a row taken out for one method can be put back
+        #: in its place when another method needs it.
+        self._row_order: list[str] = []
         self._form = form
         declared = [f.name for f in fields(stage) if f.name != "enabled"]
+        if self._only is not None:
+            declared = [n for n in declared if n in self._only]
         choices = getattr(stage, "CHOICES", None) or {}
         # A named choice LEADS the form: it decides what the numbers under it
         # mean. (Built in that order rather than moved afterwards — Qt's
         # QFormLayout.removeRow deletes the widgets it removes.)
         ordered = ([n for n in declared if n in choices]
                    + [n for n in declared if n not in choices])
+        self._row_order = list(ordered)
         for name in ordered:
             self._add_field(form, stage, name, getattr(stage, name))
+
+        #: What the current method means, under its rows. Only a stage with a
+        #: named choice gets one (see _sync_dependent_rows).
+        self._method_note = QLabel("")
+        self._method_note.setObjectName("dim")
+        self._method_note.setWordWrap(True)
+        self._method_note.setVisible(False)
+        outer.addWidget(self._method_note)
+        # Slack goes to the bottom of the card, not into whichever label or
+        # row can grow: a stretched card otherwise draws the surplus as a
+        # blank band between two parameters, which reads as a missing row.
+        outer.addStretch(1)
 
         self.enable.toggled.connect(self._on_changed)
         self._sync_dependent_rows()
@@ -281,17 +323,48 @@ class StageEditor(QFrame):
     # ------------------------------------------------------------------
 
     def _sync_dependent_rows(self) -> None:
-        """Rows whose meaning depends on a CHOICE field's value.
+        """Which rows the current method HAS, and what they mean.
 
-        One rule, for the colour stage's method: ``spread`` belongs to the
-        window, and the tolerance is a hue half-width only there. A row left
-        enabled — or labelled "Hue tolerance" while the number is an RGB
-        radius — is the same class of lie as a button that refuses a click.
+        The colour match's parameters are not the same set for every method:
+        a distance method has no separate shade window, so ``spread`` is not
+        greyed out but *gone*, and the tolerance is a radius rather than a
+        hue half-width. A row that is merely disabled still reads as "part of
+        this method, temporarily unavailable" — and a label saying "Hue
+        tolerance" over an RGB radius is the same class of lie as a button
+        that refuses a click.
         """
         entry = self._editors.get("method")
         if entry is None:
             return
-        window = entry[1].value() == METHOD_WINDOW
+        method = entry[1].value()
+        window = method == METHOD_WINDOW
+
+        def show(name: str, visible: bool) -> None:
+            """A row the method does not have is TAKEN OUT of the form.
+
+            Hiding its widgets leaves the row's geometry slot behind, and a
+            card that is stretched taller than its content then draws the
+            freed space as a blank band exactly the height of the parameter
+            that is gone — which reads as a rendering fault rather than as
+            "this method has no shade window". ``takeRow`` keeps the widgets
+            (they hold the operator's value) and re-inserts them in field
+            order when the method comes back.
+            """
+            if name not in self._rows:
+                return
+            label, container = self._rows[name]
+            row, _role = self._form.getWidgetPosition(container)
+            if not visible:
+                if row >= 0:
+                    self._form.takeRow(row)
+                label.hide()          # out of the layout, still a child
+                container.hide()
+                return
+            if row < 0:
+                self._form.insertRow(self._visible_index(name), label,
+                                     container)
+            label.show()
+            container.show()
 
         if "tolerance" in self._rows:
             label, container = self._rows["tolerance"]
@@ -304,17 +377,24 @@ class StageEditor(QFrame):
             for widget in (container, *self._editors["tolerance"][1:]):
                 widget.setToolTip(tip)
 
-        if "spread" in self._rows:
-            label, container = self._rows["spread"]
-            label.setEnabled(window)
-            # The container holds the number AND its slider — one control
-            # split in two, so disabling it reaches both.
-            container.setEnabled(window)
-            container.setToolTip(
-                PARAM_TIPS.get("spread", "") if window else
-                "Used by the Window method only: a distance method carries "
-                "its shade slack in Tolerance, so a spread narrowed to "
-                "separate two layers comes back to full width.")
+        show("spread", window)
+        note = METHOD_NOTES.get(method, "")
+        if self._method_note is not None:
+            self._method_note.setText(note)
+            self._method_note.setVisible(bool(note))
+
+    def _visible_index(self, name: str) -> int:
+        """Where ``name`` goes among the rows currently IN the form."""
+        index = 0
+        for other in self._row_order:
+            if other == name:
+                break
+            if other not in self._rows:
+                continue
+            _label, widget = self._rows[other]
+            if self._form.getWidgetPosition(widget)[0] >= 0:
+                index += 1
+        return index
 
     # ------------------------------------------------------------------
 
@@ -418,6 +498,11 @@ class StageEditor(QFrame):
             lambda value, s=slider: s.setValue(int(round(value))))
 
         container = QWidget()
+        # Fixed height: a container that can grow swallows whatever slack the
+        # card has, and the space appears as a gap between this row's number
+        # and the row below it — which reads as a missing parameter.
+        container.setSizePolicy(QSizePolicy.Policy.Preferred,
+                                QSizePolicy.Policy.Fixed)
         row = QVBoxLayout(container)
         row.setContentsMargins(0, 0, 0, 0)
         row.setSpacing(0)
@@ -441,7 +526,8 @@ class StageEditor(QFrame):
 
     def load(self, stage: Stage) -> None:
         """Point the editor at ``stage`` and show it — the one path every
-        reload takes.
+        reload takes. SILENT: the widgets are written with signals off, so a
+        reload cannot look like an edit.
 
         The kinds are dispatched here ONCE. A widget kind added to
         ``_add_field`` and missed here would work until the first workspace
@@ -449,18 +535,22 @@ class StageEditor(QFrame):
         pipeline that is using the new one.
         """
         self._stage = stage
-        self.enable.setChecked(bool(stage.enabled))
-        for name, spec in self._editors.items():
-            value = getattr(stage, name, None)
-            if spec[0] == "hex":
-                if value is not None:
-                    spec[1].setText(str(value))
-            elif spec[0] == "bool":
-                spec[1].setChecked(bool(value))
-            elif spec[0] == "choice":
-                spec[1].set_value(value)
-            elif value is not None:
-                spec[1].setValue(value)
+        self._loading = True
+        try:
+            self.enable.setChecked(bool(stage.enabled))
+            for name, spec in self._editors.items():
+                value = getattr(stage, name, None)
+                if spec[0] == "hex":
+                    if value is not None:
+                        spec[1].setText(valid_hex(str(value)))
+                elif spec[0] == "bool":
+                    spec[1].setChecked(bool(value))
+                elif spec[0] == "choice":
+                    spec[1].set_value(value)
+                elif value is not None:
+                    spec[1].setValue(value)
+        finally:
+            self._loading = False
         self._refresh_swatch()
         self._sync_dependent_rows()
 
@@ -489,7 +579,26 @@ class StageEditor(QFrame):
         entry[2].setStyleSheet(
             f"background: {colour.name()}; border: 1px solid #3f3f46;")
 
+    def show_hex(self, text: str) -> None:
+        """Set the colour field WITHOUT notifying — a mirror being refreshed.
+
+        The two editors that show the colour (the pinned picker and the
+        pipeline card) have to agree, and whichever was edited must be able
+        to tell the other without the other reporting it as a new edit.
+        """
+        entry = self._editors.get("hex_color")
+        if entry is None or not text:
+            return
+        self._loading = True
+        try:
+            entry[1].setText(valid_hex(text))
+        finally:
+            self._loading = False
+        self._refresh_swatch()
+
     def _on_changed(self, *_args) -> None:
+        if self._loading:
+            return              # a reload, not an edit (see load/show_hex)
         self._refresh_swatch()
         self._sync_dependent_rows()
         self.sig_changed.emit()
@@ -541,10 +650,17 @@ class StageEditor(QFrame):
 # ----------------------------------------------------------------------
 
 class ColourGroup(QGroupBox):
-    """The sample colour: the colour stage, promoted to quick access.
+    """The PICKER: the colour that is being looked for, and how it is taken.
 
-    One colour drives two things — the mask's target and the curve's
-    centre — so it is edited once, here, and both read it.
+    Pinned at the top because reaching for a colour is the one thing done
+    constantly at the microscope — and because it is what the curve is
+    centred on, so the swatch is also a readout of the fixed point.
+
+    It is a PROJECTION of the colour stage, not a second copy of it: only the
+    colour is here (plus the patch size, which is the dropper's own setting),
+    and the parameters that shape the match live in the Identification card
+    where the pipeline is. Editing the colour in either place updates the
+    other; the Identification card's editor is the one the config comes from.
     """
 
     sig_changed = Signal()
@@ -561,9 +677,11 @@ class ColourGroup(QGroupBox):
         layout.setContentsMargins(6, 4, 6, 6)
         layout.setSpacing(4)
 
+        # Only the colour: the method and its parameters belong with the
+        # pipeline they shape (see the class docstring).
         self.editor = StageEditor(self._colour_stage(), self,
-                                  show_enable=True, framed=False,
-                                  sliders=True)
+                                  show_enable=False, framed=False,
+                                  only=("hex_color",))
         self.editor.sig_changed.connect(self._on_changed)
         self.editor.sig_dropper.connect(self.sig_dropper)
         layout.addWidget(self.editor)
@@ -575,6 +693,7 @@ class ColourGroup(QGroupBox):
         self._hint.setObjectName("dim")
         self._hint.setWordWrap(True)
         layout.addWidget(self._hint)
+        layout.addStretch(1)      # see IdentifyGroup: slack goes to the bottom
 
     def _build_patch_row(self) -> None:
         """How big a disc the dropper averages.
@@ -695,6 +814,12 @@ class ColourGroup(QGroupBox):
 
     def set_hex(self, text: str) -> None:
         self.editor.set_hex(text)
+
+    def show_hex(self, text: str) -> None:
+        """Mirror a colour edited in the chain card, without reporting it
+        back — the two views have to agree, and neither may treat the other's
+        refresh as a new edit."""
+        self.editor.show_hex(text)
 
     def reload(self) -> None:
         """Re-read the stored colour (a settings change made elsewhere)."""
@@ -935,10 +1060,18 @@ class _SpatialRows(QFrame):
 
 
 class IdentifyGroup(QGroupBox):
-    """The gates, in canonical order, with the counts that make the chain
-    readable — ``Colour match 812 → Size 12 → Sharpness 2``."""
+    """The whole chain, in canonical order — colour first, then the gates —
+    with the counts that make it readable: ``Colour match 812 → Size 12 →
+    Sharpness 2``.
+
+    The colour editor LEADS it because that is the order the pipeline runs
+    in: the source that produces the mask, then what cleans it, then the
+    gates. The pinned picker above the scroll edits the same stage's colour;
+    this one is what the config is built from.
+    """
 
     sig_changed = Signal()
+    sig_dropper = Signal()
 
     def __init__(self, settings, parent: QWidget | None = None):
         super().__init__("Identification", parent)
@@ -949,10 +1082,9 @@ class IdentifyGroup(QGroupBox):
         self._config = IdentifyConfig.from_dict(settings.section("identify"))
         self._editors: list[StageEditor] = []
         for stage in self._config.stages:
-            if stage.NAME == "colour":
-                continue            # promoted to the quick-access group
-            editor = StageEditor(stage, self)
+            editor = StageEditor(stage, self, sliders=stage.NAME == "colour")
             editor.sig_changed.connect(self.sig_changed)
+            editor.sig_dropper.connect(self.sig_dropper)
             self._editors.append(editor)
             layout.addWidget(editor)
         self.counts = QLabel("")
@@ -963,17 +1095,53 @@ class IdentifyGroup(QGroupBox):
         reset.setObjectName("compact")
         reset.clicked.connect(self.reset)
         layout.addWidget(reset)
+        # Slack belongs at the bottom of the card. Without this the group
+        # stretches the editors inside it, and a form that is given more
+        # height than it needs spends it between two rows — a blank band that
+        # reads as a parameter that went missing.
+        layout.addStretch(1)
+
+    # ------------------------------------------------------------------
+
+    def colour_editor(self) -> StageEditor | None:
+        """The colour stage's own editor — first in this card, because the
+        source that produces the mask is first in the pipeline."""
+        for editor in self._editors:
+            if editor._stage.NAME == "colour":
+                return editor
+        return None
+
+    def colour_stage(self):
+        """The colour stage as the pipeline card describes it — THE source of
+        truth for the match (the pinned picker mirrors its colour)."""
+        editor = self.colour_editor()
+        return editor.stage() if editor is not None else IdentifyConfig() \
+            .stage("colour")
+
+    def show_colour(self, hex_color: str) -> None:
+        """Mirror a colour picked elsewhere, without reporting it back."""
+        editor = self.colour_editor()
+        if editor is not None:
+            editor.show_hex(hex_color)
 
     def stages(self) -> list:
-        """The gates as the widgets describe them, in canonical order."""
+        """Every stage as the widgets describe them, in canonical order —
+        colour first, which is also the order the pipeline runs them."""
         return [editor.stage() for editor in self._editors]
 
     def set_counts(self, summary: str) -> None:
         self.counts.setText(summary)
 
+    def reload(self) -> None:
+        """Re-read the stored chain (a settings change made elsewhere)."""
+        self._config = IdentifyConfig.from_dict(
+            self._settings.section("identify"))
+        for editor, stage in zip(self._editors, self._config.stages):
+            editor.load(stage)
+
     def reset(self) -> None:
         fresh = IdentifyConfig()
-        for editor, stage in zip(self._editors, fresh.stages[1:]):
+        for editor, stage in zip(self._editors, fresh.stages):
             # load() applies the values AND the rows that depend on a named
             # choice, so a reset cannot leave a label describing the old one.
             editor.load(stage)

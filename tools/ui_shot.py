@@ -291,6 +291,29 @@ def main() -> int:
     finding.colour_group.grab().save(str(path))
     print(f"saved {path}")
 
+    # The chain card, colour stage first — in both row sets, because the
+    # method decides which rows exist at all.
+    chain = finding.identify_group
+    chain.repaint()
+    path = args.out / f"chain{tag}.png"
+    chain.grab().save(str(path))
+    print(f"saved {path}")
+    from talos.cv.identify import METHOD_RGB
+
+    editor = chain.colour_editor()
+    editor._buttons_click = None            # (kept explicit: see below)
+    editor._editors["method"][1]._buttons[METHOD_RGB].click()
+    # The method change rebuilds the row set, and grab() renders whatever
+    # geometry is current — without letting the layout run, the shot shows
+    # the rows where they WERE, i.e. a blank band the height of the row the
+    # new method does not have. (That is a rig artefact, not the app.)
+    flush(250)
+    chain.repaint()
+    path = args.out / f"chain_rgb{tag}.png"
+    chain.grab().save(str(path))
+    print(f"saved {path}")
+    editor._editors["method"][1]._buttons["window"].click()
+
     finding.set_view_mode("samples")
     for _ in range(3):
         synthetic_frame(app, flecks=True)
