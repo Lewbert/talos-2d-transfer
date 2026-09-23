@@ -298,11 +298,17 @@ def main() -> int:
     path = args.out / f"chain{tag}.png"
     chain.grab().save(str(path))
     print(f"saved {path}")
-    from talos.cv.identify import METHOD_RGB
+    from talos.cv.identify import METHOD_HSV, METHOD_RGB
 
+    chain.tabs.setCurrentIndex(1)
+    flush(250)
+    chain.repaint()
+    path = args.out / f"chain_hsv{tag}.png"
+    chain.grab().save(str(path))
+    print(f"saved {path}")
+    # named for the shot, not a leftover of the click: the row set follows
     editor = chain.colour_editor()
-    editor._buttons_click = None            # (kept explicit: see below)
-    editor._editors["method"][1]._buttons[METHOD_RGB].click()
+    chain.tabs.setCurrentIndex(2)
     # The method change rebuilds the row set, and grab() renders whatever
     # geometry is current — without letting the layout run, the shot shows
     # the rows where they WERE, i.e. a blank band the height of the row the
@@ -312,7 +318,7 @@ def main() -> int:
     path = args.out / f"chain_rgb{tag}.png"
     chain.grab().save(str(path))
     print(f"saved {path}")
-    editor._editors["method"][1]._buttons["window"].click()
+    chain.tabs.setCurrentIndex(0)
 
     finding.set_view_mode("samples")
     for _ in range(3):

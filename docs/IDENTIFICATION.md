@@ -18,15 +18,23 @@ transfer workflow actually starts from.
 
 **Where it lives in the tab.** The pinned card at the top-left is only the
 *picker*: the colour being looked for, the buttons that take it, and how large
-a patch a pick averages. Everything that shapes the *match* — the method, the
-tolerance, the shade window, the floors — is the first entry of the
-**Identification** card, in pipeline order with the gates it feeds:
+a patch a pick averages. Everything that shapes the *match* is in the
+**Identification** card, which is the chain itself in the order it runs: the
+colour match first — **the three methods are tabs**, so each one shows its own
+settings and its own explanation — then Clean up, Size, Frame edge, Sharpness
+and Merge. The colour match's rows sit directly in that card rather than in a
+card of their own: the card IS the pipeline, and a sub-card around its first
+entry only made the rows look crowded.
 
 ![The identification chain](images/identification.png)
 
-The colour appears in both places (the picker has to show what it picked);
-editing either one updates the other, and the chain card's copy is the one the
-pipeline is built from.
+Two consequences of it being the chain's only **source**: it has no enable
+switch (with it off, every other stage can only *remove* candidates, so the
+chain would find nothing — a switch whose only honest label is "find
+nothing"; a stored `enabled: false` is ignored with a log line), and the colour
+appears in two places (the picker has to show what it picked) — editing either
+one updates the other, and the chain card's copy is the one the pipeline is
+built from.
 
 It does **not** judge thickness, rank materials, or decide whether a flake is
 worth transferring. Colour is not thickness — interference colours overlap

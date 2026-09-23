@@ -623,6 +623,18 @@ class IdentifyConfig:
             if stage_cls is ColourStage:
                 kwargs["hex_color"] = valid_hex(
                     kwargs.get("hex_color", ColourStage.hex_color))
+                if kwargs.get("enabled") is False:
+                    # The colour match is the chain's only SOURCE: with it
+                    # off, nothing downstream can produce a candidate (every
+                    # other stage removes them), so "disabled" is a switch
+                    # whose only honest label is "find nothing". A stored
+                    # false is therefore ignored — with a line saying so,
+                    # because a settings file that meant it deserves an
+                    # answer.
+                    logger.info(
+                        "identification: the colour match cannot be disabled "
+                        "(it is the chain's only source) — enabling it")
+                kwargs["enabled"] = True
                 stored_method = kwargs.get("method")
                 if stored_method is not None and stored_method not in METHODS:
                     # A hand-edited (or future) value must not reach the

@@ -3,22 +3,24 @@
 Three groups and one plot, all of them about the same question: what is in
 this frame, and how do I make it easier to see?
 
-- **Sample colour** (the quick-access group, pinned above the scroll) is the
-  colour stage's editor, promoted out of the chain because it is the one
-  control an operator touches constantly. It is also the curve's centre —
-  one colour, two uses, so what you pick is what you amplify.
-- **Pre-processing** is the chain that runs before anything looks at the
-  frame: shade correction, denoise, the tone operations, and the
-  local-contrast curve. That curve is a *matched gain* — steep at the
-  picked colour and pinned everywhere it matters — and the plot above the
-  controls draws it, because a tone curve that cannot be seen is a
-  parameter you can only guess at.
-- **Identification** is the rest of the chain: the gates that decide which
-  blobs survive, with the per-stage counts that make tuning it feel like
-  tuning a filter rather than guessing.
+- **Sample colour** (pinned above the scroll) is the *picker*: the colour
+  being looked for, the buttons that take it, and how large a patch a pick
+  averages. Nothing that shapes the match — that belongs with the pipeline.
+  It is also the curve's centre, so the swatch doubles as the fixed point.
+- **Pre-processing** is what runs before anything looks at the frame: an
+  edge-preserving denoise and the local-contrast curve. That curve is a
+  *matched gain* — steep at the picked colour and pinned everywhere it
+  matters — and the plot above the controls draws it, because a tone curve
+  that cannot be seen is a parameter you can only guess at.
+- **Identification** is the chain itself, in the order it runs: the colour
+  match first (with its three methods as tabs, and their settings directly
+  in the card — no sub-card, the card IS the pipeline), then the gates that
+  decide which blobs survive, with the per-stage counts that make tuning it
+  feel like tuning a filter rather than guessing.
 
 The stage editors are data-driven from the stages themselves (``LABEL``,
-``RANGES``, the dataclass fields), so adding a stage needs no UI code.
+``RANGES``, ``CHOICES``, the dataclass fields), so adding a stage — or a
+named option on one — needs no UI code.
 """
 
 from __future__ import annotations
@@ -42,6 +44,7 @@ from PySide6.QtWidgets import (
     QSizePolicy,
     QSlider,
     QSpinBox,
+    QTabBar,
     QVBoxLayout,
     QWidget,
 )
@@ -246,7 +249,8 @@ class StageEditor(QFrame):
     def __init__(self, stage: Stage, parent: QWidget | None = None,
                  show_enable: bool = True, framed: bool = True,
                  sliders: bool = False,
-                 only: tuple[str, ...] | None = None):
+                 only: tuple[str, ...] | None = None,
+                 always_on: bool = False):
         super().__init__(parent)
         self._stage = stage
         #: Build only these fields. The colour stage is edited in two places
@@ -254,6 +258,12 @@ class StageEditor(QFrame):
         #: card (everything) — and the second editor must be a PROJECTION of
         #: the same stage rather than a second copy of it.
         self._only = tuple(only) if only else None
+        #: The stage cannot be switched off (the colour match is the chain's
+        #: only source: disabled, the chain finds nothing — a switch whose
+        #: only honest label would be "find nothing"). A stored ``enabled:
+        #: false`` is therefore ignored (from_dict logs it) and the value read
+        #: back is always True.
+        self._always_on = bool(always_on)
         #: Give every numeric row a slider under its number box, the way the
         #: camera's controls are laid out. Off by default: the values in a
         #: gate are typed once and left, while the colour's three are
@@ -270,7 +280,7 @@ class StageEditor(QFrame):
         outer.setSpacing(2)
 
         self.enable = QCheckBox(stage.LABEL)
-        self.enable.setChecked(bool(stage.enabled))
+        self.enable.setChecked(self._always_on or bool(stage.enabled))
         font = self.enable.font()
         font.setBold(True)          # the stage name outranks its parameters
         self.enable.setFont(font)
@@ -340,31 +350,7 @@ class StageEditor(QFrame):
         window = method == METHOD_WINDOW
 
         def show(name: str, visible: bool) -> None:
-            """A row the method does not have is TAKEN OUT of the form.
-
-            Hiding its widgets leaves the row's geometry slot behind, and a
-            card that is stretched taller than its content then draws the
-            freed space as a blank band exactly the height of the parameter
-            that is gone — which reads as a rendering fault rather than as
-            "this method has no shade window". ``takeRow`` keeps the widgets
-            (they hold the operator's value) and re-inserts them in field
-            order when the method comes back.
-            """
-            if name not in self._rows:
-                return
-            label, container = self._rows[name]
-            row, _role = self._form.getWidgetPosition(container)
-            if not visible:
-                if row >= 0:
-                    self._form.takeRow(row)
-                label.hide()          # out of the layout, still a child
-                container.hide()
-                return
-            if row < 0:
-                self._form.insertRow(self._visible_index(name), label,
-                                     container)
-            label.show()
-            container.show()
+            self._set_row_visible(name, visible)
 
         if "tolerance" in self._rows:
             label, container = self._rows["tolerance"]
@@ -382,6 +368,51 @@ class StageEditor(QFrame):
         if self._method_note is not None:
             self._method_note.setText(note)
             self._method_note.setVisible(bool(note))
+
+    def sync_rows(self) -> None:
+        """Re-apply what the rows depend on.
+
+        Needed when a choice field is driven from OUTSIDE the form (the
+        colour match's method is a tab bar above it): the hidden widget
+        changes silently, so nothing would otherwise re-hide or re-show the
+        rows that belong to the new value.
+        """
+        self._sync_dependent_rows()
+
+    def hide_row(self, name: str) -> None:
+        """Take a row out of the form for good (see ``_set_row_visible``).
+
+        Used for a parameter whose control lives outside the form — the
+        colour match's method is a tab bar above it — while the value itself
+        stays in this editor, so ``stage()`` still reads it.
+        """
+        self._set_row_visible(name, False)
+
+    def _set_row_visible(self, name: str, visible: bool) -> None:
+        """A row the method does not have is TAKEN OUT of the form.
+
+        Hiding its widgets leaves the row's geometry slot behind, and a card
+        that is stretched taller than its content then draws the freed space
+        as a blank band exactly the height of the parameter that is gone —
+        which reads as a rendering fault rather than as "this method has no
+        shade window". ``takeRow`` keeps the widgets (they hold the
+        operator's value) and re-inserts them in field order when the method
+        comes back.
+        """
+        if name not in self._rows:
+            return
+        label, container = self._rows[name]
+        row, _role = self._form.getWidgetPosition(container)
+        if not visible:
+            if row >= 0:
+                self._form.takeRow(row)
+            label.hide()              # out of the layout, still a child
+            container.hide()
+            return
+        if row < 0:
+            self._form.insertRow(self._visible_index(name), label, container)
+        label.show()
+        container.show()
 
     def _visible_index(self, name: str) -> int:
         """Where ``name`` goes among the rows currently IN the form."""
@@ -537,7 +568,7 @@ class StageEditor(QFrame):
         self._stage = stage
         self._loading = True
         try:
-            self.enable.setChecked(bool(stage.enabled))
+            self.enable.setChecked(self._always_on or bool(stage.enabled))
             for name, spec in self._editors.items():
                 value = getattr(stage, name, None)
                 if spec[0] == "hex":
@@ -625,7 +656,7 @@ class StageEditor(QFrame):
 
     def stage(self) -> Stage:
         """The stage as the widgets currently describe it."""
-        kwargs = {"enabled": self.enable.isChecked()}
+        kwargs = {"enabled": self._always_on or self.enable.isChecked()}
         for name, spec in self._editors.items():
             if spec[0] == "hex":
                 kwargs[name] = valid_hex(spec[1].text(),
@@ -1082,10 +1113,20 @@ class IdentifyGroup(QGroupBox):
         self._config = IdentifyConfig.from_dict(settings.section("identify"))
         self._editors: list[StageEditor] = []
         for stage in self._config.stages:
-            editor = StageEditor(stage, self, sliders=stage.NAME == "colour")
+            colour = stage.NAME == "colour"
+            # The colour match is the chain's only source: it cannot be
+            # switched off, and its settings sit DIRECTLY in this card —
+            # the card is the pipeline, and a sub-card around its first
+            # entry only made the rows look crowded.
+            editor = StageEditor(stage, self, sliders=colour,
+                                 framed=not colour,
+                                 show_enable=not colour,
+                                 always_on=colour)
             editor.sig_changed.connect(self.sig_changed)
             editor.sig_dropper.connect(self.sig_dropper)
             self._editors.append(editor)
+            if colour:
+                self._add_colour_header(layout, editor)
             layout.addWidget(editor)
         self.counts = QLabel("")
         self.counts.setObjectName("dim")
@@ -1102,6 +1143,57 @@ class IdentifyGroup(QGroupBox):
         layout.addStretch(1)
 
     # ------------------------------------------------------------------
+
+    def _add_colour_header(self, layout: QVBoxLayout,
+                           editor: StageEditor) -> None:
+        """The method tabs, above the colour match's own rows.
+
+        Tabs rather than a segmented row because the choice *is* a mode: each
+        one brings its own settings (the shade window exists only for the
+        window method) and its own explanation. The tab bar is the same
+        ``QTabBar`` the workspace tabs use, so it inherits the theme; there is
+        deliberately no pane widget — the card itself is the page.
+
+        The choice field is still the MODEL, kept in the editor as a hidden
+        row: ``stage()`` reads every parameter back out of it, and a second
+        place to store the method would be a second thing to keep in step.
+        """
+        self.tabs = QTabBar(self)
+        options = list((editor._stage.CHOICES or {}).get("method", ()))
+        for _value, label, tooltip in options:
+            index = self.tabs.addTab(label)
+            if tooltip:
+                self.tabs.setTabToolTip(index, tooltip)
+        self.tabs.setExpanding(True)
+        self.tabs.setDrawBase(False)
+        self.tabs.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self._method_values = [value for value, _label, _tip in options]
+        self._method_toggle = editor._editors["method"][1]
+        editor.hide_row("method")
+        self.tabs.currentChanged.connect(self._on_method_tab)
+        layout.addWidget(self.tabs)
+        self._sync_method_tabs()
+
+    def _on_method_tab(self, index: int) -> None:
+        if not 0 <= index < len(self._method_values):
+            return
+        # Through the hidden toggle, so the value the config reads is the
+        # same one the tab shows (see _add_colour_header).
+        self._method_toggle.set_value(self._method_values[index])
+        self._editors[0].sync_rows()      # the colour editor, colour first
+        self.sig_changed.emit()
+
+    def _sync_method_tabs(self) -> None:
+        value = self._method_toggle.value()
+        index = (self._method_values.index(value)
+                 if value in self._method_values else 0)
+        if self.tabs.currentIndex() == index:
+            return
+        self.tabs.blockSignals(True)      # a sync, not a click
+        try:
+            self.tabs.setCurrentIndex(index)
+        finally:
+            self.tabs.blockSignals(False)
 
     def colour_editor(self) -> StageEditor | None:
         """The colour stage's own editor — first in this card, because the
@@ -1138,6 +1230,7 @@ class IdentifyGroup(QGroupBox):
             self._settings.section("identify"))
         for editor, stage in zip(self._editors, self._config.stages):
             editor.load(stage)
+        self._sync_method_tabs()          # the method may have moved
 
     def reset(self) -> None:
         fresh = IdentifyConfig()
@@ -1145,6 +1238,7 @@ class IdentifyGroup(QGroupBox):
             # load() applies the values AND the rows that depend on a named
             # choice, so a reset cannot leave a label describing the old one.
             editor.load(stage)
+        self._sync_method_tabs()
         self.sig_changed.emit()
 
 

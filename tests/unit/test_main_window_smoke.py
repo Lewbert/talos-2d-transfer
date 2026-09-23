@@ -2493,3 +2493,85 @@ def test_the_patch_radius_survives_a_restart(window):
     finding.colour_group._on_patch_released()          # the save path
     assert window._settings.section("ui")["pick_radius_px"] == 7
     assert finding.colour_group._stored_patch_radius() == 7
+
+
+# --- the method tabs, and a source that cannot be switched off -------------
+
+def test_the_method_is_a_tab_bar_and_drives_the_chain(window):
+    """Three methods as tabs under the Identification card — one page each,
+    with that method's own rows. The choice has to reach the pipeline."""
+    from talos.cv.identify import METHOD_HSV, METHOD_RGB, METHOD_WINDOW
+
+    finding = window._sample_finding
+    group = finding.identify_group
+    editor = _chain_colour_editor(window)
+
+    assert [group.tabs.tabText(i) for i in range(group.tabs.count())] == \
+        ["Window", "HSV dist.", "RGB dist."]
+    assert group.tabs.currentIndex() == 0
+    assert editor.stage().method == METHOD_WINDOW
+
+    group.tabs.setCurrentIndex(2)                 # what a click does
+    assert editor.stage().method == METHOD_RGB
+    assert next(s for s in finding.identify_config().stages
+                if s.NAME == "colour").method == METHOD_RGB
+    # ...and the rows follow the tab
+    assert editor._rows["spread"][1].isHidden()
+    assert editor._rows["tolerance"][0].text() == "Tolerance"
+    assert "not used" in editor._method_note.text()
+
+    group.tabs.setCurrentIndex(1)
+    assert editor.stage().method == METHOD_HSV
+    group.tabs.setCurrentIndex(0)
+    assert editor.stage().method == METHOD_WINDOW
+    assert not editor._rows["spread"][1].isHidden()
+
+
+def test_the_tabs_follow_a_stored_chain(window):
+    """A reload (a workspace switch, Preferences applied) can change the
+    method without anyone clicking a tab."""
+    from talos.cv.identify import METHOD_HSV
+
+    finding = window._sample_finding
+    group = finding.identify_group
+    settings = window._settings
+    stages = settings.section("identify").setdefault("stages", [])
+    entry = next((s for s in stages if s.get("name") == "colour"), None)
+    if entry is None:
+        entry = {"name": "colour"}
+        stages.append(entry)
+    entry["method"] = METHOD_HSV
+
+    group.reload()
+    assert group.tabs.currentIndex() == 1
+    assert _chain_colour_editor(window).stage().method == METHOD_HSV
+
+
+def test_the_colour_match_cannot_be_switched_off(window):
+    """It is the chain's only SOURCE: with it off, every other stage can only
+    remove candidates, so the chain finds nothing. A switch that means "find
+    nothing" is not a switch worth having."""
+    from talos.cv.identify import IdentifyConfig
+
+    finding = window._sample_finding
+    editor = _chain_colour_editor(window)
+    assert not editor.enable.isVisibleTo(editor), \
+        "the colour match still shows an enable box"
+    assert editor.stage().enabled is True
+
+    # a stored file that says otherwise is answered, not obeyed
+    stored = {"stages": [{"name": "colour", "enabled": False,
+                          "hex_color": "#1c3484"}]}
+    assert IdentifyConfig.from_dict(stored).stage("colour").enabled is True
+
+
+def test_the_colour_rows_are_in_the_card_not_a_card_of_their_own(window):
+    """The user's point: the identification card IS the pipeline, so its
+    first entry's settings sit directly in it — a sub-card around them only
+    made the rows look crowded. The gates keep their cards."""
+    finding = window._sample_finding
+    editor = _chain_colour_editor(window)
+    gates = [e for e in finding.identify_group._editors
+             if e._stage.NAME != "colour"]
+    assert editor.objectName() != "card"
+    assert all(gate.objectName() == "card" for gate in gates)
