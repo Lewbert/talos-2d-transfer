@@ -42,11 +42,12 @@ frame slot and from nothing that draws.
 
 Six stages, in a fixed order. Each has `enabled` plus its own parameters,
 reports how many candidates it let through, and is described to the UI by the
-stage itself (`LABEL`, `RANGES`), so a new stage needs no UI code.
+stage itself (`LABEL`, `RANGES`, `CHOICES`), so a new stage — or a new *named
+choice* on an existing one — needs no UI code.
 
 | # | Stage | Kind | Default | What it does |
 |---|---|---|---|---|
-| 1 | **Colour match** | source | **on** | Pixels within a tolerance of the picked colour |
+| 1 | **Colour match** | source | **on** | Pixels within a tolerance of the picked colour — one of three methods, below |
 | 2 | **Clean up** | mask | **on** | Open then close: removes speckle, joins broken edges |
 | 3 | **Size** | gate | **on** | Area in µm², min and max |
 | 4 | **Frame edge** | gate | **on** | Rejects blobs touching the field of view's edge |
@@ -79,12 +80,57 @@ not arrive, which is a defence that quietly stops being checked. The
 prevention is structural now (see above). Both names are recorded in
 `_RETIRED_STAGES` and a stored config that mentions them loads without them.
 
+## Three ways to match, and which to use
+
+The colour match is one of three geometries, chosen in the colour card and
+stored with the colour. `Tolerance` keeps the **same per-axis meaning** in all
+three (hue ×0.9, saturation and value ×2.55) so switching method does not
+re-scale the number — only the shape of what it accepts:
+
+| Method | Accepts | Shape |
+|---|---|---|
+| **Window** (default) | `dH ≤ 0.9·T` and `dS ≤ 2.55·Spread` and `dV ≤ 2.55·Spread` | a **box** in HSV |
+| **HSV dist.** | `√((dH/0.9)² + (dS/2.55)² + (dV/2.55)²) ≤ T` | a **ball** of the same weighting |
+| **RGB dist.** | `√(ΔR² + ΔG² + ΔB²) ≤ 2.55·T` | a ball in RGB |
+
+`dH` is circular in every method (H is 0–179: 179 and 2 are three degrees
+apart), and `min_saturation`/`min_value` apply in all three as a *pre-filter* on
+the pixel, clamped to the pick so the picked colour is always inside its own
+mask.
+
+**The shapes are not interchangeable, and that is the point of having them.**
+With `Spread == Tolerance` the HSV ball is inscribed in the box: it gives up the
+box's corners — a pixel that is at the far edge of hue *and* of shade at once —
+and that diagonal is exactly what an illumination gradient looks like, which is
+why the ball is the one to try when the substrate keeps creeping in. RGB has no
+hue/brightness decomposition at all: it is the sharpest tool for "this shade on
+this wafer under this lamp", the first to fail when the exposure or the colour
+temperature moves, and — because a low-saturation pixel has a meaningless hue in
+HSV but is simply *close* to another low-saturation pixel in RGB — the one to
+reach for on a **grey or near-white** background.
+
+**Two switches that change more than the shape**, both of which the panel says
+out loud when they happen:
+
+- **Spread is superseded by a distance method.** The window's shade slack is
+  `spread × 2.55`; a ball's is `tolerance × 2.55`. So switching to a distance
+  method with a deliberately narrowed spread *re-opens* the shade window — for
+  the two-layer case the split exists for, the lighter layer comes back. The
+  `Spread` row is disabled with a tooltip saying so, and the card's own line
+  warns on the switch.
+- **The RGB ball is not the box.** It is stricter on a brightness change (three
+  channels at once) and looser across hue at low saturation. The same number is
+  the same *slack per axis*, not the same region.
+
 ## Three rules the implementation exists to keep
 
 **Hue wraps.** The colour band is split across the 0/179 seam, so a red target
 (hue ≈ 0 or ≈ 179) gets the same tolerance as any other hue. The obvious
 implementation — a `low ≤ h ≤ high` box — silently leaves red one-sided, which
 is the bug the reference project shipped with and this one has a test against.
+The distance methods need the *wrapped difference* rather than a split band, and
+it is computed in int32 because uint8 subtraction wraps silently — turning every
+red target inside out.
 
 **Hue and shade are two numbers, and they must be.** The match is an HSV box:
 `Hue tolerance` sets the hue half-width (× 0.9), `Shade spread` sets the
@@ -235,9 +281,10 @@ what the denoise is for, and why the denoise runs first.
 The chain serialises to `identify.stages` in the settings file — the bundled
 defaults *are* the schema — and `IdentifyConfig.from_dict` is deliberately
 forgiving: an unknown stage is dropped, a missing one returns at its default, a
-parameter with the wrong type falls back to its default, and a malformed hex
-falls back to a colour that works. A hand-edited settings file must not be able
-to stop the pipeline from running.
+parameter with the wrong type falls back to its default, a malformed hex falls
+back to a colour that works, and an unknown `method` falls back to `window`
+(the behaviour every file written before the field existed had) with a log line.
+A hand-edited settings file must not be able to stop the pipeline from running.
 
 ## The three views
 
@@ -270,8 +317,18 @@ the held layer is a picture of where the stage *was* while the click is mapped
 with the frame actually on screen. A pick while an axis is moving is refused
 outright, with the reason, for the same reason.
 
-**...and it judges the patch it averaged, out loud.** The sample is a 9-px
-circular mean, not a pixel, so a click near a flake's edge returns the mean of
+**...and the pointer is the patch.** While the dropper is armed the mouse
+cursor *is* a circle of the region a click will average, with a cross at the
+sampling pixel — the platform pointer is hidden, and comes back off the image
+or when the pick lands. The size is the colour card's **Patch** row (a radius
+in frame pixels; the row shows the diameter, since that is what the disc
+spans). It exists because at fit-to-window scale the default 9-px patch is
+about two screen pixels: the operator could not see what they were averaging,
+which is the same problem the warning below reports after the fact.
+
+**...and it judges the patch it averaged, out loud.** The sample is a
+circular mean a few pixels across, not a pixel, so a click near a flake's edge
+returns the mean of
 the flake and its substrate — a colour *neither* material has, which then
 becomes the mask's target and the curve's centre. It is the "sometimes it finds
 the other layer" case, and it is now visible rather than silent: the colour
@@ -353,24 +410,36 @@ says whether it is doing anything useful.
    the readout under the controls says what it actually used. A vignette
    correction is the intended future of the removed shade stage (see "The
    three stages that were removed").
-2. **Hue tolerance** until the flake family is caught without the substrate.
-3. **Shade spread** when two *thicknesses* of the same material arrive
-   together — the monolayer and the bilayer are close in hue and far apart in
-   brightness, so this is the slider that separates them. Narrow it until the
-   layer you do not want drops out, and check the colour card's line first: if
-   the pick itself was a mixture, fix the pick before touching this.
-4. **Min saturation** if the substrate (or the illumination gradient) comes in
+2. **Match by**: leave it on **Window** to start with — it is the only method
+   that separates two *thicknesses* of one material (see "Three ways to
+   match"). Reach for **HSV dist.** when the substrate keeps creeping in along
+   a lighting diagonal, and for **RGB dist.** on a grey or near-white
+   background, or when the shade is the whole question and the lamp is stable.
+   Remember the switch re-opens the shade window if you had narrowed the
+   spread — the card says so.
+3. **Hue tolerance** until the flake family is caught without the substrate.
+4. **Shade spread** (Window only) when two *thicknesses* of the same material
+   arrive together — the monolayer and the bilayer are close in hue and far
+   apart in brightness, so this is the slider that separates them. Narrow it
+   until the layer you do not want drops out, and check the colour card's line
+   first: if the pick itself was a mixture, fix the pick before touching this.
+5. **Min saturation** if the substrate (or the illumination gradient) comes in
    with it — this is the parameter that does the most work on a real wafer.
-5. **Clean up**: raise the kernel if a flake fragments into speckle; it also
+   It is a *floor*: it rejects anything less saturated than the value, which is
+   the cheap way to cut a substrate paler than the flake, and it applies under
+   every method. **Min brightness** is the same guard on the dark side, and it
+   is off (0) as shipped: lower it never, raise it for a flake that is the
+   bright thing on a dark field, or to kill the dark rim at the field's edge.
+6. **Clean up**: raise the kernel if a flake fragments into speckle; it also
    merges broken edges, so watch that it does not eat small samples.
-6. **Size**: the µm² floor is the honest filter, and it is in physical units, so
+7. **Size**: the µm² floor is the honest filter, and it is in physical units, so
    it means the same thing at every objective. The µm² floor is the one filter
    here whose threshold is a fact about the sample rather than about the image.
-7. **Sharpness**: raise it to reject defocused blobs. Its default (4.0) is
+8. **Sharpness**: raise it to reject defocused blobs. Its default (4.0) is
    deliberately low, because a colour-matched contour traces the colour
    boundary and scores in the tens — a threshold picked without measuring would
    reject most real samples.
-8. **Merge**: raise the gap when one flake arrives as several boxes.
+9. **Merge**: raise the gap when one flake arrives as several boxes.
 
 The unit tests build synthetic frames with known truth (a blob of a known colour
 at a known place, and a substrate that is none of those), which is the fastest

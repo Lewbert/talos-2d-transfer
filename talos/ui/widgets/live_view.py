@@ -11,14 +11,15 @@ crosshair, AF-status indicator (top-right).
 from __future__ import annotations
 
 import numpy as np
-from PySide6.QtCore import QRectF, Qt, QTimer, Signal
+from PySide6.QtCore import QPointF, QRectF, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QImage, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import QLabel, QVBoxLayout, QWidget
 
 from PySide6.QtWidgets import (QButtonGroup, QFrame, QGraphicsOpacityEffect,
                                QHBoxLayout, QPushButton)
 
-from talos.cv.af_roi import letterbox_map, letterbox_rect, normalized_roi
+from talos.cv.af_roi import (letterbox_circle, letterbox_map, letterbox_rect,
+                             normalized_roi)
 from talos.cv.calibration import SENSOR_WIDTH_PX
 from talos.ui.theme import OK
 from talos.ui.widgets.overlay import (
@@ -34,6 +35,10 @@ from talos.ui.widgets.overlay import (
 # "AF ROI" tag next to it says what the outline means.
 _CROSSHAIR_PEN = QPen(QColor(0, 200, 255, 120), 1, Qt.PenStyle.DashLine)
 _ROI_PEN = _CROSSHAIR_PEN
+
+#: The dropper's patch outline. The same green the scan map and the
+#: annotated mosaic use for "this is the thing you are looking at".
+_PICK_PEN = QPen(QColor(0, 255, 90, 230), 1.5)
 _ROI_LABEL = "AF ROI"
 
 _AF_FADE_MS = 3000
@@ -181,6 +186,10 @@ class LiveViewWidget(QWidget):
         self._processed_paused = False
         self._pause_note = ""
         self._picking = False
+        #: Where the pointer is while the dropper is armed (widget coords),
+        #: and how big a patch it will average (frame pixels).
+        self._pick_pos: tuple[float, float] | None = None
+        self._pick_radius_px = 4
         self._af_phase: int | None = None
         self._af_label = ""
         self._af_success = False
@@ -304,10 +313,47 @@ class LiveViewWidget(QWidget):
     def set_pick_mode(self, on: bool) -> None:
         """Click-to-sample: the next click emits ``sig_frame_clicked`` with
         the frame pixel under the cursor (letterbox-corrected), then the
-        mode turns itself off — a dropper is a single action."""
+        mode turns itself off — a dropper is a single action.
+
+        While it is armed the pointer IS the patch: the platform cursor is
+        blanked and a circle of the patch's true on-screen size follows the
+        mouse (see ``_draw_pick_circle``), so the operator can see what a
+        click will average before making it. Mouse tracking is what lets it
+        follow without a button held.
+        """
         self._picking = bool(on)
-        self.setCursor(Qt.CursorShape.CrossCursor if on
+        self.setMouseTracking(self._picking)
+        if not self._picking:
+            self._pick_pos = None
+        self.setCursor(Qt.CursorShape.ArrowCursor)
+        self._overlay.update()
+
+    def set_pick_radius(self, radius_px: int) -> None:
+        """The dropper's patch radius, in FRAME pixels (the physical
+        convention — the same patch covers the same part of the sample at
+        any capture resolution)."""
+        self._pick_radius_px = max(1, int(radius_px))
+        if self._picking:
+            self._overlay.update()
+
+    def _update_pick_cursor(self, position) -> None:
+        """Follow the mouse with the patch circle while the dropper is armed.
+
+        Outside the image — the letterbox bars — there is nothing to
+        average, so the circle goes and the normal pointer comes back: a
+        blank cursor over a dead area reads as a frozen application.
+        """
+        shape = self._last_shape
+        if not self._picking or shape is None:
+            return
+        size = (self.width(), self.height())
+        x, y = letterbox_map(size, shape, (position.x(), position.y()))
+        inside = 0 <= x < shape[1] and 0 <= y < shape[0]
+        self._pick_pos = ((float(position.x()), float(position.y()))
+                          if inside else None)
+        self.setCursor(Qt.CursorShape.BlankCursor if inside
                        else Qt.CursorShape.ArrowCursor)
+        self._overlay.update()
 
     # --- Display overlays ------------------------------------------------
 
@@ -416,9 +462,20 @@ class LiveViewWidget(QWidget):
         self.sig_frame_clicked.emit(int(x), int(y))
 
     def mouseMoveEvent(self, event) -> None:  # noqa: N802
+        if self._picking:
+            self._update_pick_cursor(event.position())
+            return
         if self._selecting and self._drag_start is not None:
             self._drag_rect = QRectF(self._drag_start,
                                      event.position()).normalized()
+            self._overlay.update()
+
+    def leaveEvent(self, event) -> None:  # noqa: N802
+        """The patch circle is a cursor: it must not linger off the image."""
+        super().leaveEvent(event)
+        if self._picking:
+            self._pick_pos = None
+            self.setCursor(Qt.CursorShape.ArrowCursor)
             self._overlay.update()
 
     def mouseReleaseEvent(self, event) -> None:  # noqa: N802
@@ -563,6 +620,8 @@ class LiveViewWidget(QWidget):
             painter.drawRect(self._drag_rect)
         if self._processed_paused and self._pause_note:
             self._draw_pause_note(painter)
+        if self._picking and self._pick_pos is not None:
+            self._draw_pick_circle(painter)
         live_um_per_px = self._live_um_per_px()
         if self._scale_bar_enabled and live_um_per_px is not None:
             # the length choice lives in the shared spec now (same ladder
@@ -582,6 +641,38 @@ class LiveViewWidget(QWidget):
                                   af_phase_color(self._af_phase),
                                   self._last_shape,
                                   (self.width(), self.height()))
+
+    def _draw_pick_circle(self, painter: QPainter) -> None:
+        """The patch the next click will average, where the pointer is.
+
+        The platform cursor is blank while this is up, so this IS the
+        pointer: a circle at the patch's true on-screen size, drawn dark
+        then bright (a light ring has to read on a bright flake and on a
+        dark field), with a one-pixel cross at the centre — the sampling
+        pixel, which is the thing the circle is centred on.
+        """
+        shape = self._last_shape
+        if shape is None:
+            return
+        size = (self.width(), self.height())
+        frame_point = letterbox_map(size, shape, self._pick_pos)
+        cx, cy, radius = letterbox_circle(size, shape, frame_point,
+                                          float(self._pick_radius_px))
+        # A 1-px radius circle is a dot the operator cannot aim: keep it
+        # visible without pretending the patch is bigger than it is (the
+        # readout in the colour card is the number that matters).
+        radius = max(2.0, radius)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.setPen(QPen(QColor(0, 0, 0, 170), 3.0))
+        painter.drawEllipse(QPointF(cx, cy), radius, radius)
+        painter.setPen(_PICK_PEN)
+        painter.drawEllipse(QPointF(cx, cy), radius, radius)
+        # The cross marks the sampling pixel. It shrinks with the circle: at
+        # a 5-px radius a fixed 3-px arm fills the ring and the shape reads
+        # as a plus rather than as a patch.
+        arm = max(1, min(3, int(round(radius * 0.4))))
+        painter.drawLine(int(cx) - arm, int(cy), int(cx) + arm, int(cy))
+        painter.drawLine(int(cx), int(cy) - arm, int(cx), int(cy) + arm)
 
     def _draw_roi(self, painter: QPainter, rect: QRectF) -> None:
         """Unfilled dashed outline + a small "AF ROI" tag (the tag is drawn

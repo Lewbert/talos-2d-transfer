@@ -8,6 +8,8 @@ streamed frame.
 
 import numpy as np
 import pytest
+from PySide6.QtCore import QEvent, QPointF, Qt
+from PySide6.QtGui import QMouseEvent
 from PySide6.QtWidgets import QApplication
 
 from talos.ui.widgets.live_view import LiveViewWidget
@@ -336,3 +338,73 @@ def test_the_pause_note_is_only_kept_while_paused(qapp):
     assert view._pause_note == "scanning — showing the live frame"
     view.set_processed_paused(False, "ignored")
     assert view._pause_note == ""
+
+
+def _mouse_move(point: tuple[float, float]):
+    """A move event at a widget-local point (the 6-argument form: the
+    5-argument one is deprecated and warns)."""
+    local = QPointF(*point)
+    return QMouseEvent(QEvent.Type.MouseMove, local, local,
+                       Qt.MouseButton.NoButton, Qt.MouseButton.NoButton,
+                       Qt.KeyboardModifier.NoModifier)
+
+
+# --- the pick circle: the pointer is the patch ----------------------------
+
+def test_pick_mode_turns_the_pointer_into_the_patch(qapp):
+    """The bench reality behind this: at fit-to-window scale a 9-px patch is
+    about two screen pixels, so the operator cannot see what they are
+    averaging. While the dropper is armed the platform cursor is blank and
+    the circle is the pointer."""
+    from PySide6.QtCore import QPointF
+
+    view = LiveViewWidget()
+    view.resize(800, 600)
+    view.show_frame(_grey_frame(50))
+    view.set_pick_radius(4)
+    view.set_pick_mode(True)
+    assert view.hasMouseTracking()
+
+    move = _mouse_move((400.0, 300.0))
+    view.mouseMoveEvent(move)
+    assert view._pick_pos == (400.0, 300.0)
+    assert view.cursor().shape() == Qt.CursorShape.BlankCursor
+
+    # ...and the click ends the mode and gives the cursor back
+    view._emit_click(QPointF(400.0, 300.0))
+    assert not view._picking
+    assert view._pick_pos is None
+    assert view.cursor().shape() == Qt.CursorShape.ArrowCursor
+
+
+def test_the_patch_circle_is_not_drawn_over_the_letterbox(qapp):
+    """Outside the image there is nothing to average: a blank cursor over a
+    dead area reads as a frozen application, so the circle goes and the
+    pointer comes back."""
+    from PySide6.QtCore import QPointF
+    from PySide6.QtGui import QMouseEvent
+
+    view = LiveViewWidget()
+    view.resize(800, 600)
+    # 16:9 into 4:3: the image is 800x450 and there really are bands
+    view.show_frame(_grey_frame(50, h=180, w=320))
+    view.set_pick_mode(True)
+    move = _mouse_move((400.0, 2.0))
+    view.mouseMoveEvent(move)
+    assert view._pick_pos is None, "the circle was drawn on the band"
+    assert view.cursor().shape() == Qt.CursorShape.ArrowCursor
+
+    view.leaveEvent(QMouseEvent(QEvent.Type.Leave, QPointF(400.0, 300.0),
+                                QPointF(400.0, 300.0),
+                                Qt.MouseButton.NoButton,
+                                Qt.MouseButton.NoButton,
+                                Qt.KeyboardModifier.NoModifier))
+    assert view.cursor().shape() == Qt.CursorShape.ArrowCursor
+
+
+def test_the_patch_radius_is_kept_and_clamped(qapp):
+    view = LiveViewWidget()
+    view.set_pick_radius(9)
+    assert view._pick_radius_px == 9
+    view.set_pick_radius(0)
+    assert view._pick_radius_px == 1, "a zero-radius patch averages nothing"

@@ -130,3 +130,39 @@ def test_sanitize_roi_norm_is_the_one_clamp_rule():
     assert sanitize_roi_norm(("junk",)) is None
     assert sanitize_roi((0.2, 0.3, 0.4, 0.4)) == \
         sanitize_roi_norm((0.2, 0.3, 0.4, 0.4))
+
+
+# --- the dropper's patch circle -------------------------------------------
+
+def test_a_frame_radius_becomes_the_circle_actually_drawn():
+    """The patch is defined in FRAME pixels (physical: the same patch covers
+    the same part of the sample at any capture resolution), and what the
+    operator sees is that region on SCREEN — this is the transform, and it
+    must use the same fit the click mapping uses or the circle is not the
+    patch."""
+    from talos.cv.af_roi import letterbox_circle
+
+    cx, cy, radius = letterbox_circle(WIDGET, FRAME, (960.0, 540.0), 4.0)
+    assert cx == pytest.approx(400.0)        # the frame centre
+    assert cy == pytest.approx(300.0)
+    assert radius == pytest.approx(4.0 * SCALE, abs=0.01)
+
+    # a 4K frame at the same capture is twice the pixels for the same field
+    # of view, so the same PHYSICAL patch is twice the radius there and half
+    # the on-screen size
+    cx2, cy2, radius2 = letterbox_circle(WIDGET, (2160, 3840, 3), (1920.0,
+                                                                   1080.0),
+                                         4.0)
+    assert (cx2, cy2) == pytest.approx((400.0, 300.0))
+    assert radius2 == pytest.approx(4.0 * (800 / 3840), abs=0.01)
+    assert radius2 < radius
+
+
+def test_a_corner_point_maps_to_where_the_image_starts():
+    """The circle follows the pointer, so an off-by-one in the offset would
+    put it beside the cursor — visible immediately, and worth pinning."""
+    from talos.cv.af_roi import letterbox_circle
+
+    x, y, _r = letterbox_circle(WIDGET, FRAME, (0.0, 0.0), 4.0)
+    assert x == pytest.approx(0.0)
+    assert y == pytest.approx(75.0)          # the top letterbox band

@@ -163,49 +163,148 @@ def hex_to_hsv(text: str) -> tuple[int, int, int]:
     return int(h), int(s), int(v)
 
 
+#: How the match is shaped. One tolerance number, three geometries — see
+#: :func:`colour_mask`. The value is what a settings file stores, so it is
+#: explicit rather than a 0/1/2 index.
+METHOD_WINDOW = "window"        # the HSV box (the original behaviour)
+METHOD_HSV = "hsv_distance"     # its inscribed ball, in HSV
+METHOD_RGB = "rgb_distance"     # a ball in RGB
+METHODS = (METHOD_WINDOW, METHOD_HSV, METHOD_RGB)
+
+#: The three as `(value, label, tooltip)` triples — what the panel's own
+#: segmented row is built from (see ``Stage.CHOICES``). The tooltips carry
+#: the part of "which one?" that a label cannot.
+METHOD_OPTIONS = (
+    (METHOD_WINDOW, "Window",
+     "An HSV box: hue ±0.9·Tolerance, saturation and shade ±2.55·Spread. "
+     "The only method that can separate two THICKNESSES of one material, "
+     "and the one that treats hue and brightness as independent axes."),
+    (METHOD_HSV, "HSV dist.",
+     "One radius in HSV: hue counts as 0.9·Tolerance and "
+     "saturation/brightness as 2.55·Tolerance, but a pixel must be close on "
+     "the whole rather than close on each axis. Cuts the corners an "
+     "illumination gradient lives in.\n\nSpread is superseded: the shade "
+     "slack is 2.55·Tolerance here, so a spread narrowed to separate two "
+     "layers comes back to full width."),
+    (METHOD_RGB, "RGB dist.",
+     "One radius in RGB: |ΔRGB| ≤ 2.55·Tolerance. No hue/brightness "
+     "decomposition, so it is the sharpest for 'this shade, this lamp' and "
+     "the first to fail when the exposure or the colour temperature moves. "
+     "Stricter than the window on a brightness change (three axes at once) "
+     "and looser across hue at low saturation.\n\nSpread is superseded: the "
+     "shade slack is 2.55·Tolerance here."),
+)
+
+
+def _circular_hue(h: np.ndarray, hue: int) -> np.ndarray:
+    """Hue difference in OpenCV units (0-179), wrapped to 0-90.
+
+    H is a circle: 179 and 2 are three apart, not 177. The window method
+    handles the seam by splitting its band in two; a distance needs the
+    wrapped difference itself. int32 on purpose — uint8 subtraction wraps
+    silently, which would turn every red target inside out.
+    """
+    raw = np.abs(h.astype(np.int32) - int(hue))
+    return np.minimum(raw, 180 - raw)
+
+
+def _finish(keep: np.ndarray) -> np.ndarray:
+    """The one return shape every method shares: 0/255 uint8.
+
+    The pipeline ORs this into a uint8 accumulator and hands it to
+    ``cv2.connectedComponents``, so a bool or int64 mask from a new method
+    would fail far away from its cause.
+    """
+    return (keep.astype(np.uint8) * 255)
+
+
 def colour_mask(img: np.ndarray, hex_color: str, tolerance: float,
                 spread: float = 25.0, min_saturation: float = 40.0,
-                min_value: float = 0.0) -> np.ndarray:
+                min_value: float = 0.0,
+                method: str = METHOD_WINDOW) -> np.ndarray:
     """Binary mask of the pixels within ``tolerance`` of the target colour.
 
+    ``tolerance`` (0-100) means the SAME per-axis slack in every method —
+    hue ``× 0.9``, saturation and value ``× 2.55`` — so switching method does
+    not re-scale the number, only the shape of the region it accepts:
+
+    - ``window`` (default): an axis-aligned BOX in HSV. ``tolerance`` is the
+      hue half-width and ``spread`` the saturation/value half-widths, which
+      is why they are two numbers: they answer two questions.
+    - ``hsv_distance``: a BALL —
+      ``sqrt((dH/0.9)² + (dS/2.55)² + (dV/2.55)²) ≤ tolerance``, hue
+      circular. Same weighting as the window, corners rounded off, so a
+      pixel that is at the far edge of hue AND of shade at once no longer
+      passes. That corner is what an illumination gradient looks like.
+    - ``rgb_distance``: a ball in RGB, ``|ΔRGB| ≤ tolerance × 2.55`` — no
+      hue/brightness decomposition at all.
+
+    **The shade slack comes from a different number in each family.** The
+    window's is ``spread × 2.55``; both balls' is ``tolerance × 2.55``. So
+    the HSV ball is the ball inscribed in the *window you would get at
+    ``spread = tolerance``*, and switching to a distance method with a
+    deliberately narrowed spread **re-opens the shade window** (that is the
+    one context switch that changes what the match accepts rather than only
+    its shape — the panel says so when the method changes). The RGB ball is
+    not comparable to the box axis by axis at all: its axes are R, G and B,
+    so it is stricter on a brightness change (which is three axes at once)
+    and looser across hue at low saturation, where hue is noise anyway.
+
+    The hue band WRAPS across the 0/179 seam in every method: a red target
+    (hue ≈ 0 or 179) gets exactly the same treatment as any other. The
+    reference implementation clipped instead, which silently left red
+    one-sided.
+
+    ``spread`` belongs to the window: the two distance methods already carry
+    the shade slack in their radius, and using spread *as well* would make
+    the same number mean two things. ``min_saturation`` and ``min_value``
+    apply in every method — they are a pre-filter on the pixel, not part of
+    the geometry — and both are still clamped to the pick.
+
     Two numbers, because they answer two different questions and the bench
-    proved they must be separable:
+    proved they must be separable: dark blue ``#1c3484`` is H113 S201 V132
+    and the lighter layer ``#aacdf5`` is H106 S78 V245 — 7° of hue apart and
+    about 120 units of S and V. The hue band is irrelevant to that pair;
+    what separates them is the shade window, so widening the tolerance to
+    tolerate illumination also let the other layer in (from ``tolerance ≈
+    49``). With the split, hue can be opened without opening the shade.
 
-    - ``tolerance`` is how far the HUE may drift — "the same material under
-      this illumination". Its half-width is ``tolerance × 0.9`` (so 100 =
-      ±90 = half the wheel), and the band WRAPS across the 0/179 seam: a red
-      target (hue ≈ 0 or 179) gets exactly the same tolerance as any other.
-      The reference implementation clipped instead, which silently left red
-      one-sided.
-    - ``spread`` is how far the SHADE may drift — "the same thickness of
-      it": the saturation and value half-widths, ``spread × 2.55`` each.
-
-    They were one number until 2026-09-23, and for a blue-on-blue sample
-    that was a trap: dark blue ``#1c3484`` is H113 S201 V132 and the lighter
-    layer ``#aacdf5`` is H106 S78 V245 — 7° of hue apart and about 120 units
-    of S and V. The hue band is irrelevant to that pair; what separates them
-    is the shade window, so widening the tolerance to tolerate illumination
-    also let the other layer in (it does so from ``tolerance ≈ 49``). With
-    the split, hue can be opened without opening the shade.
-
-    The window can never exclude the colour that was PICKED: the floors are
-    clamped to the target's own S and V. A mask the pick is outside of reads
-    as a broken detector and is silent — which is what a raised
-    ``min_saturation`` used to do to the very flake it was raised from. The
-    ceilings cannot do it (``sat + ds ≥ sat`` for any ``ds ≥ 0``), so only
-    the floors need this, and the consequence is deliberate: for a pale pick
-    ``min_saturation`` no longer applies to the pick itself.
+    No method can exclude the colour that was PICKED: the floors are clamped
+    to the target's own S and V, and a distance of zero is always inside its
+    own ball. A mask the pick is outside of reads as a broken detector and is
+    silent — which is what a raised ``min_saturation`` used to do to the very
+    flake it was raised from. The ceilings cannot do it (``sat + ds ≥ sat``
+    for any ``ds ≥ 0``), so only the floors need this, and the consequence
+    is deliberate: for a pale pick ``min_saturation`` no longer applies to
+    the pick itself.
     """
     hue, sat, val = hex_to_hsv(hex_color)
     tol = max(0.0, min(100.0, float(tolerance)))
     sp = max(0.0, min(100.0, float(spread)))
-    dh = int(round(tol * 0.9))
-    ds = dv = int(round(sp * 2.55))
     hsv = cv2.cvtColor(img, cv2.COLOR_RGB2HSV)
     h, s, v = hsv[:, :, 0], hsv[:, :, 1], hsv[:, :, 2]
 
+    # The floors are shared by every method, and clamped to the pick so it
+    # is inside its own mask whichever one is in force.
+    sat_floor = min(float(min_saturation), float(sat))
+    val_floor = min(float(min_value), float(val))
+    floors = (s >= sat_floor) & (v >= val_floor)
+    if method == METHOD_HSV:
+        return _finish(floors & _hsv_distance_ball(h, s, v, hue, sat, val, tol))
+    if method == METHOD_RGB:
+        return _finish(floors & _rgb_distance_ball(img, hex_to_rgb(hex_color),
+                                                   tol))
+    return _finish(floors & _hsv_window(h, s, v, hue, sat, val, tol, sp))
+
+
+def _hsv_window(h, s, v, hue: int, sat: int, val: int,
+                tol: float, sp: float) -> np.ndarray:
+    """The original box. One tolerance for hue, one SPREAD for shade."""
+    dh = int(round(tol * 0.9))
+    ds = dv = int(round(sp * 2.55))
+
     if dh >= 90:
-        hue_ok = np.ones(img.shape[:2], bool)     # the whole wheel
+        hue_ok = np.ones(h.shape, bool)           # the whole wheel
     else:
         lo, hi = hue - dh, hue + dh
         if lo < 0:
@@ -215,13 +314,49 @@ def colour_mask(img: np.ndarray, hex_color: str, tolerance: float,
         else:
             hue_ok = (h >= lo) & (h <= hi)
 
-    sat_lo = max(min(float(min_saturation), float(sat)), sat - ds)
+    # The box only — the floors are applied once for every method in
+    # colour_mask, so a change to them cannot reach one method and miss
+    # another.
     sat_hi = min(255.0, sat + ds)
-    val_lo = max(min(float(min_value), float(val)), val - dv)
+    sat_lo = float(sat) - ds
     val_hi = min(255.0, val + dv)
-    keep = (hue_ok & (s >= sat_lo) & (s <= sat_hi)
+    val_lo = float(val) - dv
+    return (hue_ok & (s >= sat_lo) & (s <= sat_hi)
             & (v >= val_lo) & (v <= val_hi))
-    return (keep.astype(np.uint8) * 255)
+
+
+def _hsv_distance_ball(h, s, v, hue: int, sat: int, val: int,
+                       tol: float) -> np.ndarray:
+    """The ball of the same weighting as the window: one radius.
+
+    ``sqrt((dH/0.9)² + (dS/2.55)² + (dV/2.55)²) ≤ tol``, squared and cleared
+    of fractions so it is integer work: ``65025·dH² + 8100·(dS² + dV²) ≤
+    floor(52670.25·tol²)``. The largest possible left side is 1 580 107 500,
+    which fits int32 — and the threshold is a Python int on purpose, so
+    numpy does not promote the whole frame to float64 for the comparison.
+    """
+    dh = _circular_hue(h, hue)
+    ds = np.abs(s.astype(np.int32) - int(sat))
+    dv = np.abs(v.astype(np.int32) - int(val))
+    lhs = 65025 * dh * dh + 8100 * (ds * ds + dv * dv)
+    return lhs <= int(52670.25 * tol * tol)
+
+
+def _rgb_distance_ball(img: np.ndarray, rgb: tuple, tol: float) -> np.ndarray:
+    """A ball in RGB: ``|ΔRGB| ≤ tol × 2.55``, squared to stay integer.
+
+    ``tol × 2.55`` is the same shade slack the window's saturation/value
+    half-widths get, so the number keeps its meaning across methods. Note
+    what this metric does NOT do: it has no hue axis, so two colours that
+    differ only in brightness are as far apart as two that differ only in
+    hue. That is the method's whole character — use it when the lamp is
+    stable and the shade is the question.
+    """
+    r, g, b = (int(c) for c in rgb)
+    dr = img[:, :, 0].astype(np.int32) - r
+    dg = img[:, :, 1].astype(np.int32) - g
+    db = img[:, :, 2].astype(np.int32) - b
+    return (dr * dr + dg * dg + db * db) <= int(6.5025 * tol * tol)
 
 
 # ----------------------------------------------------------------------
@@ -245,6 +380,9 @@ class Stage:
     #: (min, max, step) per parameter — the UI reads these to build its
     #: spin boxes, so a stage describes its own editor.
     RANGES: ClassVar[dict] = {}
+    #: Named choices, per parameter: ``(value, label, tooltip)`` triples the
+    #: UI builds a segmented row from. Same idea as RANGES, one row kind on.
+    CHOICES: ClassVar[dict] = {}
 
     def params(self) -> dict:
         return {f.name: getattr(self, f.name) for f in fields(self)
@@ -268,16 +406,23 @@ class ColourStage(Stage):
     spread: float = 25.0
     min_saturation: float = 40.0
     min_value: float = 0.0
+    #: How the match is shaped — see :func:`colour_mask`. Last, so a
+    #: positional construction written before it still means what it did.
+    method: str = METHOD_WINDOW
 
     NAME = "colour"
     RANGES = {"tolerance": (0.0, 100.0, 5.0), "spread": (0.0, 100.0, 5.0),
               "min_saturation": (0, 255, 5), "min_value": (0, 255, 5)}
+    #: A named choice rather than a number: the panel builds a segmented row
+    #: from this, exactly as it builds spin boxes from ``RANGES``.
+    CHOICES = {"method": METHOD_OPTIONS}
     LABEL = "Colour match"
     KIND = "source"
 
     def source_mask(self, ctx: "_Ctx") -> np.ndarray:
         return colour_mask(ctx.img, self.hex_color, self.tolerance,
-                           self.spread, self.min_saturation, self.min_value)
+                           self.spread, self.min_saturation, self.min_value,
+                           method=self.method)
 
 
 @_register
@@ -478,6 +623,17 @@ class IdentifyConfig:
             if stage_cls is ColourStage:
                 kwargs["hex_color"] = valid_hex(
                     kwargs.get("hex_color", ColourStage.hex_color))
+                stored_method = kwargs.get("method")
+                if stored_method is not None and stored_method not in METHODS:
+                    # A hand-edited (or future) value must not reach the
+                    # pipeline as a silently-unmatched string: every method
+                    # check in colour_mask is an equality, so an unknown one
+                    # would quietly fall through to the window — right
+                    # behaviour, by accident. Say so instead.
+                    logger.info(
+                        "identification: unknown colour method %r — using "
+                        "%r", stored_method, METHOD_WINDOW)
+                    kwargs["method"] = METHOD_WINDOW
                 if "spread" not in kwargs:
                     # A file written before the shade window had a number of
                     # its own carried both meanings in ``tolerance`` (hue

@@ -2317,3 +2317,108 @@ def test_a_typo_in_the_colour_field_does_not_leave_it_disagreeing(window):
     assert valid_hex(edit.text(), None) == edit.text(), "and it is a colour"
     assert editor.hex_color() == edit.text(), \
         "the field and the colour the mask searches disagree"
+
+
+# --- matching method, patch size, and the circle ---------------------------
+
+def _click_segment(toggle, value) -> None:
+    """Press one option's button — what the operator does.
+
+    ``set_value`` alone does not emit: a programmatic load must not re-enter
+    the persist path (the same rule the scan panel's rows follow).
+    """
+    toggle._buttons[value].click()
+
+
+def test_the_colour_card_switches_the_matching_method(window):
+    """Three methods, one selector, like the scan panel's path row — and the
+    choice has to reach the pipeline, not just the settings file."""
+    from talos.cv.identify import METHOD_RGB, METHOD_WINDOW
+
+    finding = window._sample_finding
+    editor = finding.colour_group.editor
+    kind, toggle = editor._editors["method"]
+    assert kind == "choice"
+    assert toggle.value() == METHOD_WINDOW, "the default must not change masks"
+    assert editor.stage().method == METHOD_WINDOW
+
+    _click_segment(toggle, METHOD_RGB)
+    assert editor.stage().method == METHOD_RGB
+    # ...and it reaches the config the jobs are built from
+    stage = next(s for s in finding.identify_config().stages
+                 if s.NAME == "colour")
+    assert stage.method == METHOD_RGB
+
+    # the rows whose meaning depends on it follow
+    spread_label, spread_row = editor._rows["spread"]
+    assert not spread_row.isEnabled()
+    assert not spread_label.isEnabled()
+    assert editor._rows["tolerance"][0].text() == "Tolerance"
+    assert "Window method only" in spread_row.toolTip()
+
+    _click_segment(toggle, METHOD_WINDOW)
+    assert spread_row.isEnabled()
+    assert editor._rows["tolerance"][0].text() == "Hue tolerance"
+
+
+def test_reloading_the_card_restores_the_method_and_its_rows(window):
+    """`reload()` runs on every workspace switch and Preferences apply, and
+    its kind dispatch used to end in `setValue` — which a segmented row does
+    not have. It also has to re-apply the rows that depend on the method, or
+    a reloaded card would show the window's labels over a distance mask."""
+    from talos.cv.identify import METHOD_HSV
+
+    finding = window._sample_finding
+    editor = finding.colour_group.editor
+    settings = window._settings
+    stages = settings.section("identify").setdefault("stages", [])
+    entry = next((s for s in stages if s.get("name") == "colour"), None)
+    if entry is None:
+        entry = {"name": "colour"}
+        stages.append(entry)
+    entry["method"] = METHOD_HSV
+    entry["hex_color"] = "#1c3484"
+
+    finding.colour_group.reload()          # what refresh_settings() calls
+    assert editor._editors["method"][1].value() == METHOD_HSV
+    assert not editor._rows["spread"][1].isEnabled()
+    assert editor._rows["tolerance"][0].text() == "Tolerance"
+
+
+def test_the_patch_slider_is_what_the_dropper_averages(window, monkeypatch):
+    """The radius is a sampling aid, not a mask parameter: it must reach the
+    sampler and must NOT re-run the pipeline when it changes."""
+    from talos.ui.workspaces import sample_finding as sf
+
+    finding = window._sample_finding
+    seen: list = []
+    monkeypatch.setattr(
+        sf, "sample_hex_stats",
+        lambda frame, x, y, radius=4: (seen.append((x, y, radius)),
+                                       ("#1c3484", 3.0))[1])
+    finding.live_view.set_preprocessed_frame(
+        np.full((40, 60, 3), 30, np.uint8))
+
+    finding.colour_group.set_pick_radius(9)
+    assert finding.colour_group.pick_radius() == 9
+    # the row shows the DIAMETER (what the disc spans), and the slider and
+    # the number box agree on it
+    assert finding.colour_group._patch_box.value() == 19
+    assert finding.colour_group._patch_slider.value() == 19
+    finding.on_pick(10, 10)
+    assert seen[-1] == (10, 10, 9)
+
+    # arming the dropper hands the same radius to the circle's drawing
+    finding.arm_colour_pick()
+    assert finding.live_view._pick_radius_px == 9
+    finding.live_view.set_pick_mode(False)
+
+
+def test_the_patch_radius_survives_a_restart(window):
+    """Persisted beside the view mode: an operator who sized the patch for
+    their objective should not have to size it again tomorrow."""
+    finding = window._sample_finding
+    finding.colour_group.set_pick_radius(7)
+    finding.colour_group._on_patch_released()          # the save path
+    assert window._settings.section("ui")["pick_radius_px"] == 7
+    assert finding.colour_group._stored_patch_radius() == 7

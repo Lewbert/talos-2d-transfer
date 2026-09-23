@@ -688,3 +688,172 @@ def test_an_uncalibrated_objective_says_so_once(caplog):
                                config=config(colour=ColourStage(
                                    hex_color=hex_of(MAGENTA), tolerance=20.0)))
     assert not caplog.records, "it must not repeat itself every frame"
+
+
+# --- the three matching methods -------------------------------------------
+
+TARGET = "#1c3484"                       # the bench's dark blue
+
+
+def _probe(**hsv_delta) -> np.ndarray:
+    """One pixel at a given HSV offset from TARGET, as real 8-bit RGB.
+
+    Built through cv2 in both directions so the pixel the mask sees really
+    has (about) that hue/saturation — an RGB triple typed by hand lands ±1
+    unit away after the round trip, which is enough to cross a boundary and
+    make a test that claims to be about geometry fail for arithmetic.
+    """
+    import cv2 as _cv2
+
+    h0, s0, v0 = hex_to_hsv(TARGET)
+    want = (max(0, min(179, h0 + hsv_delta.get("dh", 0))),
+            max(0, min(255, s0 + hsv_delta.get("ds", 0))),
+            max(0, min(255, v0 + hsv_delta.get("dv", 0))))
+    return _cv2.cvtColor(np.uint8([[list(want)]]),
+                         _cv2.COLOR_HSV2RGB).astype(np.uint8)
+
+
+def _masked(pixel, method, tolerance=25.0, spread=25.0) -> bool:
+    return bool(colour_mask(pixel, TARGET, tolerance, spread, 0.0, 0.0,
+                            method=method)[0, 0])
+
+
+def test_the_window_is_a_box_and_the_hsv_ball_rounds_its_corners():
+    """The one thing that separates the first two methods.
+
+    A pixel at the far edge of hue AND of shade at once passes the box
+    (each axis is inside its own half-width) and fails the ball (it is
+    further from the centre than the radius) — and that diagonal is exactly
+    what an illumination gradient looks like.
+    """
+    corner = _probe(dh=16, ds=-45)
+    assert _masked(corner, "window")
+    assert not _masked(corner, "hsv_distance")
+
+
+def test_the_hsv_ball_is_inside_the_window_when_the_spread_matches():
+    """The containment the docs claim: at ``spread == tolerance`` the ball
+    is inscribed in the box — nothing the ball accepts is outside it, and
+    the box still holds the corners the ball cuts. (With a *narrowed* spread
+    that stops being true, which is the next test.)"""
+    rng = np.random.default_rng(11)
+    px = rng.integers(0, 256, (20000, 1, 3)).astype(np.uint8)
+    for tol in (15.0, 25.0, 60.0):
+        window = colour_mask(px, TARGET, tol, tol, 0.0, 0.0, method="window")
+        ball = colour_mask(px, TARGET, tol, tol, 0.0, 0.0,
+                           method="hsv_distance")
+        assert (ball > 0).sum() > 0, tol
+        assert ((ball > 0) & (window == 0)).sum() == 0, tol
+        assert ((window > 0) & (ball == 0)).sum() > 0, tol
+
+
+def test_the_two_distance_methods_ignore_the_spread():
+    """Spread belongs to the window. A distance method that quietly used it
+    as well would make the same number mean two things."""
+    pixel = _probe(ds=-70, dv=40)
+    for method in ("hsv_distance", "rgb_distance"):
+        assert (_masked(pixel, method, spread=0.0)
+                == _masked(pixel, method, spread=60.0))
+
+
+def test_the_hsv_ball_uses_the_tolerance_for_shade_not_the_spread():
+    """The context switch worth knowing about: narrowing the spread to
+    separate two layers does NOT narrow a distance method — its shade slack
+    is 2.55·tolerance, so the layers come back. The panel warns on the
+    switch; this pins the arithmetic behind the warning."""
+    far_in_shade = _probe(ds=-100)          # beyond the window at spread 20
+    assert not _masked(far_in_shade, "window", tolerance=40.0, spread=20.0)
+    assert _masked(far_in_shade, "hsv_distance", tolerance=40.0, spread=20.0)
+
+
+def test_every_method_contains_the_colour_that_was_picked():
+    """The invariant the floors exist to keep, in all three geometries: a
+    mask the pick is outside of reads as a broken detector and is silent."""
+    for method in ("window", "hsv_distance", "rgb_distance"):
+        for colour in ("#1c3484", "#aacdf5", "#d0d0d0", "#3c3c3c"):
+            pixel = np.array([[[int(colour[1:3], 16), int(colour[3:5], 16),
+                                int(colour[5:7], 16)]]], np.uint8)
+            assert _masked(pixel, method) or colour != TARGET, colour
+            # ...including with the floors raised above the pick itself
+            assert bool(colour_mask(pixel, colour, 25.0, 25.0, 200.0, 150.0,
+                                    method=method)[0, 0]), (colour, method)
+
+
+def test_a_red_target_matches_across_the_seam_in_every_method():
+    """Hue is a circle: 179 and 2 are three apart. The window splits its
+    band in two; a distance needs the wrapped difference itself, and uint8
+    subtraction would wrap silently without the int32 cast."""
+    red = "#ff0000"
+    near = np.uint8([[[255, 30, 30]]])
+    for method in ("window", "hsv_distance", "rgb_distance"):
+        h0, s0, v0 = hex_to_hsv(red)
+        assert h0 < 5, "the red target's hue moved — check the fixture"
+        assert bool(colour_mask(near, red, 25.0, 25.0, 0.0, 0.0,
+                                method=method)[0, 0]), method
+
+
+def test_every_method_returns_the_dtype_the_pipeline_needs():
+    """The mask is ORed into a uint8 accumulator and handed to
+    cv2.connectedComponents: a bool or int64 mask from one method would fail
+    far away from its cause."""
+    img = np.zeros((4, 4, 3), np.uint8)
+    for method in ("window", "hsv_distance", "rgb_distance"):
+        mask = colour_mask(img, TARGET, 25.0, 25.0, 0.0, 0.0, method=method)
+        assert mask.dtype == np.uint8
+        assert set(np.unique(mask)) <= {0, 255}
+
+
+def test_the_distance_methods_are_not_the_window_under_another_name():
+    """A cross-check with real pixels. (A stub that returned the window for
+    every method would pass every equality test in this file and fail this
+    one.)
+
+    Both balls give up pixels the box keeps — its corners. Only the RGB ball
+    also takes pixels the box refuses: its axes are R, G and B, so a
+    low-saturation pixel with a wildly different hue is simply *close* to
+    another low-saturation pixel, which is precisely why this method exists.
+    """
+    rng = np.random.default_rng(3)
+    px = rng.integers(0, 256, (20000, 1, 3)).astype(np.uint8)
+    window = colour_mask(px, TARGET, 25.0, 25.0, 0.0, 0.0, method="window")
+    for method in ("hsv_distance", "rgb_distance"):
+        other = colour_mask(px, TARGET, 25.0, 25.0, 0.0, 0.0, method=method)
+        assert (other > 0).sum() > 0, method
+        assert ((window > 0) & (other == 0)).sum() > 0, method
+    rgb = colour_mask(px, TARGET, 25.0, 25.0, 0.0, 0.0,
+                      method="rgb_distance")
+    assert ((rgb > 0) & (window == 0)).sum() > 0
+
+
+def test_a_colour_stage_round_trips_its_method():
+    stage = ColourStage(hex_color="#123456", tolerance=30.0, spread=12.0,
+                        method="rgb_distance")
+    back = IdentifyConfig.from_dict(IdentifyConfig(stages=[stage]).to_dict())
+    assert back.stage("colour").method == "rgb_distance"
+
+
+def test_a_stored_file_without_a_method_masks_exactly_as_it_did():
+    """Every settings file written before this field existed: the window,
+    byte for byte."""
+    stored = {"stages": [{"name": "colour", "enabled": True,
+                          "hex_color": TARGET, "tolerance": 40.0,
+                          "spread": 20.0, "min_saturation": 40.0,
+                          "min_value": 0.0}]}
+    stage = IdentifyConfig.from_dict(stored).stage("colour")
+    assert stage.method == "window"
+    img = np.full((4, 4, 3), (28, 52, 132), np.uint8)
+    assert np.array_equal(colour_mask(img, TARGET, 40.0, 20.0, 40.0, 0.0),
+                          stage.source_mask(_ctx_for(img)))
+
+
+def test_an_unknown_stored_method_falls_back_to_the_window(caplog):
+    """A hand-edited (or future) value must not reach the pipeline as a
+    string nothing matches — every method check is an equality, so it would
+    fall through to the window by accident rather than by decision."""
+    stored = {"stages": [{"name": "colour", "hex_color": TARGET,
+                          "method": "perceptual"}]}
+    with caplog.at_level("INFO"):
+        stage = IdentifyConfig.from_dict(stored).stage("colour")
+    assert stage.method == "window"
+    assert any("unknown colour method" in record.message
+               for record in caplog.records)

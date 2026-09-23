@@ -66,6 +66,24 @@ def letterbox_map(widget_size: tuple[int, int], frame_shape: tuple,
     return (wx - off_x) / scale, (wy - off_y) / scale
 
 
+def letterbox_circle(widget_size: tuple[int, int], frame_shape: tuple,
+                     frame_point: tuple[float, float],
+                     radius_px: float) -> tuple[float, float, float]:
+    """A FRAME-space circle → ``(cx, cy, r)`` in widget coordinates.
+
+    The dropper's patch is a radius in the frame's own pixels (the physical
+    convention: the same patch covers the same part of the sample at any
+    capture resolution), and what the operator has to see is the region on
+    SCREEN that it will average. This is that transform, derived from the
+    same ``fit_transform`` the click mapping uses, so the drawn circle is
+    the patch rather than an approximation of it.
+    """
+    scale, off_x, off_y = _fit(widget_size, frame_shape)
+    fx, fy = frame_point
+    radius = max(0.0, float(radius_px)) * scale
+    return (off_x + fx * scale, off_y + fy * scale, radius)
+
+
 def letterbox_rect(widget_size: tuple[int, int], frame_shape: tuple,
                    widget_rect: tuple[float, float, float, float]) \
         -> tuple[float, float, float, float] | None:

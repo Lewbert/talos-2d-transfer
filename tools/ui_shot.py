@@ -279,6 +279,34 @@ def main() -> int:
         path = args.out / f"scan_{mode}{tag}.png"
         window.grab().save(str(path))
         print(f"saved {path}")
+    # --- the dropper: the patch slider and the circle cursor ------------
+    #
+    # Posed on the live view at a patch size wide enough to read in an
+    # image: the circle IS the pointer, so a screenshot with the pointer in
+    # it needs the position set directly (a real mouse move would do it, but
+    # the rig has no mouse).
+    finding.colour_group.set_pick_radius(9)
+    path = args.out / f"colour_card{tag}.png"
+    finding.colour_group.repaint()
+    finding.colour_group.grab().save(str(path))
+    print(f"saved {path}")
+
+    finding.set_view_mode("samples")
+    for _ in range(3):
+        synthetic_frame(app, flecks=True)
+        flush(260)
+    view = finding.live_view
+    view.set_pick_radius(9)
+    view.set_pick_mode(True)
+    view._pick_pos = (view.width() * 0.42, view.height() * 0.45)
+    view._overlay.update()
+    view.repaint()
+    flush(200)
+    path = args.out / f"dropper_circle{tag}.png"
+    view.grab().save(str(path))
+    print(f"saved {path}")
+    view.set_pick_mode(False)
+
     finding.set_view_mode("original")
 
     # --- the sample-review window (the View column) ---------------------

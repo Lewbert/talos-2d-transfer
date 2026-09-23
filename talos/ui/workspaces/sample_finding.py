@@ -146,6 +146,10 @@ class SampleFindingWorkspace(QWidget):
         self.colour_group = ColourGroup(settings)
         self.colour_group.sig_changed.connect(self._on_colour_changed)
         self.colour_group.sig_dropper.connect(self.arm_colour_pick)
+        # The patch size is a display property of the dropper, so it goes to
+        # the view (which draws it) and nowhere near the pipeline.
+        self.colour_group.sig_patch_changed.connect(
+            self._on_patch_size_changed)
         column.addWidget(self.colour_group)
 
         scroll = QScrollArea()
@@ -308,6 +312,9 @@ class SampleFindingWorkspace(QWidget):
 
     def arm_colour_pick(self) -> None:
         """The next click on the live view samples a colour."""
+        # The view draws the patch, the view is told how big it is: one
+        # source for it (the card) and one for the drawing.
+        self.live_view.set_pick_radius(self.colour_group.pick_radius())
         self.live_view.set_pick_mode(True)
 
     def on_pick(self, x_px: int, y_px: int) -> None:
@@ -339,7 +346,8 @@ class SampleFindingWorkspace(QWidget):
         frame = self.live_view.pick_frame()
         if frame is None:
             return
-        stats = sample_hex_stats(frame, int(x_px), int(y_px))
+        stats = sample_hex_stats(frame, int(x_px), int(y_px),
+                                 radius=self.colour_group.pick_radius())
         if stats is None:
             return
         colour, spread = stats
@@ -382,6 +390,9 @@ class SampleFindingWorkspace(QWidget):
             # run's stragglers cannot be filed as this run's samples (see
             # DetectionEngine.begin_run).
             self._engine.begin_run()
+
+    def _on_patch_size_changed(self, radius: int) -> None:
+        self.live_view.set_pick_radius(int(radius))
 
     def _note_pick(self, colour: str, spread: float) -> None:
         """Say what the dropper sampled, and whether it trusted itself.

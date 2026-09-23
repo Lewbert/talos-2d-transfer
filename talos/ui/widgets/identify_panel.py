@@ -45,11 +45,13 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from talos.cv.identify import IdentifyConfig, Stage, valid_hex
+from talos.cv.identify import (METHOD_WINDOW, IdentifyConfig, Stage,
+                               valid_hex)
 from talos.cv.preprocess import (DN_MAX, LocalContrast, PreprocessConfig,
                                  channel_curve, effective_gain,
                                  effective_width)
 from talos.ui import theme
+from talos.ui.widgets.segmented import SegmentedToggle
 
 #: Parameter names as the operator reads them. Anything not listed falls
 #: back to the field name with underscores turned into spaces.
@@ -67,6 +69,19 @@ PARAM_LABELS = {
     "spread": "Shade spread",
     "kernel": "Kernel",
 }
+
+#: The dropper's patch: a radius in FRAME pixels. 4 is the 9-px disc the
+#: sampler has always used; 16 is a 33-px patch, past which "which flake did
+#: I click" stops being a question the operator can answer on screen.
+_PATCH_DEFAULT_PX = 4
+_PATCH_MIN_PX = 1
+_PATCH_MAX_PX = 16
+_PATCH_READOUT_W = 72
+
+
+def _patch_diameter_bounds() -> tuple[int, int]:
+    """The row works in diameters (2r + 1), the setting in radii."""
+    return (2 * _PATCH_MIN_PX + 1, 2 * _PATCH_MAX_PX + 1)
 
 #: What a parameter does, for the row's tooltip. Only where the name cannot
 #: carry it — the colour's shade window is the one an operator is most
@@ -245,13 +260,61 @@ class StageEditor(QFrame):
         outer.addLayout(form)
 
         self._editors: dict[str, tuple] = {}
-        for field_info in fields(stage):
-            name = field_info.name
-            if name == "enabled":
-                continue
+        #: The row's label and its container, beside ``_editors`` rather than
+        #: inside it: two tests pin the shape of those tuples (a 2- or
+        #: 3-tuple whose [1] is the value widget), and a label is not a value.
+        self._rows: dict[str, tuple[QLabel, QWidget]] = {}
+        self._form = form
+        declared = [f.name for f in fields(stage) if f.name != "enabled"]
+        choices = getattr(stage, "CHOICES", None) or {}
+        # A named choice LEADS the form: it decides what the numbers under it
+        # mean. (Built in that order rather than moved afterwards — Qt's
+        # QFormLayout.removeRow deletes the widgets it removes.)
+        ordered = ([n for n in declared if n in choices]
+                   + [n for n in declared if n not in choices])
+        for name in ordered:
             self._add_field(form, stage, name, getattr(stage, name))
 
         self.enable.toggled.connect(self._on_changed)
+        self._sync_dependent_rows()
+
+    # ------------------------------------------------------------------
+
+    def _sync_dependent_rows(self) -> None:
+        """Rows whose meaning depends on a CHOICE field's value.
+
+        One rule, for the colour stage's method: ``spread`` belongs to the
+        window, and the tolerance is a hue half-width only there. A row left
+        enabled — or labelled "Hue tolerance" while the number is an RGB
+        radius — is the same class of lie as a button that refuses a click.
+        """
+        entry = self._editors.get("method")
+        if entry is None:
+            return
+        window = entry[1].value() == METHOD_WINDOW
+
+        if "tolerance" in self._rows:
+            label, container = self._rows["tolerance"]
+            label.setText("Hue tolerance" if window else "Tolerance")
+            tip = (PARAM_TIPS.get("tolerance", "") if window else
+                   "How far a pixel may be from the picked colour, as one "
+                   "radius: hue counts as 0.9× and saturation/brightness as "
+                   "2.55×, but a pixel must be close on the whole rather "
+                   "than close on each axis.")
+            for widget in (container, *self._editors["tolerance"][1:]):
+                widget.setToolTip(tip)
+
+        if "spread" in self._rows:
+            label, container = self._rows["spread"]
+            label.setEnabled(window)
+            # The container holds the number AND its slider — one control
+            # split in two, so disabling it reaches both.
+            container.setEnabled(window)
+            container.setToolTip(
+                PARAM_TIPS.get("spread", "") if window else
+                "Used by the Window method only: a distance method carries "
+                "its shade slack in Tolerance, so a spread narrowed to "
+                "separate two layers comes back to full width.")
 
     # ------------------------------------------------------------------
 
@@ -279,16 +342,35 @@ class StageEditor(QFrame):
             layout.addWidget(dropper)
             layout.addWidget(dialog)
             self._editors[name] = ("hex", edit, swatch, dropper, dialog)
-            form.addRow("Colour", row)
+            label = QLabel("Colour")
+            form.addRow(label, row)
+            self._rows[name] = (label, row)
             edit.editingFinished.connect(self._normalise_hex)
             dropper.clicked.connect(self.sig_dropper)
             dialog.clicked.connect(self._pick_from_dialog)
             self._refresh_swatch()
+        elif isinstance(value, str):
+            # A named choice, declared by the stage itself (CHOICES, the
+            # sibling of RANGES) — a plain string with no declaration is a
+            # programming error, and guessing would give it a spin box.
+            options = getattr(stage, "CHOICES", {}).get(name)
+            if not options:
+                raise ValueError(
+                    f"{type(stage).__name__}.{name} is a string field with no "
+                    f"CHOICES entry — the editor cannot build a row for it")
+            toggle = SegmentedToggle(list(options), value)
+            toggle.sig_changed.connect(self._on_changed)
+            self._editors[name] = ("choice", toggle)
+            label = QLabel(param_label(name))
+            form.addRow(label, toggle)
+            self._rows[name] = (label, toggle)
         elif isinstance(value, bool):
             check = QCheckBox()
             check.setChecked(bool(value))
             self._editors[name] = ("bool", check)
-            form.addRow(param_label(name), check)
+            label = QLabel(param_label(name))
+            form.addRow(label, check)
+            self._rows[name] = (label, check)
             check.toggled.connect(self._on_changed)
         else:
             limits = getattr(stage, "RANGES", {}).get(name, (0, 255, 1))
@@ -303,11 +385,15 @@ class StageEditor(QFrame):
                 # it is a parameter the operator sets and the pipeline
                 # never sees.
                 self._editors[name] = ("num", box, slider)
-                form.addRow(param_label(name), container)
+                label = QLabel(param_label(name))
+                form.addRow(label, container)
+                self._rows[name] = (label, container)
                 box.valueChanged.connect(self._on_changed)
                 return
             self._editors[name] = ("num", box)
-            form.addRow(param_label(name), box)
+            label = QLabel(param_label(name))
+            form.addRow(label, box)
+            self._rows[name] = (label, box)
             box.valueChanged.connect(self._on_changed)
 
     def _number_and_slider(self, box, limits) -> tuple[QWidget, QSlider]:
@@ -342,6 +428,42 @@ class StageEditor(QFrame):
             slider.setToolTip(box.toolTip())
         return container, slider
 
+    def add_row(self, label: str, widget: QWidget) -> QLabel:
+        """One more row in the form, for a control the stage does not own.
+
+        It goes through the same QFormLayout as the parameters, so it lines
+        up with them: a control beside the stage's own values that starts at
+        a different x reads as belonging to something else.
+        """
+        text = QLabel(label)
+        self._form.addRow(text, widget)
+        return text
+
+    def load(self, stage: Stage) -> None:
+        """Point the editor at ``stage`` and show it — the one path every
+        reload takes.
+
+        The kinds are dispatched here ONCE. A widget kind added to
+        ``_add_field`` and missed here would work until the first workspace
+        switch and then raise — or, worse, show a stale value next to a
+        pipeline that is using the new one.
+        """
+        self._stage = stage
+        self.enable.setChecked(bool(stage.enabled))
+        for name, spec in self._editors.items():
+            value = getattr(stage, name, None)
+            if spec[0] == "hex":
+                if value is not None:
+                    spec[1].setText(str(value))
+            elif spec[0] == "bool":
+                spec[1].setChecked(bool(value))
+            elif spec[0] == "choice":
+                spec[1].set_value(value)
+            elif value is not None:
+                spec[1].setValue(value)
+        self._refresh_swatch()
+        self._sync_dependent_rows()
+
     def _normalise_hex(self) -> None:
         """Put the CLAMPED colour back in the field, then apply.
 
@@ -369,6 +491,7 @@ class StageEditor(QFrame):
 
     def _on_changed(self, *_args) -> None:
         self._refresh_swatch()
+        self._sync_dependent_rows()
         self.sig_changed.emit()
 
     def _pick_from_dialog(self) -> None:
@@ -426,6 +549,10 @@ class ColourGroup(QGroupBox):
 
     sig_changed = Signal()
     sig_dropper = Signal()
+    #: The dropper's patch size changed (radius, in frame pixels). Its own
+    #: signal, not ``sig_changed``: the mask does not read it, so re-running
+    #: the pipeline for it would be work for nobody.
+    sig_patch_changed = Signal(int)
 
     def __init__(self, settings, parent: QWidget | None = None):
         super().__init__("Sample colour", parent)
@@ -440,11 +567,94 @@ class ColourGroup(QGroupBox):
         self.editor.sig_changed.connect(self._on_changed)
         self.editor.sig_dropper.connect(self.sig_dropper)
         layout.addWidget(self.editor)
+        # After the editor exists: the row is added to ITS form, so it lines
+        # up with the stage's own rows.
+        self._build_patch_row()
 
         self._hint = QLabel(self.DEFAULT_HINT)
         self._hint.setObjectName("dim")
         self._hint.setWordWrap(True)
         layout.addWidget(self._hint)
+
+    def _build_patch_row(self) -> None:
+        """How big a disc the dropper averages.
+
+        A sampling aid, NOT a ``ColourStage`` field: the mask never reads it,
+        and a parameter in the stage is a parameter the pipeline is expected
+        to use. It lives in ``ui`` beside the view mode, and the circle the
+        cursor draws is this number — which is the point of having it, since
+        at fit-to-window scale a 9-px patch is about two screen pixels.
+        """
+        # The row is in DIAMETERS, because that is what the disc spans and
+        # what the operator judges on screen; the stored value is the radius
+        # the sampler takes. Odd numbers only (2r + 1), like the camera's
+        # exposure row: number and slider, the slider applying on release.
+        self._patch_slider = QSlider(Qt.Orientation.Horizontal)
+        self._patch_slider.setRange(*_patch_diameter_bounds())
+        self._patch_slider.setSingleStep(2)
+        self._patch_slider.setPageStep(4)
+        self._patch_slider.setValue(2 * self._stored_patch_radius() + 1)
+        self._patch_box = QSpinBox()
+        self._patch_box.setRange(*_patch_diameter_bounds())
+        self._patch_box.setSingleStep(2)
+        self._patch_box.setSuffix(" px")
+        self._patch_box.setMaximumWidth(_PATCH_READOUT_W)
+        self._patch_box.setAlignment(Qt.AlignmentFlag.AlignRight)
+        _set_quietly(self._patch_box, self._patch_slider.value())
+        self._patch_slider.valueChanged.connect(
+            lambda value: _set_quietly(self._patch_box, value))
+        self._patch_slider.sliderReleased.connect(self._on_patch_released)
+        self._patch_box.valueChanged.connect(self._on_patch_moved)
+        self._patch_box.editingFinished.connect(self._on_patch_released)
+
+        tip = ("How large a disc the dropper averages, in FRAME pixels — the "
+               "circle follows the cursor so you can see it. Bigger averages "
+               "away sensor noise and makes it easier to stay inside one "
+               "material; smaller is more precise on a small flake.")
+        holder = QWidget()
+        row = QHBoxLayout(holder)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(6)
+        row.addWidget(self._patch_slider, 1)
+        row.addWidget(self._patch_box)
+        for widget in (self._patch_slider, self._patch_box, holder):
+            widget.setToolTip(tip)
+        self.editor.add_row("Patch", holder)
+        self._sync_patch_pair()
+
+    def _stored_patch_radius(self) -> int:
+        try:
+            value = int(self._settings.section("ui").get("pick_radius_px",
+                                                         _PATCH_DEFAULT_PX))
+        except (TypeError, ValueError):
+            return _PATCH_DEFAULT_PX
+        return max(_PATCH_MIN_PX, min(_PATCH_MAX_PX, value))
+
+    def _sync_patch_pair(self) -> None:
+        """The slider and the number box show the same diameter, and a box
+        typed out of step snaps to an odd one (the disc spans 2r + 1)."""
+        value = self._patch_slider.value()
+        if value % 2 == 0:
+            value += 1
+            self._patch_slider.setValue(value)
+        _set_quietly(self._patch_box, value)
+
+    def _on_patch_moved(self, _value: int) -> None:
+        self._sync_patch_pair()
+        self.sig_patch_changed.emit(self.pick_radius())
+
+    def _on_patch_released(self) -> None:
+        self._settings.section("ui")["pick_radius_px"] = self.pick_radius()
+        self._settings.save()
+
+    def pick_radius(self) -> int:
+        return max(_PATCH_MIN_PX, (int(self._patch_slider.value()) - 1) // 2)
+
+    def set_pick_radius(self, radius: int) -> None:
+        """Set the patch size (a stored value being applied)."""
+        radius = max(_PATCH_MIN_PX, min(_PATCH_MAX_PX, int(radius)))
+        self._patch_slider.setValue(2 * radius + 1)
+        self._sync_patch_pair()
 
     #: What the card's own line says when it has nothing else to report.
     DEFAULT_HINT = "Also centres the local-contrast curve."
@@ -488,16 +698,7 @@ class ColourGroup(QGroupBox):
 
     def reload(self) -> None:
         """Re-read the stored colour (a settings change made elsewhere)."""
-        self.editor._stage = self._colour_stage()
-        self.editor.enable.setChecked(bool(self.editor._stage.enabled))
-        for name, spec in self.editor._editors.items():
-            value = getattr(self.editor._stage, name, None)
-            if spec[0] == "hex":
-                spec[1].setText(str(value))
-            elif spec[0] == "bool":
-                spec[1].setChecked(bool(value))
-            elif value is not None:
-                spec[1].setValue(value)
+        self.editor.load(self._colour_stage())
 
     def _on_changed(self) -> None:
         self.sig_changed.emit()
@@ -773,16 +974,9 @@ class IdentifyGroup(QGroupBox):
     def reset(self) -> None:
         fresh = IdentifyConfig()
         for editor, stage in zip(self._editors, fresh.stages[1:]):
-            editor._stage = stage
-            editor.enable.setChecked(stage.enabled)
-            for name, spec in editor._editors.items():
-                value = getattr(stage, name, None)
-                if spec[0] == "hex":
-                    continue
-                if spec[0] == "bool":
-                    spec[1].setChecked(bool(value))
-                elif value is not None:
-                    spec[1].setValue(value)
+            # load() applies the values AND the rows that depend on a named
+            # choice, so a reset cannot leave a label describing the old one.
+            editor.load(stage)
         self.sig_changed.emit()
 
 

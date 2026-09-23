@@ -301,7 +301,9 @@ merge stage joins fragments. Each stage carries its own parameters, switches
 off independently, and reports how many candidates it let through. The engine
 is order-respecting and kind-dispatched (`source` / `mask` / `gate` /
 `merge`), so a new stage is a dataclass and a `RANGES` entry — no UI code and
-no pipeline change.
+no pipeline change. A *named* parameter (the colour match's method) is
+declared the same way, with a `CHOICES` entry, and the editor builds a
+segmented row from it.
 
 **In front of the chain is pre-processing** (`cv/preprocess.py`): an
 edge-preserving denoise and the local-contrast curve, in that order, off until
