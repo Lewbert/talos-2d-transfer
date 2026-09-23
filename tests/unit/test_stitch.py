@@ -66,6 +66,20 @@ def test_nothing_to_draw_is_not_an_error():
     assert build_mosaic([(0.0, 0.0, tile(1))], (0.0, 0.0)) is None
 
 
+def test_the_geometry_refuses_what_the_builder_refuses():
+    """``mosaic_geometry`` is documented as the thing to call instead of
+    re-deriving the layout, so it answers the same degenerate inputs the
+    builder does — with None, not with a ValueError from min() over an empty
+    sequence or a division by a field of view of zero."""
+    assert mosaic_geometry([], FOV) is None
+    assert mosaic_geometry([(0.0, 0.0, None)], FOV) is None
+    assert mosaic_geometry([(0.0, 0.0, tile(1))], (0.0, 0.0)) is None
+    # and a ring call on the same inputs is a no-op rather than a crash
+    mosaic = tile(40)
+    assert draw_sample_rings(mosaic, [_sample(0.0, 0.0, 400.0)],
+                            [(0.0, 0.0, tile(40))], (0.0, 0.0)) is mosaic
+
+
 def test_the_long_edge_is_capped():
     """A wide scan is summarised, not stored: the frames on disk are the
     data, and the mosaic has to stay openable."""

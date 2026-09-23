@@ -100,8 +100,17 @@ def merge_fragments(candidates: list[FlakeCandidate], gap_px: float,
             merged.append(base)
         else:
             total_area = sum(c.area_px2 for c in absorbed)
+            # The AREA-WEIGHTED centroid of the fragments, not the union
+            # box's centre: two fragments on a diagonal have a box centre
+            # that sits between them, on bare substrate — and that value is
+            # what the table, the map marker, "go to sample" and the
+            # review's ring all point at. Each fragment's own centre is a
+            # moment centroid already, so their weighted mean is one too.
+            weight = total_area or 1.0
+            cx = sum(c.x_px * c.area_px2 for c in absorbed) / weight
+            cy = sum(c.y_px * c.area_px2 for c in absorbed) / weight
             merged.append(FlakeCandidate(
-                x_px=bx + bw / 2.0, y_px=by + bh / 2.0,
+                x_px=cx, y_px=cy,
                 area_px2=total_area,
                 area_um2=total_area * um2_per_px2,
                 score=max(c.score for c in absorbed),

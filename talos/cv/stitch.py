@@ -35,12 +35,15 @@ DEFAULT_MAX_PX = 2048
 
 def mosaic_geometry(tiles, fov_um: tuple[float, float],
                     max_px: int = DEFAULT_MAX_PX,
-                    flip: bool = False) -> tuple[float, float, float]:
+                    flip: bool = False) -> tuple[float, float, float, float]:
     """``(px_per_um, x0_um, y0_um, shrink)`` — where a sample point lands.
 
     The single source of the mosaic's layout: ``build_mosaic`` places tiles
     with it, and a caller that wants to draw on top of a mosaic (or check
     where a feature ended up) uses it instead of re-deriving the arithmetic.
+    It returns None for the same inputs ``build_mosaic`` does (nothing to
+    place, or a field of view with no size), because a caller that draws on
+    a mosaic has to check anyway.
 
     Tiles are laid out in the coordinates of the SAMPLE as the frames show
     it, so with the camera flip on the layout is mirrored (see
@@ -48,6 +51,8 @@ def mosaic_geometry(tiles, fov_um: tuple[float, float],
     """
     items = [(float(x), float(y), np.asarray(img))
              for x, y, img in tiles if img is not None and img.size]
+    if not items or float(fov_um[0]) <= 0 or float(fov_um[1]) <= 0:
+        return None
     items = [(mosaic_offset(x, y, flip)[0], mosaic_offset(x, y, flip)[1], img)
              for x, y, img in items]
     fov_x, fov_y = float(fov_um[0]), float(fov_um[1])
@@ -154,7 +159,10 @@ def draw_sample_rings(mosaic: np.ndarray, samples, tiles,
     """
     if mosaic is None or mosaic.size == 0 or not samples:
         return mosaic
-    px_per_um, x0, y0, shrink = mosaic_geometry(tiles, fov_um, max_px, flip)
+    geometry = mosaic_geometry(tiles, fov_um, max_px, flip)
+    if geometry is None:
+        return mosaic                  # nothing to place: no rings to draw
+    px_per_um, x0, y0, shrink = geometry
     scale = float(px_per_um) * float(shrink)
     if scale <= 0:
         return mosaic

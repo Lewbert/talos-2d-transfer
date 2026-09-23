@@ -149,6 +149,10 @@ class _FormPage(QWidget):
         self._settings = settings
         self._cfg = cfg
         self._fields: list[_Field] = []
+        #: Fields whose value something else can MEASURE while the dialog is
+        #: open (autofocus measures the focus backlash): they are re-read
+        #: when that happens, so _apply cannot write a stale number back.
+        self._measured_fields: set[str] = set()
         self._layout = QVBoxLayout(self)
         self._layout.setContentsMargins(9, 9, 9, 9)
         self._layout.setSpacing(10)
@@ -376,6 +380,23 @@ class _FormPage(QWidget):
         for field in self._fields:
             self._cfg[field.path] = field.value()
         self._settings.save()
+
+    def refresh_measured(self) -> None:
+        """Re-read the values something else MEASURED into their widgets.
+
+        ``_apply`` writes EVERY field back, so a value that a measurement
+        stored while this dialog was open is reverted to whatever the widget
+        was built with — by pressing OK for any reason, including one that
+        has nothing to do with that page. Only the declared fields are
+        touched, so an unrelated edit in progress is left alone.
+        """
+        for field in self._fields:
+            if field.path not in self._measured_fields:
+                continue
+            current = self._cfg.get(field.path)
+            if current is None:
+                continue
+            field.set_value(current * field._scale)     # set_value = display
 
 
 class GeneralPage(_FormPage):
@@ -799,7 +820,9 @@ def _build_pages(settings, qapp, manager, autofocus_service, parent):
         ("port", "port", "Port", _RECONNECT),
         ("group", "Scale — µm per step"),
         ("float", "um_per_step", "µm per step", 0.01, 10, 0.01),
-        ("float", "backlash_um", "Backlash (µm, mechanism)", 0.0, 50, 0.1),
+        # 0.01 µm steps: the calibration measures to two decimals, and a
+        # coarser field would round the measurement on the way back in.
+        ("float", "backlash_um", "Backlash (µm, mechanism)", 0.0, 50, 0.01),
         ("hint", _SCALE_HINT),
         ("group", "Manual control — jog speeds"),
         ("int", "min_speed", "Min speed (steps/s)", 10, 1000),
@@ -815,8 +838,13 @@ def _build_pages(settings, qapp, manager, autofocus_service, parent):
                  "software against the bounds it reads back, and warns when "
                  "the firmware is not enforcing SLIM itself."),
     ]
-    pages.append(("Hardware", "Focus",
-                  _device_page(settings, "focus", focus_fields, "")))
+    focus_page = _device_page(settings, "focus", focus_fields, "")
+    # Autofocus MEASURES this one (AutoFocus → Calibrate backlash), in this
+    # very dialog: without this the field kept the value the page was built
+    # with, and _apply wrote it back over the measurement — pressing OK for
+    # any reason silently reverted a calibration just made.
+    focus_page._measured_fields.add("backlash_um")
+    pages.append(("Hardware", "Focus", focus_page))
     zolix_fields = [
         ("group", "Connection"),
         ("port", "port", "Port", _RECONNECT),
@@ -1047,6 +1075,19 @@ class PreferencesDialog(QDialog):
         self._nav.currentItemChanged.connect(self._on_nav_changed)
         self._nav.setCurrentItem(self._page_items[0])
         self._nav.expandAll()
+        if autofocus_service is not None:
+            # A measurement taken from this dialog (AutoFocus → Calibrate
+            # backlash) lands in the settings while the page that EDITS the
+            # same value is open, still holding the old number.
+            autofocus_service.sig_cal_finished.connect(
+                lambda _result: self.refresh_measured())
+
+    def refresh_measured(self) -> None:
+        """Re-read anything that was measured while this dialog was open."""
+        for page in self._pages:
+            refresh = getattr(page, "refresh_measured", None)
+            if refresh is not None:
+                refresh()
         body.addWidget(self._nav)
         body.addWidget(self._stack, stretch=1)
         root.addLayout(body, stretch=1)

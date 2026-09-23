@@ -179,11 +179,20 @@ class TALOSApplication:
         # its console window lingers after the app quits.
         from talos import debug_console
         debug_console.disable()
-        if getattr(self.manager, "shutdown_ragged", False):
-            # A device worker is still inside a blocking call; walking
-            # through normal interpreter teardown would destroy a live
-            # QThread, which aborts Qt (CRITICAL + exit code 1). Exit
-            # at the OS level instead — the file log is already flushed.
+        # The ragged-exit hatch covers the window's threads too, not just the
+        # device workers: detection outlives the capture by design, so a scan
+        # that just finished can still be draining tiles (or writing a mosaic)
+        # when the operator closes the window. Those waits expire, the
+        # process reports "exited cleanly", and interpreter teardown then
+        # destroys a RUNNING QThread — which aborts Qt with a nonzero exit
+        # code and a half-written export.
+        ragged = (getattr(self.manager, "shutdown_ragged", False)
+                  or bool(getattr(self.window, "threads_still_running", False)))
+        if ragged:
+            # A worker is still inside a blocking call; walking through
+            # normal interpreter teardown would destroy a live QThread,
+            # which aborts Qt (CRITICAL + exit code 1). Exit at the OS level
+            # instead — the file log is already flushed.
             logger.warning("Ragged shutdown: exiting past Qt teardown "
-                           "(a device thread is still inside a call)")
+                           "(a worker thread is still inside a call)")
             os._exit(0)

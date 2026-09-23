@@ -390,6 +390,30 @@ class MergeStage(Stage):
 CANONICAL_STAGES = (ColourStage, MorphologyStage, SizeStage, BorderStage,
                     SharpnessStage, MergeStage)
 
+
+_warned_uncalibrated = False
+
+
+def _warn_uncalibrated() -> None:
+    """Say ONCE that sizes are pixels wearing a µm label.
+
+    Every other consumer of the calibration treats a missing value as "no
+    calibration": the scale bar simply does not draw, the field of view falls
+    back to the pixel pitch. The pipeline has to pick a number, and picks
+    1.0 µm/px — so ``area_um2 == area_px2`` and the 30 µm² size floor becomes
+    a 30-PIXEL floor (four times too permissive at 0.5 µm/px), while the
+    table reports the result as µm². Saying so once is the difference
+    between a wrong number and a known one.
+    """
+    global _warned_uncalibrated
+    if _warned_uncalibrated:
+        return
+    _warned_uncalibrated = True
+    logger.warning(
+        "identification: this objective has no µm/px calibration — areas and "
+        "sizes are measured in PIXELS and labelled µm. Calibrate the "
+        "objective (Preferences → Objectives) before trusting a size.")
+
 #: Stage names that used to ship and no longer do. ``from_dict`` already
 #: drops an unknown name, so these need no migration — they are listed so
 #: the drop is a decision with a record rather than a silent absence:
@@ -676,6 +700,9 @@ class IdentifyPipeline:
 
         um_x = float(getattr(calib, "um_per_px_x", None) or 1.0) / scale
         um_y = float(getattr(calib, "um_per_px_y", None) or 1.0) / scale
+        if calib is not None and not (getattr(calib, "um_per_px_x", None)
+                                      and getattr(calib, "um_per_px_y", None)):
+            _warn_uncalibrated()
         ctx = _Ctx(work, (um_x, um_y), scale, frame_scale)
 
         counts: list = []
@@ -711,6 +738,26 @@ class IdentifyPipeline:
 
         if candidates is None:              # no source enabled at all
             candidates = []
+
+        # A merge runs AFTER the gates (the canonical order), and merging
+        # SUMS areas: two fragments that each pass the size floor and cap can
+        # produce one candidate OVER the cap, silently — the readout still
+        # says "Size 2 → Merge 1". So the area gate is re-applied to the
+        # merged set, and only that one:
+        #
+        # - the sharpness gate cannot be re-run, because the merge consumed
+        #   the contour it measures (a merged candidate has none), and its
+        #   merged score is the best of its fragments by construction;
+        # - the frame-edge gate cannot be violated by a union: boxes that each
+        #   satisfy `margin < x` and `x + w < width - margin` satisfy the
+        #   union's bounds too.
+        if any(s.KIND == "merge" for s in config.stages if s.enabled):
+            for stage in config.stages:
+                if not stage.enabled or stage.NAME != "size":
+                    continue
+                kept = [c for c in candidates if stage.keep(c, ctx)]
+                if len(kept) != len(candidates):
+                    candidates = kept
 
         regions = ctx.regions()
         _to_full_frame(candidates, 1.0 / scale)

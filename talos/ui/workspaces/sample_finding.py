@@ -649,7 +649,13 @@ class SampleFindingWorkspace(QWidget):
         if key == "zolix":
             moving = bool(parse_zolix(payload).get("moving"))
         elif key == "focus":
-            moving = str(parse_focus(payload).get("mode", "IDLE")) != "IDLE"
+            # ``parse_focus`` always supplies a mode, and supplies "—" when
+            # the status read failed — and "—" is not "IDLE", so a single
+            # dropped byte on the focus line used to read as "the stage is
+            # moving": both processed views dropped to the raw stream with a
+            # caption that was not true, and the hold re-armed on every poll.
+            mode = str(parse_focus(payload).get("mode", "")).strip().upper()
+            moving = mode not in ("", "—", "-", "IDLE")
         else:
             return
         if moving:

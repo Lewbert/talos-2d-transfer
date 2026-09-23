@@ -77,6 +77,17 @@ def scan_directory(settings) -> Path:
     return Path(configured) if configured else default_scan_dir()
 
 
+#: What counts as "off" in a stored boolean. The JSON and the Preferences
+#: dialogs write real booleans; these are for a hand-edited file.
+_FALSE_WORDS = {"false", "no", "off", "0", "none", ""}
+
+
+def _as_bool(value) -> bool:
+    if isinstance(value, str):
+        return value.strip().lower() not in _FALSE_WORDS
+    return bool(value)
+
+
 def load_scan_settings(settings) -> dict:
     """The scan section with the defaults filled in for anything missing.
 
@@ -93,7 +104,12 @@ def load_scan_settings(settings) -> dict:
         default = DEFAULTS[key]
         try:
             if isinstance(default, bool):
-                out[key] = bool(stored)
+                # NOT bool(stored): a hand-edited "false" is a non-empty
+                # string, and bool() would read it as True — the one value
+                # the operator could type meaning the opposite of what they
+                # got. Anything unrecognised falls back to True below, which
+                # is what a settings file that says nothing means.
+                out[key] = _as_bool(stored)
             elif isinstance(default, int):
                 out[key] = int(stored)
             elif isinstance(default, float):

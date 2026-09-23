@@ -28,7 +28,11 @@ class StubManager(QObject):
     def __init__(self):
         super().__init__()
         self.camera = StubCamera()
-        self.camera_props = {}
+        #: The camera's current canonical properties — the real manager keeps
+        #: this live (get_properties, then every set_property: see
+        #: CameraProxy._note_property), and the per-workspace profiles diff
+        #: against it.
+        self.camera_props: dict = {}
         self.focus_position = 0
         # The real manager publishes the last telemetry per device; the
         # scan window reads the zolix position to place the map footprint.
@@ -53,6 +57,9 @@ class StubManager(QObject):
 
     def submit_camera(self, *args):
         self.camera_submits.append(args)
+        if len(args) >= 3 and args[0] == "set_property":
+            # mirrors the proxy: a write is a change to what the camera has
+            self.camera_props[str(args[1])] = args[2]
         self._job += 1
         return self._job
 
@@ -1708,6 +1715,35 @@ def test_the_strip_and_the_snapshot_are_locked_by_a_run(window):
     window._sample_finding.scan_panel._set_job(None)
 
 
+def test_a_live_edit_does_not_stop_the_profile_being_applied(window):
+    """The per-workspace profiles diff against what the camera HAS.
+
+    Diffing against the last profile WE applied came out empty after any
+    live edit — an exposure slider, the auto-gain loop, "Balance once" — so
+    the profile was silently not applied: the operator switches to Sample
+    Finding to scan and the run captures at the Navigation tab's exposure.
+    """
+    from talos.ui.camera_profiles import scan_profile
+
+    from talos.ui.camera_profiles import nav_profile
+
+    # the camera reports its properties (a connect, or a get_properties)
+    window._manager.camera_props = dict(
+        (key, getattr(nav_profile(window._settings), key))
+        for key in ("exposure_us", "gain", "white_balance"))
+    window._on_workspace_changed(0)            # the Navigation tab is applied
+    # the operator drags exposure there — a write outside the profile path
+    window._manager.submit_camera("set_property", "exposure_us", 5000.0)
+    window._manager.camera_submits.clear()
+
+    window._on_workspace_changed(1)            # ...to the Sample Finding tab
+    written = [call for call in window._manager.camera_submits
+               if call[0] == "set_property" and call[1] == "exposure_us"]
+    assert written, "the profile was not applied after a live edit"
+    assert written[-1][2] == pytest.approx(
+        scan_profile(window._settings).exposure_us)
+
+
 def test_a_camera_profile_is_held_for_the_run_not_dropped(window, monkeypatch):
     """A tab click mid-run must not change the camera's exposure — but the
     operator's setting must not be lost either."""
@@ -2250,3 +2286,17 @@ def test_scan_from_origin_says_so_when_nothing_is_marked(window):
     scan.scan_from_origin()
     assert started == []
     assert "No stage origin" in scan.status.text()
+
+
+def test_a_worker_that_outlives_its_wait_is_reported(window):
+    """The app's shutdown takes the ragged exit when a thread is still
+    running: detection outlives a scan by design, so a run that just
+    finished can still be draining tiles (or writing a mosaic) when the
+    operator closes the window — and Qt destroys a RUNNING QThread on the
+    way out, which aborts the process after a clean exit line."""
+    assert window._threads_alive() is True, \
+        "the detection worker runs for the session"
+    window.stop_workers()
+    window.threads_still_running = window._threads_alive()
+    # after a real stop the worker is gone, so a clean exit is safe
+    assert window.threads_still_running is False

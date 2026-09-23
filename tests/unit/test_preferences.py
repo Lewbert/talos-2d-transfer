@@ -387,3 +387,40 @@ def test_escape_here_is_the_global_stop_too(dialog, qapp):
     dialog.keyPressEvent(event)
     assert stub.escapes == 1
     assert event.isAccepted()
+
+
+def test_a_measurement_taken_here_is_not_written_back_over(dialog):
+    """Calibrate backlash lives in this dialog, and it writes
+    ``devices.focus.backlash_um`` — which the Focus page's field also edits.
+
+    ``_apply`` writes every field back, so the field's value won at the page
+    build time silently reverted the measurement: pressing OK for any reason
+    (even changing the font size) threw away a calibration just made, and
+    the next autofocus used the wrong mechanism compensation.
+    """
+    focus_page = _page(dialog, "Focus")
+    settings = focus_page._settings
+    field = next(f for f in focus_page._fields if f.path == "backlash_um")
+    assert field.value() == pytest.approx(0.0)
+
+    # the calibration lands while the dialog is open
+    settings.device("focus")["backlash_um"] = 0.52
+    focus_page.refresh_measured()
+    assert field.value() == pytest.approx(0.52)
+
+    dialog._on_apply()
+    assert settings.device("focus")["backlash_um"] == pytest.approx(0.52), \
+        "Apply reverted the measurement"
+
+
+def test_the_measured_refresh_leaves_other_fields_alone(dialog):
+    """Only the fields declared as measured are re-read: an edit in progress
+    on another page must not be thrown away by a calibration."""
+    focus_page = _page(dialog, "Focus")
+    settings = focus_page._settings
+    step = next(f for f in focus_page._fields if f.path == "um_per_step")
+    step.widget.setValue(0.33)
+    settings.device("focus")["um_per_step"] = 0.99
+
+    focus_page.refresh_measured()
+    assert step.value() == pytest.approx(0.33), "an unrelated edit was lost"

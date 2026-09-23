@@ -59,6 +59,9 @@ class CameraProxy(QObject):
         self._tick_timer: QTimer | None = None
         self._fps_times: deque[float] = deque(maxlen=60)
         self._last_fps_emit = 0.0
+        #: The canonical properties we believe the camera has: the last
+        #: get_properties, plus every set_property since (see _note_property).
+        self._props: dict = {}
         self._frame_slot = None          # LatestFrameSlot | None
         self._frame_seq = 0              # written with every published frame
 
@@ -220,6 +223,19 @@ class CameraProxy(QObject):
                 self._last_fps_emit = now
                 self.sig_fps.emit(round((len(self._fps_times) - 1) / span, 1))
 
+    def _note_property(self, key: str, value) -> None:
+        """Record a write we have just made, and announce it.
+
+        ``get_properties`` was the only thing that ever updated the manager's
+        view of the camera, so that view went stale the moment anything wrote
+        a value (a slider, the auto-gain loop, "Balance once", a scan's
+        resolution switch). Everything that diffs against it — the
+        per-workspace camera profiles — then computed an empty difference and
+        did not write what it meant to.
+        """
+        self._props[key] = value
+        self.sig_properties.emit(dict(self._props))
+
     @Slot()
     def _tick(self) -> None:
         cam = self._camera
@@ -234,11 +250,21 @@ class CameraProxy(QObject):
                     native_name, native_value = map_property(
                         self._backend_name, args[0], args[1])
                     cam.set_property(native_name, native_value)
+                    # Announce the change so the manager's view of the
+                    # camera's properties stays live. It was a connect-time
+                    # snapshot before, and anything that diffs against it
+                    # (the per-workspace profiles) then compared a stale
+                    # value with the one it wanted to write: a needed write
+                    # came out empty and the profile was silently not
+                    # applied — after ANY live edit, including the next
+                    # workspace switch following one.
+                    self._note_property(str(args[0]), args[1])
                 elif method_name == "get_properties":
                     result = cam.get_properties()
+                    self._props = normalize_props(self._backend_name,
+                                                  result or {})
                     if job_id >= 0:
-                        self.sig_properties.emit(
-                            normalize_props(self._backend_name, result or {}))
+                        self.sig_properties.emit(dict(self._props))
                 else:
                     result = getattr(cam, method_name)(*args)
                 self.sig_command_done.emit(job_id, result)

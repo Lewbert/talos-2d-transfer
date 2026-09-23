@@ -13,7 +13,8 @@ from talos.cv.identify import (FAIL_COLOUR, PASS_COLOUR, BorderStage, ColourStag
                                MergeStage, MorphologyStage, SharpnessStage,
                                SizeStage, colour_mask, hex_to_hsv,
                                render_overlay, sample_hex, valid_hex)
-from talos.models import ObjectiveCalibration, StagePosition
+from talos.models import (FlakeCandidate, ObjectiveCalibration,
+                          StagePosition)
 
 CALIB = ObjectiveCalibration(objective_id=0, um_per_px_x=0.2, um_per_px_y=0.2)
 #: purple-grey substrate — deliberately far from every target used here
@@ -375,6 +376,75 @@ def test_merge_joins_two_fragments_of_one_sample():
     assert merged.candidates[0].area_um2 > split.candidates[0].area_um2
 
 
+def test_a_merged_sample_cannot_slip_past_the_size_cap():
+    """The gates run before the merge (the canonical order), and merging
+    SUMS areas: two fragments that each pass can produce one candidate over
+    the operator's cap — with the readout still saying "Size 2 → Merge 1".
+
+    The two fragments here are 40 x 40 px at 0.2 µm/px = 64 µm² each; merged
+    they are 128 µm², so a cap of 100 is the case: the fragments fit, the
+    merged sample does not.
+    """
+    img = scene([(60, 60, 40, 40, MAGENTA), (110, 60, 40, 40, MAGENTA)])
+    stage = ColourStage(hex_color=hex_of(MAGENTA), tolerance=20.0)
+    capped = SizeStage(min_area_um2=1.0, max_area_um2=100.0)
+
+    # the control: without a merge the two fragments each pass the cap
+    split = IdentifyPipeline().run(
+        img, CALIB, config=config(colour=stage, size=capped,
+                                  merge=MergeStage(enabled=False)))
+    assert len(split.candidates) == 2
+
+    # merged, the single candidate is over the cap and must not be reported
+    merged = IdentifyPipeline().run(img, CALIB,
+                                    config=config(colour=stage, size=capped))
+    assert merged.candidates == [], \
+        "a 128 µm² sample reported under a 100 µm² cap"
+    # and the readout still says the merge happened (the counts are per stage)
+    assert any(label == "Merge fragments" and out == 1
+               for label, _in, out in merged.counts)
+
+
+def test_a_merged_sample_sits_between_its_fragments_not_beside_them():
+    """The merged position is the fragments' area-weighted centroid, not the
+    union box's centre: two fragments on a diagonal have a box centre that
+    lands between them, on bare substrate — and that value is what the
+    table, the map marker and 'go to sample' all point at."""
+    from talos.cv.flakes import merge_fragments
+
+    a = FlakeCandidate(x_px=80.0, y_px=80.0, area_px2=1600.0,
+                       bbox=(60, 60, 40, 40))
+    b = FlakeCandidate(x_px=125.0, y_px=125.0, area_px2=1600.0,
+                       bbox=(105, 105, 40, 40))
+    merged = merge_fragments([a, b], gap_px=25.0, um2_per_px2=0.04)
+
+    assert len(merged) == 1
+    cand = merged[0]
+    assert cand.area_px2 == pytest.approx(3200.0)
+    # the centroid of two equal fragments is the midpoint of the two CENTRES
+    assert cand.x_px == pytest.approx(102.5)
+    assert cand.y_px == pytest.approx(102.5)
+    # the union box runs 60..145 in both axes, so its centre is (102.5,
+    # 102.5) too — the diagonal is the case where they differ, and equal
+    # areas are the case where the centroid is the midpoint
+    assert cand.bbox == (60, 60, 85, 85)
+
+
+def test_a_lighter_fragment_does_not_drag_the_merged_position():
+    """The centre is weighted by area, so a big fragment outweighs a small
+    one — which is the difference between "where the sample is" and "where
+    its bounding box happens to be"."""
+    from talos.cv.flakes import merge_fragments
+
+    big = FlakeCandidate(x_px=100.0, y_px=100.0, area_px2=4000.0,
+                         bbox=(80, 80, 40, 40))
+    small = FlakeCandidate(x_px=140.0, y_px=100.0, area_px2=400.0,
+                           bbox=(130, 90, 20, 20))
+    cand = merge_fragments([big, small], gap_px=25.0, um2_per_px2=0.04)[0]
+    assert cand.x_px == pytest.approx((100.0 * 4000 + 140.0 * 400) / 4400.0)
+    assert cand.x_px == pytest.approx(103.6, abs=0.1)
+
+
 def test_no_source_enabled_finds_nothing():
     img = scene([(60, 60, 60, 40, MAGENTA)])
     stages = IdentifyConfig().stages
@@ -588,3 +658,33 @@ def test_regions_survive_a_preview_downscale():
     assert xs.max() == pytest.approx(bx + bw, abs=3)
     out = render_overlay(img, result)
     assert out.shape == img.shape
+
+
+def test_an_uncalibrated_objective_says_so_once(caplog):
+    """The pipeline has to pick a number when there is no calibration, and
+    picks 1.0 µm/px — so a "30 µm²" size floor becomes a 30-pixel one. Every
+    other consumer of the calibration treats a missing value as "no
+    calibration" (the scale bar does not draw); this one cannot, so it is
+    logged rather than silently reported as µm²."""
+    from talos.cv import identify as ident
+
+    ident._warned_uncalibrated = False          # fresh for the test
+    uncalibrated = ObjectiveCalibration(objective_id=0, um_per_px_x=None,
+                                        um_per_px_y=None)
+    with caplog.at_level("WARNING"):
+        result = IdentifyPipeline().run(scene([(60, 60, 40, 40, MAGENTA)]),
+                                        uncalibrated,
+                                        config=config(colour=ColourStage(
+                                            hex_color=hex_of(MAGENTA),
+                                            tolerance=20.0)))
+    assert result.candidates, "the pipeline still runs"
+    assert any("no µm/px calibration" in record.message
+               for record in caplog.records)
+    caplog.clear()
+    ident._warned_uncalibrated = True
+    with caplog.at_level("WARNING"):
+        IdentifyPipeline().run(scene([(60, 60, 40, 40, MAGENTA)]),
+                               uncalibrated,
+                               config=config(colour=ColourStage(
+                                   hex_color=hex_of(MAGENTA), tolerance=20.0)))
+    assert not caplog.records, "it must not repeat itself every frame"

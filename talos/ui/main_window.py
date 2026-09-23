@@ -33,12 +33,7 @@ from talos.objective_offsets import compute_offset_move
 from talos.ui.auto_gain import AutoGainController
 from talos.ui.af_region import AfRegionController, mirror_roi_norm
 from talos.ui.calibration_context import CalibrationContext
-from talos.ui.camera_profiles import (
-    nav_profile,
-    profile_as_props,
-    profile_diff,
-    scan_profile,
-)
+from talos.ui.camera_profiles import nav_profile, profile_diff, scan_profile
 from talos.ui.theme import DANGER, WARN
 from talos.ui.widgets.overlay import PHASE_NAMES
 from talos.ui.widgets.focus_window import FocusWindow
@@ -85,7 +80,6 @@ class MainWindow(QMainWindow):
 
         # --- auto-gain (software loop; the camera profile drives it) -----
         self._autogain = AutoGainController(manager, settings, state)
-        self._applied_profile = None
         self._calibration = CalibrationContext(state)
         # ONE shared AF measurement region: the right-panel AF settings,
         # the AF detail window and the live-view overlay all reflect it,
@@ -98,6 +92,9 @@ class MainWindow(QMainWindow):
         #: _flush_deferred): a camera profile switch and a flip reaction.
         self._profile_pending = False
         self._flip_pending = False
+        #: Set by stop_workers: a worker thread outlived its bounded wait,
+        #: so the process must not walk through Qt's teardown (see app.py).
+        self.threads_still_running = False
 
         # --- workspaces -------------------------------------------------
         self._tabs = QTabWidget()
@@ -691,13 +688,10 @@ class MainWindow(QMainWindow):
         if not ok:
             return
         self._manager.camera.set_streaming(True)
-        # Re-apply the active workspace's profile after a (re)connect.
-        # The baseline MUST be dropped first: _apply_camera_profile diffs
-        # against the last profile WE applied, which after a reconnect is
-        # still the current profile — the diff came out empty, nothing was
-        # written, and the backend's connect-time _apply_defaults values
-        # silently won (exposure/gain/WB drifting on every camera replug).
-        self._applied_profile = None
+        # Re-apply the active workspace's profile after a (re)connect: the
+        # camera's own connect-time defaults are not the operator's, and the
+        # proxy's property view has just been refreshed by connect, so the
+        # diff sees exactly what the backend set.
         profile = (nav_profile(self._settings)
                    if self._tabs.currentIndex() == 0
                    else scan_profile(self._settings))
@@ -718,22 +712,23 @@ class MainWindow(QMainWindow):
         if self._scan_running():
             # A run captures every tile with the profile it started on. A
             # tab click is not a reason to change the camera's exposure or
-            # gain half way through — and _applied_profile is deliberately
-            # NOT updated, so the switch still writes what the operator
-            # asked for once the run is over.
+            # gain half way through — and nothing is marked as applied, so
+            # the switch still writes what the operator asked for once the
+            # run is over.
             self._profile_pending = True
             self._on_log_message(
                 "info", "Camera profile change held — a scan is running")
             return
-        # Diff against the last profile WE applied — manager.camera_props
-        # is a connect-time snapshot (get_properties runs once) and would
-        # re-write every key on every switch after any live edit.
-        baseline = (profile_as_props(self._applied_profile)
-                    if self._applied_profile is not None
-                    else (self._manager.camera_props or {}))
+        # Diff against what the camera HAS, which the camera proxy keeps
+        # live (including every write made outside this method: a slider,
+        # the auto-gain loop, "Balance once"). Diffing against the last
+        # profile WE applied computed an empty difference after any of those
+        # — so the profile was silently not applied, and a scan ran at the
+        # other workspace's exposure. Writing a key that already matches is
+        # a serial write nobody notices; missing one changes the data.
+        baseline = self._manager.camera_props or {}
         for name, value in profile_diff(baseline, profile):
             self._manager.submit_camera("set_property", name, value)
-        self._applied_profile = profile
         self._autogain.set_enabled(profile.auto_gain)
         self._autogain.set_target(profile.auto_gain_target)
         self._autogain.note_manual_gain(profile.gain)
@@ -895,8 +890,35 @@ class MainWindow(QMainWindow):
         (the headless screenshot rig, the autoquit smoke hook), and there
         Qt destroys a *running* QThread on the way out — which aborts the
         process after a clean exit line. Idempotent.
+
+        ``threads_still_running`` reports the ones that did not stop in time
+        (detection outlives a scan by design, and an export reads every tile
+        back from disk): the app's shutdown reads it and takes the ragged
+        exit rather than letting Qt abort the process mid-teardown.
         """
         self._sample_finding.shutdown()
+        self.threads_still_running = self._threads_alive()
+
+    def _threads_alive(self) -> bool:
+        """Any worker the tab owns still running after a bounded wait?"""
+        engine = getattr(getattr(self, "_sample_finding", None), "_engine",
+                         None)
+        worker = getattr(engine, "_worker", None)
+        try:
+            if worker is not None and worker.isRunning():
+                return True
+        except RuntimeError:               # already deleted by deleteLater
+            pass
+        panel = getattr(getattr(self, "_sample_finding", None), "scan_panel",
+                        None)
+        for name in ("_scan_worker", "_export_worker"):
+            worker = getattr(panel, name, None)
+            try:
+                if worker is not None and worker.isRunning():
+                    return True
+            except RuntimeError:
+                pass
+        return False
 
     def closeEvent(self, event) -> None:  # noqa: N802
         if self._scan_running():
