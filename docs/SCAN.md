@@ -181,8 +181,10 @@ Three details of that loop that are the whole point:
   "stopped". Reading an answer that cannot answer the question as a yes is
   the bug the old telemetry key was written about (`stage_adapter.py`).
 - Three consecutive failures raise: a blip is retried by the driver's own
-  read retries, a dead link must fail the waypoint rather than spin to the
-  timeout.
+  read retries, a link that stays dead must fail the waypoint rather than spin
+  to the timeout. The WAIT is not retried at the scan level either — a stage
+  that reports "moving" for 120 s is jammed or travelling, and the retry in
+  (2) is about the move, not about the wait.
 - An abort returns **quietly**, so the scan reports "aborted" — a different
   thing from "stopped early", and it keeps the abort out of the status line
   as an error.
@@ -427,6 +429,19 @@ Two properties the unwinding has, both of which were missing:
   Event, so the run was already refusing to move — but it used to *end* as
   "stopped early", i.e. the operator's own abort reported as a fault).
 
+Two known gaps here, both older than the retry and neither fixed by it:
+
+- **A queued move survives a stop.** `device_proxy._MOTION` does not list
+  `move_abs_um`, so `enqueue_stop` purges *continuous* motion and not a queued
+  absolute move — a move submitted just before the stop still executes. It is
+  harmless for the dataset (the run ends as an abort, no tile is filed) but it
+  means "the stage stops instantly" is not literally true. Fixing it needs
+  `_purge_continuous`'s "completed with None" signal to be told apart from a
+  landed move, which is why it is a known gap rather than a patch.
+- **The abort flag is checked between waypoints and between attempts**, so it
+  cannot interrupt a job already on the wire; the adapter's own check covers
+  the wait for that job.
+
 ## Three ways a run can end, and why they must not be confused
 
 A scan ends because the operator aborted it, because it finished, or because
@@ -437,26 +452,47 @@ one `get_position()` readback — stopped a run at tile 3 of 9 and the panel sai
 **"Scan done"**. A third of a dataset looked complete, and the reason was
 carried in a field nothing displayed.
 
-Three fixes, at three layers:
+Four fixes, at four layers:
 
-1. **The exchange is retried — three times, at the read level.** Two ways a
-   frame goes bad are only visible at different depths: a *truncated* reply
-   never reaches the length its function code promises (visible in
-   `_transact`), while a *CRC mismatch* arrives at the right length with
-   corrupted bytes (visible only once the parser validates it). Both mean one
-   thing to the caller — the answer did not arrive — so both are retried in
-   the same place, `_read_registers`, which is the layer that knows the
-   request and the answer together. Writes do **not** retry: a truncated write
-   response means we cannot know whether the write landed, and re-sending a
-   motion command on a guess is how the controller gets the same move twice.
-   A device's *answer* is not retried either — `LimitHitError`,
-   `DeviceBusyError` and `EStopError` are the controller replying, and asking
-   again does not change a limit switch.
-2. **A malformed frame leaves the driver as a `ProtocolError`.** `FrameError`
-   is not a `DeviceError`, so it used to break the HAL's contract at every
-   caller that catches one (`check_estop` would have let it through instead of
-   reporting "unknown").
-3. **The result knows whether it finished.** `ScanResult` carries `planned` and
+1. **A garbled frame is retried — three times, at the read level.** A
+   *truncated* reply never reaches the length its function code promises
+   (visible in `_transact`), while a *CRC mismatch* arrives at the right
+   length with corrupted bytes (visible only once the parser validates it).
+   Both are retried in `_read_registers`, the layer that knows the request and
+   the answer together. Note the asymmetry: a **silent** line is not retried
+   there — `_transact` raises `DeviceTimeoutError` before the retry loop is
+   entered, so a line that says nothing at all fails on the first attempt.
+   That is the fault the approach retry (below) exists for. Writes do **not**
+   retry: a truncated write response means we cannot know whether the write
+   landed, and re-sending a motion command on a guess is how the controller
+   gets the same move twice. A device's *answer* is not retried either —
+   `LimitHitError`, `DeviceBusyError` and `EStopError` are the controller
+   replying, and asking again does not change a limit switch.
+2. **The approach is retried, when the fault is one a re-issue can clear.**
+   The scan re-issues the take-up and the target move (up to
+   `_MAX_APPROACH_ATTEMPTS = 3`) on a `DeviceTimeoutError`, a
+   `DeviceBusyError` or a `ProtocolError` — the link and the timing — because
+   an ABSOLUTE move recomposed from a fresh readback is safe to repeat. It
+   never retries a limit switch, an e-stop, a dead port or a refused command,
+   and it does not retry a stage that will not settle: that one would be
+   re-issued *onto a moving axis*, which the driver composes as
+   `target + (target − where it was)` — the manifest stays honest (it records
+   the readback) but the tile grid gains a gap and a doubled tile and nothing
+   on screen says so. Between attempts the scan waits for the previous motion
+   to end (`_RETRY_SETTLE_S`) and **abandons the retry if it cannot**.
+   `ScanTiming.retries` counts them, `meta.json` records the count, and the
+   summary line gains "N retried approach(es)" so a run that fought the link
+   is not read as a slow one. Nothing else — the readback, the capture, the
+   tile bookkeeping — is retried: those have their own tolerance (one lost
+   tile) and re-entering them would spend the settle window twice.
+3. **A malformed frame leaves the driver as a `ProtocolError`, and a failed
+   job arrives at the scan as the class the driver raised.**
+   `ManagerStageAdapter` rebuilds the exception from the `(job_id, name,
+   message)` triple the proxy reports, because that is the only thing the
+   retry decision in (2) can be made on. A name it does not know — a driver
+   bug, an AttributeError — falls back to `DeviceError`, which is never
+   retried.
+4. **The result knows whether it finished.** `ScanResult` carries `planned` and
    `visited`; `aborted` means the operator asked for it, `stopped_early` means
    something else did, and the panel reports each in its own words, in its own
    colour, with the reason. The export summary *appends* its file list to that

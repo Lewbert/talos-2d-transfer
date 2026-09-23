@@ -189,7 +189,12 @@ def test_a_device_fault_stops_the_run_and_says_so(qapp, rig, tmp_path):
     stayed False (the operator asked for nothing), so the UI reported
     **"Scan done"** over a third of a dataset. A fault has to be
     distinguishable from a finish, and from an abort.
+
+    The fault here is PERSISTENT (it arrives on every attempt): the
+    resumable one-shot flavour is retried now, and has its own test next
+    to this one. What this pins is the outcome when the retries are spent.
     """
+    from talos.cv import scan as scan_mod
     from talos.hal.base import ProtocolError
 
     stage, _camera, slot, _worker = rig
@@ -199,13 +204,13 @@ def test_a_device_fault_stops_the_run_and_says_so(qapp, rig, tmp_path):
     real_move = stage.move_abs_um
     calls = {"n": 0}
 
-    def flaky_move(x_um, y_um, r_deg=None, speed=None, speed_pps=None):
+    def failing_move(x_um, y_um, r_deg=None, speed=None, speed_pps=None):
         calls["n"] += 1
-        if calls["n"] == 5:                 # partway through, like the bench
+        if calls["n"] >= 5:                 # partway through, like the bench
             raise ProtocolError("Read input reg 30016: Frame too short")
         return real_move(x_um, y_um, r_deg, speed, speed_pps)
 
-    stage.move_abs_um = flaky_move
+    stage.move_abs_um = failing_move
     result = scanner.run(params, tmp_path, meta={"fov_um": (100.0, 100.0)})
 
     assert not result.aborted, "the operator did not abort this"
@@ -213,11 +218,55 @@ def test_a_device_fault_stops_the_run_and_says_so(qapp, rig, tmp_path):
     assert not result.complete
     assert result.planned == 12 and 0 < result.visited < result.planned
     assert "Frame too short" in result.message, "the reason must survive"
+    # four waypoints landed, then the approach was tried the full number of
+    # times — and no more: the retry is bounded.
+    assert calls["n"] == 4 + scan_mod._MAX_APPROACH_ATTEMPTS
+    assert result.timing.retries == scan_mod._MAX_APPROACH_ATTEMPTS - 1
     # and the frames captured before the fault are still there
     assert len(result.frames) == result.visited
     with open(result.manifest_path, encoding="utf-8") as fh:
         rows = list(csv.DictReader(fh))
     assert len(rows) == result.visited
+
+
+def test_one_resumable_timeout_is_retried_not_aborted(qapp, rig, tmp_path):
+    """The bench report: a zolix timeout aborted a whole scan.
+
+    A timeout is the link, not the stage — the controller lost a reply —
+    and the move is absolute, so re-issuing it costs one move and saves the
+    run. This is the same one-shot fault shape that used to end a scan.
+    """
+    from talos.hal.base import DeviceTimeoutError
+
+    stage, _camera, slot, _worker = rig
+    scanner = GridScanner(stage, LatestFrameSource(slot))
+    params = _params(width_um=300.0, height_um=200.0, settle_ms=60)
+    expected = len(scanner.plan(params, (100.0, 100.0)))
+
+    real_move = stage.move_abs_um
+    calls = {"n": 0}
+
+    def flaky_move(x_um, y_um, r_deg=None, speed=None, speed_pps=None):
+        calls["n"] += 1
+        if calls["n"] == 5:
+            raise DeviceTimeoutError("No Modbus reply on COM3")
+        return real_move(x_um, y_um, r_deg, speed, speed_pps)
+
+    stage.move_abs_um = flaky_move
+    result = scanner.run(params, tmp_path, meta={"fov_um": (100.0, 100.0)})
+
+    assert result.complete, result.message
+    assert not result.stopped_early
+    assert result.timing.retries == 1
+    assert result.visited == result.planned == expected
+    assert result.missing == 0
+    assert len(result.frames) == expected
+    assert all(path.exists() for path in result.frames)
+    with open(result.manifest_path, encoding="utf-8") as fh:
+        rows = list(csv.DictReader(fh))
+    assert all(row["frame"] for row in rows), "no tile was left empty"
+    meta = json.loads((tmp_path / "meta.json").read_text(encoding="utf-8"))
+    assert meta["timing_s"]["retries"] == 1
 
 
 def test_a_completed_run_is_complete_and_not_stopped_early(qapp, rig, tmp_path):

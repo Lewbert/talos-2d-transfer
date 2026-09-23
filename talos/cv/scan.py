@@ -29,7 +29,8 @@ from PySide6.QtCore import QObject, Signal
 
 from talos.cv.frame_source import DEFAULT_TIMEOUT_S
 from talos.cv.frame_writer import FrameWriter
-from talos.hal.base import DeviceError
+from talos.hal.base import (DeviceBusyError, DeviceError, DeviceTimeoutError,
+                            ProtocolError)
 from talos.hal.base import StageSpeed
 from talos.models import ScanParams
 
@@ -41,6 +42,28 @@ from talos.models import ScanParams
 MAX_PENDING_TILES = 8
 _PENDING_POLL_S = 0.05
 _PENDING_TIMEOUT_S = 120.0
+
+#: Faults a RE-ISSUED approach can clear: the previous motion was still
+#: running, a reply never came, a frame was lost. All three are the link or
+#: the timing, not the hardware's answer.
+#:
+#: Deliberately not here: a limit switch, an e-stop, a dead port, a refused
+#: command. Those are the controller saying no — the same rule the driver
+#: already applies when it declines to retry a Modbus exception.
+_RETRYABLE_FAULTS = (DeviceTimeoutError, DeviceBusyError, ProtocolError)
+#: Attempts at ONE waypoint's approach, the first included.
+_MAX_APPROACH_ATTEMPTS = 3
+#: Pause before a re-issue, so a controller state that clears on its own
+#: (a reply still in the buffer) has the chance to.
+_RETRY_BACKOFF_S = 0.4
+#: How long a re-issue waits for the PREVIOUS attempt's motion to end. A
+#: safety limit, not politeness: the driver composes an absolute move from a
+#: fresh position readback, so commanding one onto an axis that is still
+#: travelling lands at ``target + (target − mid-flight position)`` — up to a
+#: whole extra step. The frame is filed at the true readback, so the
+#: manifest stays honest, but the tile grid gains a gap and a doubled tile
+#: and nothing on screen says so. If this wait fails, the retry is ABANDONED.
+_RETRY_SETTLE_S = 20.0
 
 #: Path orders. ``serpentine`` is the only one with a bench history.
 #: ``one_way`` is the same serpentine cells walked with every row in the
@@ -382,6 +405,11 @@ class ScanTiming:
     travel_s: float = 0.0
     stopped_s: float = 0.0
     tiles: int = 0
+    #: Approaches that had to be re-issued after a resumable fault. Its own
+    #: field because it is what tells a run that fought the link apart from
+    #: a run that was simply slow — the failed attempt's wall-clock is
+    #: inside ``command_s``, where nothing else would distinguish it.
+    retries: int = 0
 
     @property
     def total_s(self) -> float:
@@ -393,9 +421,12 @@ class ScanTiming:
         if self.tiles <= 0:
             return ""
         n = float(self.tiles)
-        return (f"{self.stopped_s / n:.2f} s/tile stopped · "
+        text = (f"{self.stopped_s / n:.2f} s/tile stopped · "
                 f"{self.travel_s / n:.2f} s/tile travel · "
                 f"{self.command_s / n:.2f} s/tile to command")
+        if self.retries:
+            text += f" · {self.retries} retried approach(es)"
+        return text
 
 
 @dataclass
@@ -519,6 +550,79 @@ class GridScanner(QObject):
                 return
             time.sleep(_PENDING_POLL_S)
 
+    def _approach(self, waypoint, prev, target, backlash_um, approach,
+                  speed, timing) -> float:
+        """Move through the take-up steps to ``target``, retrying an
+        approach a RESUMABLE fault interrupted. Returns the idle timestamp.
+
+        The take-up is re-derived from ``prev`` on every attempt, which is
+        idempotent exactly BECAUSE the caller commits ``prev``: a failed
+        attempt must not advance it, or the next attempt's take-up would be
+        computed from a position the stage never reached.
+
+        Only the move/wait pair is retried — never the readback or the
+        capture below it. Those have their own, different tolerance (one
+        lost tile), and re-running them would spend the settle window twice.
+        """
+        steps = backlash_fix(prev, target, backlash_um, approach)
+        for attempt in range(1, _MAX_APPROACH_ATTEMPTS + 1):
+            t_attempt = time.monotonic()
+            settling = False
+            try:
+                for step in steps:
+                    if self.abort_requested:
+                        raise DeviceError("scan aborted")
+                    self._stage.move_abs_um(step[0], step[1], speed=speed)
+                    # The take-up is a move like any other: the driver
+                    # refuses to command one onto a moving axis, so the
+                    # next one waits for it to land.
+                    self._stage.wait_idle(timeout_s=120.0)
+                if self.abort_requested:
+                    raise DeviceError("scan aborted")
+                self._stage.move_abs_um(target[0], target[1], speed=speed)
+                t_commanded = time.monotonic()
+                settling = True        # a fault from here is not a move fault
+                self._stage.wait_idle(timeout_s=120.0)
+                t_idle = time.monotonic()
+            except DeviceError as exc:
+                # A failed attempt's wall-clock is real time the stage was
+                # neither commanded nor travelling, so it goes in the
+                # command phase; ``timing.retries`` is what tells that apart
+                # from a genuinely slow run.
+                timing.command_s += time.monotonic() - t_attempt
+                if (self.abort_requested
+                        or (settling and isinstance(exc, DeviceTimeoutError))
+                        or not isinstance(exc, _RETRYABLE_FAULTS)
+                        or attempt >= _MAX_APPROACH_ATTEMPTS):
+                    # A stage that never reported idle is either jammed or
+                    # genuinely still travelling: re-issuing is the one
+                    # action guaranteed to be wrong, so that timeout is not
+                    # retried (see _RETRY_SETTLE_S's note).
+                    raise
+                self.sig_log.emit(
+                    f"waypoint {waypoint.index}: {exc} — retrying the "
+                    f"approach ({attempt + 1}/{_MAX_APPROACH_ATTEMPTS})")
+                time.sleep(_RETRY_BACKOFF_S)
+                if self.abort_requested:
+                    raise DeviceError("scan aborted")
+                self._settle_before_retry(waypoint)
+                timing.retries += 1
+                continue
+            timing.command_s += t_commanded - t_attempt
+            timing.travel_s += t_idle - t_commanded
+            return t_idle
+        raise DeviceError("scan aborted")        # unreachable; the loop raises
+
+    def _settle_before_retry(self, waypoint) -> None:
+        """Wait out a still-running previous attempt, or give up the retry."""
+        try:
+            self._stage.wait_idle(timeout_s=_RETRY_SETTLE_S)
+        except DeviceError as exc:
+            self.sig_log.emit(
+                f"waypoint {waypoint.index}: {exc} — the stage is still "
+                f"moving after the fault; not re-issuing the approach")
+            raise
+
     def _grab(self, settle_s: float):
         if self._frames is None:
             return None
@@ -564,27 +668,11 @@ class GridScanner(QObject):
                     result.message = "aborted by user"
                     break
                 target = (waypoint.x_um, waypoint.y_um)
-                t_start = time.monotonic()
-                for step in backlash_fix(prev, target, backlash_um, approach):
-                    if self.abort_requested:
-                        break
-                    self._stage.move_abs_um(step[0], step[1], speed=speed)
-                    # The take-up is a move like any other: the driver
-                    # refuses to command one onto a moving axis, so the
-                    # next one waits for it to land (as does the target
-                    # move below, which is what this fix is for).
-                    self._stage.wait_idle(timeout_s=120.0)
-                if self.abort_requested:
-                    result.aborted = True
-                    result.message = "aborted by user"
-                    break
-                self._stage.move_abs_um(target[0], target[1], speed=speed)
-                prev = target
-                t_commanded = time.monotonic()
-                self._stage.wait_idle(timeout_s=120.0)
-                t_idle = time.monotonic()
-                result.timing.command_s += t_commanded - t_start
-                result.timing.travel_s += t_idle - t_commanded
+                # The approach may be retried; the readback and the capture
+                # below it are reached only once the stage is there.
+                t_idle = self._approach(waypoint, prev, target, backlash_um,
+                                        approach, speed, result.timing)
+                prev = target          # committed only by a LANDED approach
                 try:
                     pos = self._stage.get_position()  # READBACK, not commanded
                 except DeviceError as exc:
@@ -705,7 +793,8 @@ class GridScanner(QObject):
                  "failed": result.failed,
                  "timing_s": {"command": round(result.timing.command_s, 3),
                               "travel": round(result.timing.travel_s, 3),
-                              "stopped": round(result.timing.stopped_s, 3)},
+                              "stopped": round(result.timing.stopped_s, 3),
+                              "retries": result.timing.retries},
                  "message": result.message}, indent=2), encoding="utf-8")
         result.manifest_path = writer.manifest_path
         if not result.message and not result.aborted:

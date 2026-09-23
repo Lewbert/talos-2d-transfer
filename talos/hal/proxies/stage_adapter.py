@@ -23,9 +23,15 @@ import time
 from typing import Any, Callable
 
 from talos.hal.base import (
+    CommandRejectedError,
+    DeviceBusyError,
     DeviceConnectionError,
     DeviceError,
     DeviceTimeoutError,
+    EStopError,
+    LimitHitError,
+    NotConnectedError,
+    ProtocolError,
     StageSpeed,
 )
 from talos.models import StagePosition, StageStatus
@@ -44,6 +50,31 @@ _WAIT_POLL_S = 0.05
 #: must fail the waypoint rather than spin to the timeout.
 _MAX_WAIT_FAILURES = 3
 
+#: The exception classes a failed job can carry, found by NAME: the proxy
+#: reports a failure as three strings over a Qt signal
+#: (``device_proxy``: ``sig_command_failed(job_id, type(exc).__name__,
+#: str(exc))``), so the class is reassembled from the string here.
+#:
+#: Keeping it is not cosmetic. The scan retries an approach that a TIMEOUT
+#: interrupted, and must not retry a limit switch or an e-stop — those are
+#: the hardware ANSWERING, and asking again does not change the answer.
+#: Flattening every failure into ``DeviceError`` (which this used to do)
+#: threw away the only thing that decision can be made on.
+_ERROR_TYPES = {cls.__name__: cls for cls in (
+    DeviceConnectionError, DeviceTimeoutError, ProtocolError,
+    CommandRejectedError, DeviceBusyError, LimitHitError, EStopError,
+    NotConnectedError)}
+#: The reason the proxy gives the jobs it drops when the port is being
+#: reopened (``_fail_queued``) — not a driver error name, so it is mapped
+#: by hand rather than by the table above.
+_ERROR_TYPES["Reconnecting"] = DeviceConnectionError
+
+
+def _job_error(method: str, exc_type: str | None, message: str) -> DeviceError:
+    """The exception a failed job becomes (see ``_ERROR_TYPES``)."""
+    cls = _ERROR_TYPES.get(str(exc_type or ""), DeviceError)
+    return cls(f"zolix.{method}: {exc_type}: {message}")
+
 
 class ManagerStageAdapter:
     """Blocking stage façade for the grid scan (XYRStage subset)."""
@@ -54,7 +85,8 @@ class ManagerStageAdapter:
         self._stage_cfg = dict(stage_cfg or {})
         self._abort_check = abort_check or (lambda: False)
         self._cond = threading.Condition()
-        self._done: dict[int, tuple[Any, str | None]] = {}
+        #: job id -> (result, failure type name, failure message)
+        self._done: dict[int, tuple[Any, str | None, str | None]] = {}
         self._attached = True
         manager.sig_job_done.connect(self._on_job_done)
         manager.sig_job_failed.connect(self._on_job_failed)
@@ -80,9 +112,10 @@ class ManagerStageAdapter:
             except (RuntimeError, TypeError):
                 pass
 
-    def _record(self, job_id: int, result: Any, error: str | None) -> None:
+    def _record(self, job_id: int, result: Any, error: str | None,
+                error_type: str | None = None) -> None:
         with self._cond:
-            self._done[job_id] = (result, error)
+            self._done[job_id] = (result, error_type, error)
             while len(self._done) > _MAX_TRACKED_JOBS:
                 self._done.pop(next(iter(self._done)))
             self._cond.notify_all()
@@ -91,7 +124,7 @@ class ManagerStageAdapter:
         self._record(job_id, result, None)
 
     def _on_job_failed(self, job_id: int, exc_type: str, message: str) -> None:
-        self._record(job_id, None, f"{exc_type}: {message}")
+        self._record(job_id, None, message, exc_type)
 
     def _call(self, method: str, *args, timeout_s: float = 60.0) -> Any:
         """Submit one job and block until it completes.
@@ -122,9 +155,9 @@ class ManagerStageAdapter:
                     raise DeviceTimeoutError(
                         f"zolix.{method} did not complete within {timeout_s:.0f} s")
                 self._cond.wait(min(remaining, _WAIT_POLL_S))
-            result, error = self._done.pop(job_id)
+            result, exc_type, error = self._done.pop(job_id)
         if error is not None:
-            raise DeviceError(f"zolix.{method}: {error}")
+            raise _job_error(method, exc_type, error)
         return result
 
     # ------------------------------------------------------------------

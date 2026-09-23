@@ -180,3 +180,46 @@ def test_the_manifest_is_complete_when_run_returns(manager, qapp, tmp_path):
     for row in rows:
         assert (tmp_path / "frames" / row["frame"]).exists()
     assert [p.name for p in result.frames] == [row["frame"] for row in rows]
+
+
+def test_a_driver_timeout_is_retried_through_the_manager(manager, qapp,
+                                                         tmp_path,
+                                                         monkeypatch):
+    """The bench report, end to end on the app's own path.
+
+    One zolix timeout aborted a whole scan. The fault here is raised by the
+    DRIVER, so the journey is the real one: the device worker catches it, the
+    proxy reports ``("DeviceTimeoutError", message)`` up a Qt signal, the
+    adapter reassembles the class from that name — and the scan, which can
+    only retry a fault it can tell apart from a limit switch, re-issues the
+    approach. Before the type survived that trip, every fault arrived as a
+    plain DeviceError and none of them was retryable.
+    """
+    from talos.hal.base import DeviceTimeoutError
+    from talos.hal.sim import SimZolixXYRStage
+
+    adapter = _adapter(manager)
+    frames = InstantFrameSource()
+    scanner = GridScanner(adapter, frames)
+    params = ScanParams(x0_um=0.0, y0_um=0.0, width_um=200.0, height_um=100.0,
+                        overlap=0.0, settle_ms=0, return_to_start=False)
+
+    real_move = SimZolixXYRStage.move_abs_um
+    calls = {"n": 0}
+
+    def flaky_move(self, *args, **kwargs):
+        calls["n"] += 1
+        if calls["n"] == 5:                    # partway through, like the bench
+            raise DeviceTimeoutError("No Modbus reply on COM3")
+        return real_move(self, *args, **kwargs)
+
+    monkeypatch.setattr(SimZolixXYRStage, "move_abs_um", flaky_move)
+    result = _run_with_the_gui_pumping(scanner, params, tmp_path, qapp)
+    adapter.close()
+
+    assert result.complete, result.message
+    assert not result.stopped_early
+    assert result.timing.retries == 1
+    assert result.visited == result.planned
+    assert frames.calls == result.planned
+    assert calls["n"] == result.planned + 1

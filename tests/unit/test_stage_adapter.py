@@ -21,7 +21,8 @@ class StubManager(QObject):
     sig_job_done = Signal(int, object)
     sig_job_failed = Signal(int, str, str)
 
-    def __init__(self, results=None, fail=None, disabled=False, sequence=None):
+    def __init__(self, results=None, fail=None, disabled=False, sequence=None,
+                 fail_type=None):
         super().__init__()
         self.jobs: list[tuple] = []
         self.last_position: dict = {}
@@ -30,6 +31,9 @@ class StubManager(QObject):
         #: value that changes between reads (moving → stopped, say)
         self._sequence = {k: list(v) for k, v in (sequence or {}).items()}
         self._fail = fail or {}
+        #: per-method exception CLASS NAME, as the real proxy reports it
+        #: (``type(exc).__name__``); anything unlisted is a plain DeviceError
+        self._fail_type = fail_type or {}
         self._disabled = disabled
         self._next = 0
 
@@ -40,7 +44,9 @@ class StubManager(QObject):
         self._next += 1
         job_id = self._next
         if method in self._fail:
-            self.sig_job_failed.emit(job_id, "DeviceError", self._fail[method])
+            self.sig_job_failed.emit(
+                job_id, self._fail_type.get(method, "DeviceError"),
+                self._fail[method])
         else:
             feed = self._sequence.get(method)
             result = feed.pop(0) if feed else self._results.get(method)
@@ -89,6 +95,60 @@ def test_scan_speed_config_reaches_the_adapter():
 def test_job_failure_surfaces_as_device_error():
     adapter, _ = _adapter(fail={"move_abs_um": "axes are moving"})
     with pytest.raises(DeviceError, match="axes are moving"):
+        adapter.move_abs_um(1.0, 1.0)
+
+
+def test_a_driver_timeout_keeps_its_type():
+    """The class the driver raised must survive the trip through the
+    proxy's ``(job_id, type_name, message)`` signal.
+
+    The scan retries a timeout and must NOT retry a limit switch: one is a
+    lost reply, the other is the controller answering "no". Flattening both
+    into DeviceError (which this used to do) leaves nothing to decide on.
+    """
+    adapter, _ = _adapter(fail={"move_abs_um": "No Modbus reply on COM3"},
+                          fail_type={"move_abs_um": "DeviceTimeoutError"})
+    with pytest.raises(DeviceTimeoutError):
+        adapter.move_abs_um(1.0, 1.0)
+
+
+def test_a_limit_fault_keeps_its_type():
+    from talos.hal.base import LimitHitError
+
+    adapter, _ = _adapter(fail={"move_abs_um": "Modbus exception 0x07"},
+                          fail_type={"move_abs_um": "LimitHitError"})
+    with pytest.raises(LimitHitError):
+        adapter.move_abs_um(1.0, 1.0)
+
+
+def test_an_unknown_failure_type_falls_back_to_device_error():
+    """A driver bug, an AttributeError — retrying one would hide it, so the
+    fallback is the base class, which nothing retries."""
+    adapter, _ = _adapter(fail={"move_abs_um": "boom"},
+                          fail_type={"move_abs_um": "RuntimeError"})
+    with pytest.raises(DeviceError) as info:
+        adapter.move_abs_um(1.0, 1.0)
+    assert not isinstance(info.value, DeviceTimeoutError)
+    assert type(info.value) is DeviceError
+
+
+def test_a_reconnecting_refusal_is_a_connection_error():
+    """The proxy drops queued jobs with this non-driver reason when the port
+    is reopening; the stage is GONE, which is not a transient timing fault."""
+    from talos.hal.base import DeviceConnectionError
+
+    adapter, _ = _adapter(fail={"get_position": "device is reconnecting"},
+                          fail_type={"get_position": "Reconnecting"})
+    with pytest.raises(DeviceConnectionError):
+        adapter.get_position()
+
+
+def test_the_message_still_names_the_driver_error():
+    """The log greps and the panel's status line read this text."""
+    adapter, _ = _adapter(fail={"move_abs_um": "Frame too short"},
+                          fail_type={"move_abs_um": "ProtocolError"})
+    with pytest.raises(DeviceError,
+                       match=r"zolix\.move_abs_um: ProtocolError: Frame too short"):
         adapter.move_abs_um(1.0, 1.0)
 
 
