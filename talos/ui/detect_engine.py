@@ -41,6 +41,15 @@ from talos.cv.identify import IdentifyPipeline, render_overlay
 #: preview every ~7 frames keeps the GUI thread free and the panel usable.
 DEFAULT_INTERVAL_MS = 140
 
+#: What a LIVE job computes. Derived from what the operator can actually
+#: see (``SampleFindingWorkspace._live_level``), because the alternative —
+#: running the chain for a view nobody is looking at — was the bench's
+#: "it is doing work in the background" report. Tiles are always FULL: a
+#: tile that is not identified is a sample that was not found.
+LIVE_NONE = "none"            # nothing to show but the raw frame
+LIVE_PREPROCESS = "preprocess"   # the pre-processed view
+LIVE_FULL = "full"            # ...and the identification, for the samples view
+
 
 @dataclass
 class DetectJob:
@@ -58,6 +67,9 @@ class DetectJob:
     flip: bool = False    # the camera flip, for the px→stage mapping
     preprocess: object = None    # PreprocessConfig | None
     colour: object = None        # the picked colour, for the curve's centre
+    #: How much of the chain to run for a LIVE job (see the LIVE_* names).
+    #: Ignored for a tile: those are always identified.
+    level: str = LIVE_FULL
 
 
 class _DetectWorker(QThread):
@@ -65,6 +77,9 @@ class _DetectWorker(QThread):
 
     #: index, IdentifyResult, the pre-processed frame, the overlay
     sig_result = Signal(int, object, object, object)
+    #: The index of a job that RAISED. Its slot has to be freed somewhere,
+    #: and the result signal cannot carry that.
+    sig_failed = Signal(int)
     sig_log = Signal(str)
 
     def __init__(self, parent: QObject | None = None):
@@ -93,14 +108,26 @@ class _DetectWorker(QThread):
                 # two processed views — so the mask can only ever find
                 # colours that are on the screen the operator tuned it on.
                 work = pre.apply(job.frame, job.preprocess, job.colour)
-                result = IdentifyPipeline().run(
-                    work, job.calib, config=job.config,
-                    stage_pos=job.stage_pos, scale=job.scale,
-                    flip=job.flip, frame_scale=job.frame_scale)
-                overlay = (render_overlay(work, result)
-                           if job.render else None)
+                if job.level == LIVE_PREPROCESS:
+                    # The pre-processed view is on screen and the samples
+                    # view is not: the mask and the overlay are work for
+                    # nobody, and the frame is still handed on.
+                    result = None
+                    overlay = None
+                else:
+                    result = IdentifyPipeline().run(
+                        work, job.calib, config=job.config,
+                        stage_pos=job.stage_pos, scale=job.scale,
+                        flip=job.flip, frame_scale=job.frame_scale)
+                    overlay = (render_overlay(work, result)
+                               if job.render else None)
             except Exception as exc:  # noqa: BLE001 - never kill the scan
                 self.sig_log.emit(f"detection failed: {exc}")
+                # The slot has to be freed even when the job raised: the
+                # live feed stops for the session if _busy is left set, and
+                # a tile that never decrements keeps the export waiting for
+                # a queue that will never drain.
+                self.sig_failed.emit(job.index)
                 continue
             self.sig_result.emit(job.index, result, work, overlay)
 
@@ -117,11 +144,13 @@ class DetectionEngine(QObject):
         super().__init__(parent)
         self._worker = _DetectWorker(self)
         self._worker.sig_result.connect(self._on_result)
+        self._worker.sig_failed.connect(self._on_failed)
         self._worker.sig_log.connect(self.sig_log)
         self._worker.start()
         self._source = None            # () -> the eight-tuple below
         self._busy = False
         self._live_on = False
+        self._live_level = LIVE_FULL
         self._suspended = False
         self._tiles_outstanding = 0
         self._timer = QTimer(self)
@@ -165,8 +194,22 @@ class DetectionEngine(QObject):
     def suspended(self) -> bool:
         return self._suspended
 
+    def set_live_level(self, level: str) -> None:
+        """How much of the chain the live feed should run (see the LIVE_*
+        names). Set from what the operator can see — the view mode and
+        whether the tab is the visible page."""
+        level = str(level)
+        if level not in (LIVE_NONE, LIVE_PREPROCESS, LIVE_FULL):
+            level = LIVE_FULL
+        self._live_level = level
+
+    @property
+    def live_level(self) -> str:
+        return self._live_level
+
     def _tick(self) -> None:
-        if self._busy or self._source is None or self._suspended:
+        if (self._busy or self._source is None or self._suspended
+                or self._live_level == LIVE_NONE):
             return                 # one job in flight: drop, don't queue
         try:
             item = self._source()
@@ -177,13 +220,16 @@ class DetectionEngine(QObject):
             return
         (frame, calib, stage_pos, config, scale, flip,
          preprocess, colour) = item
-        if frame is None or config is None:
+        if frame is None:
+            return
+        if config is None and self._live_level == LIVE_FULL:
             return
         self._busy = True
         self._worker.submit(DetectJob(index=-1, frame=frame, calib=calib,
                                       stage_pos=stage_pos, config=config,
                                       scale=scale, render=True, flip=flip,
-                                      preprocess=preprocess, colour=colour))
+                                      preprocess=preprocess, colour=colour,
+                                      level=self._live_level))
 
     # --- the scan feed --------------------------------------------------
 
@@ -203,7 +249,8 @@ class DetectionEngine(QObject):
                                       config=config, scale=scale,
                                       frame_scale=frame_scale,
                                       render=False, flip=flip,
-                                      preprocess=preprocess, colour=colour))
+                                      preprocess=preprocess, colour=colour,
+                                      level=LIVE_FULL))
 
     @property
     def busy(self) -> bool:
@@ -224,6 +271,20 @@ class DetectionEngine(QObject):
         elif self._tiles_outstanding > 0:
             self._tiles_outstanding -= 1
         self.sig_result.emit(index, result, preprocessed, overlay)
+
+    def _on_failed(self, index: int) -> None:
+        """Free the slot of a job that raised (it emits no result).
+
+        Without this the live feed stops for the rest of the session
+        (``_busy`` is only ever cleared by a live result) and a tile job that
+        raised keeps ``pending_tiles`` above zero forever — which also holds
+        the run's exports hostage, because they wait for that number to reach
+        zero. One bad frame must cost one frame.
+        """
+        if index < 0:
+            self._busy = False
+        elif self._tiles_outstanding > 0:
+            self._tiles_outstanding -= 1
 
     def shutdown(self) -> None:
         self._timer.stop()

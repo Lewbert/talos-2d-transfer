@@ -155,38 +155,43 @@ def test_the_gui_thread_never_runs_the_chain(qapp):
     put — the failure this guards against is someone moving the chain INTO
     the tick, where a queue assertion would still pass and the whole
     application would stutter between frames.
+
+    The "and it really ran" half is not decoration: this test used to build
+    a ``PreprocessConfig(brightness=…)``, a field that stopped existing when
+    the tone operations were removed, so the source raised, the tick caught
+    it and returned, and both assertions passed without any chain work at
+    all — including if the chain had moved onto the GUI thread.
     """
     import time as _time
 
     from talos.cv import preprocess as pre
-    from talos.ui.detect_engine import DetectionEngine
+    from talos.ui.detect_engine import DetectionEngine, LIVE_FULL
 
     original = pre.apply
+    ran: list = []
 
     def slow(img, cfg, centre=None):
-        _time.sleep(0.4)
+        ran.append(1)               # this runs on the WORKER, not the tick
+        _time.sleep(0.3)
         return original(img, cfg, centre)
 
     engine = DetectionEngine(interval_ms=30)
     try:
+        engine.set_live_level(LIVE_FULL)
         engine.set_source(lambda: (_frame(), CALIB, None, _config(), 0.5,
-                                   False,
-                                   PreprocessConfig(enabled=True,
-                                                    brightness=5.0),
-                                   (200, 120, 120)))
+                                   False, _preprocess(), SUBSTRATE))
+        pre.apply = slow
         started = _time.perf_counter()
         engine._tick()
         elapsed = _time.perf_counter() - started
         assert elapsed < 0.05, \
             f"the tick blocked for {elapsed:.3f}s — the chain is on the GUI thread"
 
-        # and the work really is happening: with a slow chain the worker is
-        # still busy a moment later, which is where the time went
-        pre.apply = slow
-        engine._busy = False
-        started = _time.perf_counter()
-        engine._tick()
-        assert _time.perf_counter() - started < 0.05
+        deadline = _time.monotonic() + 3.0
+        while _time.monotonic() < deadline and not ran:
+            qapp.processEvents()
+            _time.sleep(0.01)
+        assert ran, "the chain never ran — this test passed vacuously"
     finally:
         pre.apply = original
         engine.shutdown()
@@ -233,4 +238,55 @@ def test_a_suspended_engine_stops_sampling_but_finishes_its_tiles(qapp):
             time.sleep(0.01)
         assert calls, "the live feed did not come back"
     finally:
+        engine.shutdown()
+
+
+def test_a_preprocess_only_job_skips_the_pipeline(qapp):
+    """The Pre-processed view shows the chain's output and nothing of the
+    mask: running the identification for it is work for nobody."""
+    from talos.ui.detect_engine import LIVE_PREPROCESS
+
+    index, result, preprocessed, overlay = _run(
+        qapp, preprocess=_preprocess(), colour=SUBSTRATE,
+        level=LIVE_PREPROCESS)
+    assert index < 0
+    assert result is None and overlay is None
+    assert preprocessed is not None
+    assert preprocessed.shape == _frame().shape
+    assert preprocessed is not None and not np.array_equal(preprocessed,
+                                                           _frame())
+
+
+def test_a_job_that_raises_still_frees_its_slot(qapp):
+    """A live job that raised used to leave ``_busy`` set for the rest of
+    the session — the previews never came back — and a tile job that raised
+    left ``pending_tiles`` above zero for ever, which also held the run's
+    exports hostage: they wait for that number to reach zero, so a run whose
+    last tile raised wrote no mosaic, no annotated mosaic and no CSV."""
+    from talos.cv import preprocess as pre
+    from talos.ui.detect_engine import DetectionEngine
+
+    original = pre.apply
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("no frame for you")
+
+    engine = DetectionEngine(interval_ms=30)
+    try:
+        pre.apply = boom
+        engine.set_source(lambda: (_frame(), CALIB, None, _config(), 0.5,
+                                   False, _preprocess(), SUBSTRATE))
+        engine.set_live(True)
+        engine._tick()
+        engine.submit_tile(3, _frame(), CALIB, None, _config(),
+                           preprocess=_preprocess(), colour=SUBSTRATE)
+        deadline = time.monotonic() + 3.0
+        while time.monotonic() < deadline and (engine.busy
+                                               or engine.pending_tiles):
+            qapp.processEvents()
+            time.sleep(0.01)
+        assert not engine.busy, "the live slot latched busy for the session"
+        assert engine.pending_tiles == 0, "the tile slot never drained"
+    finally:
+        pre.apply = original
         engine.shutdown()

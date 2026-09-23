@@ -111,6 +111,10 @@ class MainWindow(QMainWindow):
             input_system=self._input)
         self._tabs.addTab(self._navigation, "Navigation")
         self._tabs.addTab(self._sample_finding, "Sample Finding")
+        # The tab starts on Navigation, so the detection feed starts off:
+        # without this the Sample Finding tab would run a pre-process and an
+        # identification per tick until the operator first opened it.
+        self._sample_finding.set_viewing(self._tabs.currentIndex() == 1)
         # The objective selector rides the workspace bar's right corner
         # (the combo is the operator's source of truth — the nosepiece is
         # manual) and is shared by every workspace.
@@ -705,6 +709,10 @@ class MainWindow(QMainWindow):
         self._apply_camera_profile(profile)
         # The AF ROI overlay + rubber band follow the visible workspace.
         self._route_af_roi_to(self._active_live_view())
+        # ...and so does the detection feed: the Navigation tab shows a raw
+        # live view and nothing else, so a pre-process + identification per
+        # tick behind it is work for nobody.
+        self._sample_finding.set_viewing(index == 1)
 
     def _apply_camera_profile(self, profile) -> None:
         if self._scan_running():

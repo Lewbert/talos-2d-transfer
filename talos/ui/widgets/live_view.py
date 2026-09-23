@@ -280,12 +280,22 @@ class LiveViewWidget(QWidget):
         return self._live_frame
 
     def pick_frame(self) -> np.ndarray | None:
-        """The frame the dropper should sample: the pre-processed layer,
-        never what is on screen. In samples mode the display is darkened
-        and outlined, so sampling it would return a colour the sample does
-        not have — and with pre-processing off this is the raw frame, byte
-        for byte."""
-        if self._preprocessed_frame is not None:
+        """The frame the dropper should sample — the layer on screen.
+
+        Usually that is the pre-processed one: it IS the array the
+        identification ran on, so a colour picked off the screen is a colour
+        the mask will look for, by construction. It is never the composited
+        display (in samples mode that is darkened and outlined, and would
+        return a colour the sample does not have).
+
+        While the processed layers are HELD BACK, though, that array is a
+        picture of where the stage WAS — the click is mapped with the live
+        frame's geometry, so sampling the old array returns whatever sat at
+        those coordinates in a frame the operator is not looking at. The raw
+        frame is the honest answer then: it is the one on screen, and with
+        pre-processing off the two are the same array byte for byte.
+        """
+        if self._preprocessed_frame is not None and not self._processed_paused:
             return self._preprocessed_frame
         return self._live_frame
 

@@ -1478,6 +1478,75 @@ def test_the_samples_are_a_table_outside_the_settings_scroll(window):
         parent = parent.parentWidget()
 
 
+# --- the previews compute what is on screen, and nothing else -------------
+
+def test_the_live_feed_runs_only_for_the_view_that_needs_it(window):
+    """The bench finding: switching to Original — or leaving the tab —
+    kept a pre-process, a full identification and an overlay running per
+    tick behind an image nobody was looking at."""
+    from talos.ui.detect_engine import LIVE_FULL, LIVE_NONE, LIVE_PREPROCESS
+
+    finding = window._sample_finding
+    engine = finding._engine
+    window._on_workspace_changed(1)          # the operator opens the tab
+    try:
+        finding.set_view_mode("original")
+        assert engine.live_level == LIVE_NONE
+        assert not engine.live, "the feed runs for the raw view"
+
+        finding.set_view_mode("preprocessed")
+        assert engine.live_level == LIVE_PREPROCESS
+        assert engine.live
+
+        finding.set_view_mode("samples")
+        assert engine.live_level == LIVE_FULL
+        assert engine.live
+    finally:
+        finding.set_view_mode("original")
+
+
+def test_the_feed_stops_while_another_workspace_is_on_screen(window):
+    finding = window._sample_finding
+    finding.set_view_mode("samples")
+    window._on_workspace_changed(1)
+    assert finding._engine.live, "the tab's own page must feed"
+    window._on_workspace_changed(0)              # Navigation: raw view only
+    assert not finding._engine.live, "work behind a view that cannot show it"
+    window._on_workspace_changed(1)
+    assert finding._engine.live, "and it comes back"
+    finding.set_view_mode("original")
+
+
+def test_the_counts_are_cleared_when_the_pipeline_stops(window):
+    """Numbers on screen that describe neither the frame being shown nor
+    the chain as it is now are worse than no numbers."""
+    finding = window._sample_finding
+    window._on_workspace_changed(1)
+    try:
+        finding.set_view_mode("samples")
+        finding.identify_group.set_counts("colour 812 → size 12")
+        assert finding.identify_group.counts.text()
+        finding.set_view_mode("original")
+        assert finding.identify_group.counts.text() == ""
+    finally:
+        finding.set_view_mode("original")
+
+
+def test_a_pick_is_refused_while_the_stage_moves(window):
+    """The click is mapped with the frame on screen; the colour would come
+    from a layer computed before the move. Refusing is the honest answer."""
+    finding = window._sample_finding
+    before = finding.colour_group.hex_color()
+    finding.live_view.set_preprocessed_frame(np.full((20, 30, 3), 7, np.uint8))
+    finding._stage_moving = True
+    try:
+        finding.on_pick(5, 5)
+    finally:
+        finding._stage_moving = False
+    assert "moving" in finding.colour_group._hint.text()
+    assert finding.colour_group.hex_color() == before
+
+
 # --- a run owns the hardware (the scan lock) ------------------------------
 
 def test_a_run_disables_the_cv_and_camera_controls(window):

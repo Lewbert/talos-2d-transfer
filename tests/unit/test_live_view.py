@@ -291,16 +291,27 @@ def test_a_paused_processed_view_shows_the_live_frame(qapp):
     assert not view.processed_paused
 
 
-def test_the_dropper_keeps_sampling_the_processed_layer_while_paused(qapp):
-    """The pause is a DISPLAY decision. The mask searches the pre-processed
-    pixels, so a colour picked off a paused screen must still be the colour
-    the chain produced."""
+def test_the_dropper_samples_the_layer_that_is_on_screen(qapp):
+    """The colour comes from the layer the operator is LOOKING at.
+
+    While the processed views run that is the pre-processed layer — it is the
+    array the mask searched, so the pick is a colour it looks for by
+    construction. While they are HELD BACK it is not: that array is a picture
+    of where the stage was, and the click is mapped with the LIVE frame's
+    geometry, so sampling it returns whatever sat at those coordinates in a
+    frame nobody is looking at. (The previous version of this test asserted
+    the LAYER and so missed exactly that case.)
+    """
     view = LiveViewWidget()
     live, processed = _grey_frame(50), _grey_frame(200)
     view.show_frame(live)
     view.set_preprocessed_frame(processed)
-    view.set_processed_paused(True, "scanning — showing the live frame")
     assert view.pick_frame() is processed
+
+    view.set_processed_paused(True, "scanning — showing the live frame")
+    assert view.pick_frame() is live, \
+        "a paused view must not hand the dropper a frame from before the move"
+    assert int(view.pick_frame()[0, 0, 0]) == 50, "the pixel under the cursor"
 
 
 def test_a_paused_view_repaints_when_it_is_released(qapp):

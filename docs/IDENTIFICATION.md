@@ -259,12 +259,16 @@ shape the operator is judging. The darkening keeps the sample's own pixels
 visible inside the match, so the view reads as "this part of the wafer" rather
 than as a mask poster.
 
-**The dropper samples the pre-processed layer, never the display.** In Samples
-mode the screen is darkened and outlined, so picking from it would return a
-colour the sample does not have — and with pre-processing switched off that
-layer IS the raw frame, byte for byte. It is also the array the identification
-ran on, so a colour picked off the screen is a colour the mask will look for,
-by construction rather than by coincidence.
+**The dropper samples the layer that is on screen.** Normally that is the
+pre-processed one: it IS the array the identification ran on, so a colour
+picked off the screen is a colour the mask will look for, by construction
+rather than by coincidence. It is never the *composited* display — in Samples
+mode the screen is darkened and outlined, and sampling that would return a
+colour the sample does not have. And while the processed layers are **held
+back** (a moving stage, a running scan) it is the raw frame instead, because
+the held layer is a picture of where the stage *was* while the click is mapped
+with the frame actually on screen. A pick while an axis is moving is refused
+outright, with the reason, for the same reason.
 
 **...and it judges the patch it averaged, out loud.** The sample is a 9-px
 circular mean, not a pixel, so a click near a flake's edge returns the mean of
@@ -287,12 +291,30 @@ whole of a scan, which additionally **suspends the live feed** so the worker's
 time goes to the tiles.
 
 A caption over the image says why the frame on screen is not the layer the
-button names; a mode bar that is silently wrong is worse than a pause. Two
-things are deliberately not affected: the dropper (it keeps sampling the
-pre-processed layer, which is what the mask searches) and a *tile's* result,
-which no longer writes the display buffers at all — a tile is a different part
-of the sample, and letting it become the layer on screen (or the layer the
-dropper reads) is how the view jumps to a region nobody is looking at.
+button names; a mode bar that is silently wrong is worse than a pause. A
+*tile's* result is deliberately not affected: it no longer writes the display
+buffers at all — a tile is a different part of the sample, and letting it
+become the layer on screen (or the layer the dropper reads) is how the view
+jumps to a region nobody is looking at.
+
+### ...and the chain only runs for the view that is showing
+
+The same costs are what made the feed worth accounting for, so the live feed
+computes exactly what the visible view needs and nothing else:
+
+| On screen | What the worker does per tick |
+|---|---|
+| **Original** | nothing — the raw frame is already there |
+| **Pre-processed** | the pre-processing chain only (no mask, no overlay) |
+| **Samples** | the chain, the identification and the overlay |
+| the Navigation workspace | nothing — that tab has no chain to feed |
+
+Two consequences, both visible rather than silent. The live stage counts and
+the live sample list come from the identification, so they are **cleared** when
+the pipeline stops rather than left on screen describing an older frame — the
+identify group's readout is for the Samples view. And the scan's tiles are
+unaffected in every case: a tile that is not identified is a sample that was
+not found, so those are always run in full.
 
 The transfer (XYZ) axes are excluded on purpose: they never appear in the
 image, and their firmware has no busy flag, so a motion inferred from a

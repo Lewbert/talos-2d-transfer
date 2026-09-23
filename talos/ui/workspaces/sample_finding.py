@@ -43,7 +43,8 @@ from PySide6.QtWidgets import (
 )
 
 from talos.cv.identify import IdentifyConfig, sample_hex_stats
-from talos.ui.detect_engine import DetectionEngine
+from talos.ui.detect_engine import (LIVE_FULL, LIVE_NONE, LIVE_PREPROCESS,
+                                    DetectionEngine)
 from talos.ui.widgets.collapsible import CollapsibleGroup
 from talos.ui.widgets.control_groups import CameraGroup
 from talos.ui.widgets.hardware_strip import parse_focus, parse_zolix
@@ -93,6 +94,10 @@ class SampleFindingWorkspace(QWidget):
         self._last_frame = None
         #: The width of the frame the operator tunes on (see on_frame).
         self._reference_width = 0
+        #: Is this tab the workspace page on screen? Told by the main
+        #: window (see set_viewing); True until it says otherwise, so a tab
+        #: used on its own — a tool, a test — still runs its feed.
+        self._viewing = True
         #: True while an axis the camera can see is moving.
         self._stage_moving = False
         self._motion_hold = QTimer(self)
@@ -109,7 +114,7 @@ class SampleFindingWorkspace(QWidget):
         self.scan_panel.reload_preferences()
         self._sync_curve_centre()
         self.set_view_mode(self._stored_view_mode())
-        self._engine.set_live(True)
+        self._refresh_live_feed()
         # A scan or an autofocus run holds the processed views back for its
         # whole duration (see _refresh_processed_views).
         self._state.sig_mode_changed.connect(self._on_mode_changed)
@@ -237,7 +242,7 @@ class SampleFindingWorkspace(QWidget):
     def set_view_mode(self, mode: str) -> None:
         """Original / Pre-processed / Samples. Display only — but the last
         two are computed by the worker, so switching to them is also a
-        request for the preview feed to keep running."""
+        request for the preview feed to run."""
         self.live_view.set_view_mode(mode)
         button = self.mode_bar.buttons.get(self.live_view.view_mode)
         if button is not None and not button.isChecked():
@@ -245,8 +250,52 @@ class SampleFindingWorkspace(QWidget):
         self._settings.section("ui")["sample_view_mode"] = \
             self.live_view.view_mode
         self._settings.save()
-        self._engine.set_live(True)
+        self._refresh_live_feed()
         self._refresh_processed_views()
+
+    def set_viewing(self, viewing: bool) -> None:
+        """Is this tab the workspace page on screen?
+
+        Told rather than asked (``isVisible`` is False for every widget in a
+        window that has not been shown, which is every test). The Navigation
+        workspace shows a raw live view and nothing else, so a detection feed
+        running behind it is work for nobody.
+        """
+        viewing = bool(viewing)
+        if viewing == self._viewing:
+            return
+        self._viewing = viewing
+        self._refresh_live_feed()
+
+    def _live_level(self) -> str:
+        """What the live feed should compute: what is on screen, nothing more."""
+        if not self._viewing:
+            return LIVE_NONE
+        mode = self.live_view.view_mode
+        if mode == "samples":
+            return LIVE_FULL
+        if mode == "preprocessed":
+            return LIVE_PREPROCESS
+        return LIVE_NONE                      # the raw frame is already there
+
+    def _refresh_live_feed(self) -> None:
+        """Arm the feed for the level the visible view needs.
+
+        The bench finding: switching to Original, or leaving the tab, kept a
+        pre-process, a full identification and an overlay running per tick
+        behind an image nobody was looking at. The level is derived here,
+        once, instead of the four handlers that used to call
+        ``set_live(True)`` unconditionally.
+        """
+        level = self._live_level()
+        if level != self._engine.live_level and level != LIVE_FULL:
+            # The counts and the live sample list come from the pipeline.
+            # Left on screen they would be numbers that describe neither the
+            # frame being shown nor the chain as it is now.
+            self.identify_group.set_counts("")
+            self.scan_panel.show_live_candidates([])
+        self._engine.set_live_level(level)
+        self._engine.set_live(level != LIVE_NONE)
 
     def eventFilter(self, obj, event):  # noqa: N802
         if obj is self.live_view and event.type() == event.Type.Resize:
@@ -277,6 +326,16 @@ class SampleFindingWorkspace(QWidget):
         is the shape of the "it sometimes finds the other layer" report, so
         a patch that disagrees with itself says so.
         """
+        if self._stage_moving:
+            # The click is mapped with the frame on screen, but the layer
+            # the colour would come from was computed before the move: the
+            # two are pictures of different places. Say so rather than
+            # returning a colour from a region the operator has left.
+            self.colour_group.note(
+                "The stage is moving — a pick now would sample a frame that "
+                "is no longer on screen. Click again once it stops.",
+                tone="warn")
+            return
         frame = self.live_view.pick_frame()
         if frame is None:
             return
@@ -400,17 +459,17 @@ class SampleFindingWorkspace(QWidget):
     def _on_colour_changed(self) -> None:
         self._sync_curve_centre()
         self._persist_identify()
-        self._engine.set_live(True)
+        self._refresh_live_feed()
         self._refresh_processed_views()
 
     def _on_preprocess_changed(self) -> None:
         self._persist_preprocess()
-        self._engine.set_live(True)
+        self._refresh_live_feed()
         self._refresh_processed_views()
 
     def _on_identify_changed(self) -> None:
         self._persist_identify()
-        self._engine.set_live(True)
+        self._refresh_live_feed()
         self._refresh_processed_views()
 
     def _persist_identify(self) -> None:
@@ -478,8 +537,6 @@ class SampleFindingWorkspace(QWidget):
             frame_scale=self.frame_scale_for(frame))
 
     def _on_detected(self, index: int, result, preprocessed, overlay) -> None:
-        if result is None:
-            return
         if index < 0:
             # LIVE jobs only. A tile's frame is the same size and shape as
             # a live one but it is a different part of the sample: letting
@@ -488,9 +545,14 @@ class SampleFindingWorkspace(QWidget):
             # pre-processed layer — would return a colour from a tile the
             # operator is not looking at.
             self.live_view.set_preprocessed_frame(preprocessed)
-            self.live_view.set_overlay_frame(overlay)
+            if overlay is not None:
+                self.live_view.set_overlay_frame(overlay)
+            if result is None:
+                return          # a pre-processed-only job: nothing to count
             self.identify_group.set_counts(result.summary)
             self.scan_panel.show_live_candidates(result.candidates)
+            return
+        if result is None:
             return
         self.scan_panel.on_tile_result(index, result.candidates)
         # A tile just drained: the last one is what unpauses the previews
