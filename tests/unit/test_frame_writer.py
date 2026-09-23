@@ -10,7 +10,8 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from talos.cv.frame_writer import MANIFEST_HEADER, FrameWriter
+from talos.cv.frame_writer import (MANIFEST_HEADER, FrameWriter,
+                                   WriterStalledError)
 
 
 def _frame(w=16, h=8):
@@ -155,3 +156,33 @@ def test_the_manifest_header_is_the_documented_one(tmp_path):
     writer.close()
     with open(writer.manifest_path, newline="", encoding="utf-8") as handle:
         assert next(csv.reader(handle)) == MANIFEST_HEADER
+
+
+def test_a_wedged_writer_fails_the_run_instead_of_hanging_it(tmp_path,
+                                                             monkeypatch):
+    """A full queue is the intended backpressure; waiting for ever is not.
+
+    The scan folder is operator-chosen, so it can be a network share or a
+    spun-down disk that blocks inside one ``imwrite`` for minutes. The scan
+    thread would then be parked in ``put`` — where the abort flag is never
+    read and ``close()`` is never reached — so the run could not be
+    cancelled, the job would stay "scan", the axes would stay locked and
+    there would be no way out of the UI. It fails with a reason instead.
+    """
+    from talos.cv import frame_writer as fw
+
+    release = threading.Event()
+    monkeypatch.setattr(fw.FrameWriter, "_write",
+                        lambda self, item: release.wait(10.0))
+    monkeypatch.setattr(fw, "_ENQUEUE_TIMEOUT_S", 0.3)
+    writer = _writer(tmp_path, max_queue=1)
+    writer.start()
+    try:
+        writer.submit_missing(0, None, 0.0)     # the drain takes this and
+        time.sleep(0.05)                        # wedges inside it
+        writer.submit_missing(1, None, 1.0)     # fills the queue behind it
+        with pytest.raises(WriterStalledError):
+            writer.submit_missing(2, None, 2.0)
+    finally:
+        release.set()
+    assert writer.error and "not drained" in writer.error

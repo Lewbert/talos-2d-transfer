@@ -70,13 +70,19 @@ class DetectJob:
     #: How much of the chain to run for a LIVE job (see the LIVE_* names).
     #: Ignored for a tile: those are always identified.
     level: str = LIVE_FULL
+    #: Which scan run this tile belongs to (0 = the live feed). A run's
+    #: tiles queue behind the previous run's when the operator scans again
+    #: immediately, and without this the stragglers were filed into the NEW
+    #: run's sample list under the OLD run's indices.
+    token: int = 0
 
 
 class _DetectWorker(QThread):
     """The pipeline, on its own thread, fed by a queue."""
 
-    #: index, IdentifyResult, the pre-processed frame, the overlay
-    sig_result = Signal(int, object, object, object)
+    #: index, IdentifyResult, the pre-processed frame, the overlay, the run
+    #: token the job was submitted with
+    sig_result = Signal(int, object, object, object, int)
     #: The index of a job that RAISED. Its slot has to be freed somewhere,
     #: and the result signal cannot carry that.
     sig_failed = Signal(int)
@@ -129,14 +135,14 @@ class _DetectWorker(QThread):
                 # a queue that will never drain.
                 self.sig_failed.emit(job.index)
                 continue
-            self.sig_result.emit(job.index, result, work, overlay)
+            self.sig_result.emit(job.index, result, work, overlay, job.token)
 
 
 class DetectionEngine(QObject):
     """Owns the worker, the live timer, and the "one job in flight" rule."""
 
-    #: index, IdentifyResult, the pre-processed frame, the overlay
-    sig_result = Signal(int, object, object, object)
+    #: index, IdentifyResult, the pre-processed frame, the overlay, the token
+    sig_result = Signal(int, object, object, object, int)
     sig_log = Signal(str)
 
     def __init__(self, interval_ms: int = DEFAULT_INTERVAL_MS,
@@ -152,6 +158,9 @@ class DetectionEngine(QObject):
         self._live_on = False
         self._live_level = LIVE_FULL
         self._suspended = False
+        #: Bumped by ``begin_run``. A tile whose token is not the current
+        #: one is a straggler from the run before, and is dropped here.
+        self._run_token = 0
         self._tiles_outstanding = 0
         self._timer = QTimer(self)
         self._timer.setInterval(max(30, int(interval_ms)))
@@ -229,7 +238,8 @@ class DetectionEngine(QObject):
                                       stage_pos=stage_pos, config=config,
                                       scale=scale, render=True, flip=flip,
                                       preprocess=preprocess, colour=colour,
-                                      level=self._live_level))
+                                      level=self._live_level,
+                                      token=self._run_token))
 
     # --- the scan feed --------------------------------------------------
 
@@ -250,7 +260,18 @@ class DetectionEngine(QObject):
                                       frame_scale=frame_scale,
                                       render=False, flip=flip,
                                       preprocess=preprocess, colour=colour,
-                                      level=LIVE_FULL))
+                                      level=LIVE_FULL, token=self._run_token))
+
+    def begin_run(self) -> None:
+        """A new scan is starting: its tiles get their own identity.
+
+        Detection outlives the capture by design, so a run that is aborted
+        leaves tiles in this queue. The operator pressing *Scan* again starts
+        the next run immediately, and those stragglers used to arrive with
+        indices the new run also uses — listed as the new run's samples, at
+        the new run's positions, and ringed on its mosaic.
+        """
+        self._run_token += 1
 
     @property
     def busy(self) -> bool:
@@ -265,12 +286,19 @@ class DetectionEngine(QObject):
         for this to reach zero before writing a scan's results."""
         return self._tiles_outstanding
 
-    def _on_result(self, index, result, preprocessed, overlay) -> None:
+    def _on_result(self, index, result, preprocessed, overlay, token=0) -> None:
         if index < 0:
             self._busy = False         # the live slot is free again
         elif self._tiles_outstanding > 0:
             self._tiles_outstanding -= 1
-        self.sig_result.emit(index, result, preprocessed, overlay)
+        if index >= 0 and int(token) != self._run_token:
+            # A tile from the run before this one. It still counted as
+            # drained above (the job IS finished); its result is not ours.
+            self.sig_log.emit(
+                f"tile {index} was identified after its run ended — the "
+                f"result is not filed (it belongs to the previous scan)")
+            return
+        self.sig_result.emit(index, result, preprocessed, overlay, token)
 
     def _on_failed(self, index: int) -> None:
         """Free the slot of a job that raised (it emits no result).

@@ -55,9 +55,9 @@ from PySide6.QtWidgets import (
 from talos.cv.calibration import SENSOR_HEIGHT_PX, SENSOR_WIDTH_PX
 from talos.hal.base import StageSpeed
 from talos.cv.frame_source import LatestFrameSource
-from talos.cv.scan import (HILBERT, ONE_WAY, ORIGIN_LABELS, ORIGINS, PATHS,
-                           SERPENTINE, SPIRAL, GridScanner, plan_path,
-                           scan_speed_config)
+from talos.cv.scan import (HILBERT, MAX_PENDING_TILES, ONE_WAY,
+                           ORIGIN_LABELS, ORIGINS, PATHS, SERPENTINE, SPIRAL,
+                           GridScanner, plan_path, scan_speed_config)
 from talos.cv.scan_output import (candidate_rows, frames_from_manifest,
                                   write_outputs)
 from talos.ui.widgets.sample_review import SampleReviewWindow, SampleShot
@@ -138,6 +138,20 @@ def _path_toggle_value(path: str, serpentine: bool) -> str:
     if kind == SERPENTINE and not serpentine:
         return ONE_WAY
     return kind if kind in PATHS else SERPENTINE
+
+
+def _same_candidates(a, b) -> bool:
+    """Do two candidate lists describe the same samples?
+
+    Position and size only: those are what the operator sees in the table
+    (and what the live feed recomputes), so a match means the table would be
+    rebuilt into exactly what it already says.
+    """
+    if len(a) != len(b):
+        return False
+    return all((x.x_px, x.y_px, x.area_px2, x.area_um2)
+               == (y.x_px, y.y_px, y.area_px2, y.area_um2)
+               for x, y in zip(a, b))
 
 
 class _Worker(QThread):
@@ -861,16 +875,66 @@ class ScanPanel(QWidget):
         self._scan_hits[index] = list(candidates)
         if self._pending_export is not None:
             self._maybe_export()
-        self._show_candidates(self._flatten_scan_hits(),
-                              f"scan · {len(self._scan_hits)} tiles")
+        note = f"scan · {len(self._scan_hits)} tiles"
+        if self._can_append(index):
+            self._append_candidates(index, list(candidates), note)
+        else:
+            self._show_candidates(self._flatten_scan_hits(), note)
         self.refresh_markers()
 
+    def _can_append(self, index: int) -> bool:
+        """Is this tile's result an APPEND to what the table already shows?
+
+        Tiles are examined in capture order (the detection queue is FIFO),
+        so the usual case is: the table already lists every earlier tile and
+        nothing else. Appending one tile's rows is what keeps the table's
+        cost linear — rebuilding it is O(rows), once per tile, on the GUI
+        thread, which is quadratic over a run.
+        """
+        if not self._row_tiles or self._selected >= 0:
+            return False                     # live rows, or a chosen row
+        return all(tile >= 0 for tile in self._row_tiles) \
+            and index > self._row_tiles[-1]
+
+    def _append_candidates(self, index: int, candidates, note: str) -> None:
+        """Add one tile's rows without touching the ones already there."""
+        start = len(self._candidates)
+        self._row_tiles.extend([int(index)] * len(candidates))
+        self._candidates.extend(candidates)
+        rows = candidate_rows(candidates)
+        self._table.blockSignals(True)
+        self._table.setRowCount(len(self._candidates))
+        for offset, cells in enumerate(rows):
+            row = start + offset
+            cells = list(cells)
+            cells[0] = str(row + 1)          # the row's own number
+            for column, text in enumerate(cells):
+                self._table.setItem(row, column, QTableWidgetItem(text))
+            view = QTableWidgetItem("View")
+            view.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            view.setToolTip("Show the frame this sample was found in")
+            self._table.setItem(row, _VIEW_COLUMN, view)
+        self._table.blockSignals(False)
+        count = len(self._candidates)
+        self._samples_note.setText(
+            f"{count} sample(s) from the {note}." if count
+            else f"Nothing matched in the {note}.")
+        self._go_to_btn.setEnabled(self._selected >= 0 and self._job is None)
+
     def show_live_candidates(self, candidates) -> None:
-        """Detection finished for the live frame."""
-        self._live_candidates = list(candidates)
+        """Detection finished for the live frame.
+
+        Nothing is rebuilt when the list says what the table already says:
+        this arrives at the preview's cadence (~7 Hz), and on a static scene
+        the answer does not change between frames.
+        """
+        fresh = list(candidates)
         if self._job is None and not self._scan_hits:
-            self._show_candidates([(-1, cand) for cand in self._live_candidates],
-                                  "live view")
+            if fresh and self._candidates and _same_candidates(
+                    fresh, self._candidates):
+                return
+            self._live_candidates = fresh
+            self._show_candidates([(-1, cand) for cand in fresh], "live view")
 
     def _flatten_scan_hits(self) -> list[tuple[int, FlakeCandidate]]:
         """(tile index, candidate) for every found sample, in table order.
@@ -887,10 +951,16 @@ class ScanPanel(QWidget):
 
     def _show_candidates(self, pairs, source: str) -> None:
         """Rebuild the table. The rows come from the same formatter the CSV
-        export uses, so what is exported is what was shown."""
+        export uses, so what is exported is what was shown.
+
+        The operator's chosen row SURVIVES the rebuild when it still exists:
+        the table used to clear its selection on every result (and the live
+        feed sends one ~7 times a second), so a row picked to inspect — or to
+        *go to* — silently disappeared under the cursor.
+        """
+        keep = self._selected
         self._row_tiles = [int(tile) for tile, _cand in pairs]
         self._candidates = [cand for _tile, cand in pairs]
-        self._selected = -1
         rows = candidate_rows(self._candidates)
         self._table.blockSignals(True)
         self._table.setRowCount(len(rows))
@@ -902,14 +972,19 @@ class ScanPanel(QWidget):
             view.setToolTip("Show the frame this sample was found in")
             self._table.setItem(row, _VIEW_COLUMN, view)
         self._table.clearSelection()
+        if 0 <= keep < len(self._candidates):
+            self._selected = keep
+            self._table.selectRow(keep)
+        else:
+            self._selected = -1
         self._table.blockSignals(False)
         count = len(self._candidates)
         self._samples_note.setText(
             f"{count} sample(s) from the {source}." if count
             else f"Nothing matched in the {source}.")
         # an enabled button that only ever answers "select a sample first"
-        # is a button that lies
-        self._go_to_btn.setEnabled(count > 0 and self._job is None)
+        # is a button that lies — so it follows the SELECTION, not the count
+        self._go_to_btn.setEnabled(self._selected >= 0 and self._job is None)
 
     def _on_cell_clicked(self, row: int, column: int) -> None:
         """The View column opens the sample's frame."""
@@ -1244,7 +1319,9 @@ class ScanPanel(QWidget):
         # The new run's origin, latched BEFORE the plan is rebuilt: this is
         # the moment the results are let go, so the plan re-anchors here.
         self._origin = position
-        self._pending_export = None
+        # A pending export is NOT dropped: its payload carries its own copy
+        # of the results, and a run started before the detection queue
+        # drained would otherwise never have its mosaic or CSV written.
         self._forget_run()                     # the PREVIOUS run's frames
         # ... and the new run's folder, decided HERE rather than on the scan
         # thread: a sample can be reviewed while the run is still filling the
@@ -1260,8 +1337,14 @@ class ScanPanel(QWidget):
         self.progress.setValue(0)
         self.set_status("Scanning — Esc or Abort stops it")
         out_dir = self._run_dir
-        self._scan_worker = _Worker(lambda: self._run_scan(position, out_dir),
-                                    self)
+        # Read from the widgets HERE, on the GUI thread, and hand the values
+        # to the worker thread as arguments.
+        params = self.params_for(position)
+        fov = self.fov()
+        frame_shape = (tuple(self._latest_frame.shape)
+                       if self._latest_frame is not None else None)
+        self._scan_worker = _Worker(
+            lambda: self._run_scan(params, fov, out_dir, frame_shape), self)
         self._scan_worker.sig_log.connect(self._log)
         self._scan_worker.sig_done.connect(self._on_scan_done)
         # deleteLater AND drop the reference: keeping a Python handle to a
@@ -1362,22 +1445,34 @@ class ScanPanel(QWidget):
     def _forget_scan_worker(self) -> None:
         self._scan_worker = None
 
-    def _run_scan(self, origin: StagePosition, out_dir: Path):
+    def _run_scan(self, params: ScanParams, fov, out_dir: Path,
+                  frame_shape):
         """The scan thread. Owns the adapter and the scanner; every UI
-        update comes back as a queued signal."""
+        update comes back as a queued signal.
+
+        Everything a WIDGET holds is read before this thread starts (see
+        ``_begin_scan``) and arrives as arguments: ``params_for`` reads eight
+        spin boxes and a combo, and Qt widgets belong to the GUI thread.
+        """
         from talos.hal.proxies.stage_adapter import ManagerStageAdapter
 
         stage_cfg = scan_speed_config(self._settings.device("zolix"),
                                       float(self._prefs["speed_pps"]))
         adapter = ManagerStageAdapter(self._manager, stage_cfg,
                                       abort_check=self._scan_abort.is_set)
-        params = self.params_for(origin)
-        fov = self.fov()
         slot = getattr(self._manager, "frame_slot", None)
         source = LatestFrameSource(slot) if slot is not None else None
         if source is None:
             self._log("no frame slot — the scan will record positions only")
-        scanner = GridScanner(adapter, source, thumb_width=192)
+        # pending_tiles_fn is the pacing valve: tiles are never dropped, so
+        # without it a scan whose tiles are identified more slowly than they
+        # are captured queues whole frames (6 MB at 1080p, 25 MB at 4K)
+        # until the process runs out of memory. It has to be passed HERE —
+        # the scanner's default is "no pacing", which is right for the CLI
+        # benches and wrong for the app.
+        scanner = GridScanner(adapter, source, thumb_width=192,
+                              pending_tiles_fn=self.pending_tiles_fn,
+                              max_pending_tiles=MAX_PENDING_TILES)
         scanner.sig_progress.connect(self._on_progress)
         scanner.sig_tile.connect(self._on_tile)
         scanner.sig_frame.connect(self._on_scan_frame)
@@ -1394,9 +1489,7 @@ class ScanPanel(QWidget):
             result = scanner.run(
                 params, out_dir,
                 meta={"fov_um": fov, "objective_id": self._state.objective,
-                      "frame_shape": (self._latest_frame.shape
-                                      if self._latest_frame is not None
-                                      else None)})
+                      "frame_shape": frame_shape})
         finally:
             self._scanner = None
             adapter.close()
@@ -1493,6 +1586,18 @@ class ScanPanel(QWidget):
             text = f"Scan done: {len(result.frames)} frame(s){note}"
             self.set_status(text, tone="warn" if missing else None)
             self._log(f"scan done → {payload['out_dir']}")
+        # The results are copied HERE, while they are still this run's:
+        # detection drains behind the capture, and a new run clears the
+        # dictionaries — an export that read them later wrote an empty
+        # candidates.csv over a run that had found samples.
+        payload["hits"] = {index: list(items)
+                           for index, items in self._scan_hits.items()}
+        payload["tiles"] = dict(self._scan_tiles)
+        payload["flip"] = self._flip
+        payload["exports"] = {
+            "mosaic": bool(self._prefs["export_mosaic"]),
+            "candidates": bool(self._prefs["export_candidates"]),
+            "annotated": bool(self._prefs["export_annotated"])}
         self._pending_export = payload
         self._maybe_export()
 
@@ -1572,21 +1677,20 @@ class ScanPanel(QWidget):
         Detection outlives the capture by design (it must not slow the
         stage down), so "the scan finished" is not the same moment as "the
         results are in" — and the extras are computed here rather than at
-        the end of the run."""
+        the end of the run.
+
+        The payload's own copy of the results is made when the run ends
+        (``_on_scan_done``), not here: a run that is started while this one
+        is still draining clears the live dictionaries, and reading them at
+        export time then wrote an EMPTY candidates.csv over a run that
+        found samples.
+        """
         if self._pending_export is None or self._export_worker is not None:
             return
         if self._hits_outstanding():
             return
-        payload = dict(self._pending_export)
+        payload = self._pending_export
         self._pending_export = None
-        payload["hits"] = {index: list(items)
-                           for index, items in self._scan_hits.items()}
-        payload["tiles"] = dict(self._scan_tiles)
-        payload["flip"] = self._flip
-        payload["exports"] = {
-            "mosaic": bool(self._prefs["export_mosaic"]),
-            "candidates": bool(self._prefs["export_candidates"]),
-            "annotated": bool(self._prefs["export_annotated"])}
         self._export_worker = _Worker(
             lambda: self._finish_exports(payload), self)
         self._export_worker.sig_done.connect(self._on_export_done)
@@ -1620,14 +1724,23 @@ class ScanPanel(QWidget):
         STOPPED — Frame too short" for about a second and then quietly
         became "Scan done". The exports are a footnote to the outcome, not
         a second opinion about it.
+
+        And a second run can start while this one is writing (it reads every
+        frame from disk, so it takes seconds): the status line then belongs
+        to the NEW run, and the footnote goes to the log instead.
         """
         self._export_worker = None
-        if not summary:
-            return
-        detail = ", ".join(summary["written"]) or "nothing extra"
-        base = self._status_base or "Scan finished"
-        self.set_status(f"{base} · wrote {detail}", self._status_tone)
-        self._log(f"wrote {detail} to {summary['dir']}")
+        if summary:
+            detail = ", ".join(summary["written"]) or "nothing extra"
+            if self._job is not None:
+                self._log(f"wrote {detail} to {summary['dir']}")
+            else:
+                base = self._status_base or "Scan finished"
+                self.set_status(f"{base} · wrote {detail}", self._status_tone)
+                self._log(f"wrote {detail} to {summary['dir']}")
+        # The run whose export arrived while this one was writing.
+        if self._pending_export is not None:
+            self._maybe_export()
 
     # ------------------------------------------------------------------
     # the sample list

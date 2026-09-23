@@ -94,7 +94,7 @@ def _run(qapp, frame: np.ndarray | None = None, **job_kw):
 def test_the_chain_runs_before_the_mask(qapp):
     """The blob only reaches the picked colour AFTER the curve is applied —
     so finding it at all proves the ordering."""
-    _index, result, _pre, _overlay = _run(
+    _index, result, _pre, _overlay, _token = _run(
         qapp, preprocess=_preprocess(), colour=SUBSTRATE)
     assert len(result.candidates) == 1
     cand = result.candidates[0]
@@ -104,7 +104,7 @@ def test_the_chain_runs_before_the_mask(qapp):
 
 def test_without_the_chain_the_same_frame_finds_nothing(qapp):
     """The control for the test above: same frame, same mask, no chain."""
-    _index, result, preprocessed, _overlay = _run(
+    _index, result, preprocessed, _overlay, _token = _run(
         qapp, preprocess=PreprocessConfig())
     assert result.candidates == []
     # and with nothing enabled the pre-processed layer IS the raw frame
@@ -117,7 +117,7 @@ def test_the_two_views_are_built_from_the_preprocessed_layer(qapp):
     mask ran on — not on the raw frame with the mask's coordinates
     projected onto it. A darker filter, a brighter outline: if the two
     disagreed, the outlines would sit on the wrong pixels."""
-    _index, _result, preprocessed, overlay = _run(
+    _index, _result, preprocessed, overlay, _token = _run(
         qapp, preprocess=_preprocess(), colour=SUBSTRATE)
     assert overlay is not None
     assert overlay.shape == preprocessed.shape
@@ -138,7 +138,7 @@ def test_the_curve_does_not_lose_the_colour_it_is_centred_on(qapp):
     img = _frame()
     img[80:120, 100:140] = picked                 # already the picked colour
     pre = _preprocess()
-    _index, result, _pre, _overlay = _run(qapp, frame=img, preprocess=pre,
+    _index, result, _pre, _overlay, _token = _run(qapp, frame=img, preprocess=pre,
                                           colour=picked)
     assert len(result.candidates) == 1
 
@@ -200,7 +200,7 @@ def test_the_gui_thread_never_runs_the_chain(qapp):
 def test_the_worker_emits_both_views_from_one_transform(qapp):
     """Both processed views and the mask come from ONE array, so the
     operator can only tune against pixels the pipeline also saw."""
-    _index, result, preprocessed, overlay = _run(
+    _index, result, preprocessed, overlay, _token = _run(
         qapp, preprocess=_preprocess(), colour=SUBSTRATE)
     assert preprocessed is not None and overlay is not None
     assert result.mask is not None
@@ -208,7 +208,7 @@ def test_the_worker_emits_both_views_from_one_transform(qapp):
     assert overlay.shape == preprocessed.shape == _frame().shape
     # a tile job asks for no preview at all (render=False): the scan does
     # not pay for images it will not show
-    _index, _result, tile_pre, tile_overlay = _run(
+    _index, _result, tile_pre, tile_overlay, _token = _run(
         qapp, preprocess=_preprocess(), colour=SUBSTRATE, render=False)
     assert tile_overlay is None
     assert tile_pre is not None          # the layer is still handed back
@@ -246,7 +246,7 @@ def test_a_preprocess_only_job_skips_the_pipeline(qapp):
     mask: running the identification for it is work for nobody."""
     from talos.ui.detect_engine import LIVE_PREPROCESS
 
-    index, result, preprocessed, overlay = _run(
+    index, result, preprocessed, overlay, _token = _run(
         qapp, preprocess=_preprocess(), colour=SUBSTRATE,
         level=LIVE_PREPROCESS)
     assert index < 0
@@ -289,4 +289,63 @@ def test_a_job_that_raises_still_frees_its_slot(qapp):
         assert engine.pending_tiles == 0, "the tile slot never drained"
     finally:
         pre.apply = original
+        engine.shutdown()
+
+
+def test_a_previous_run_s_tile_is_not_filed_as_the_next_run_s(qapp,
+                                                              monkeypatch):
+    """Detection outlives the capture by design: a run that was aborted
+    leaves tiles in the queue, and the operator pressing Scan again starts
+    the next run immediately. Those stragglers arrive with indices the new
+    run also uses — listed as its samples, at its positions, and ringed on
+    its annotated mosaic."""
+    from talos.cv import preprocess as pre
+    from talos.ui.detect_engine import DetectionEngine
+
+    original = pre.apply
+
+    def slow(img, cfg, centre=None):
+        time.sleep(0.3)
+        return original(img, cfg, centre)
+
+    engine = DetectionEngine(interval_ms=1000)
+    delivered: list = []
+    engine.sig_result.connect(lambda *args: delivered.append(args))
+    logs: list = []
+    engine.sig_log.connect(logs.append)
+    monkeypatch.setattr(pre, "apply", slow)
+    try:
+        engine.begin_run()                     # run 1
+        engine.submit_tile(3, _frame(), CALIB, None, _config(),
+                           preprocess=_preprocess(), colour=SUBSTRATE)
+        engine.begin_run()                     # run 2 starts at once
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline and engine.pending_tiles:
+            qapp.processEvents()
+            time.sleep(0.02)
+        assert engine.pending_tiles == 0, "the job never drained"
+        assert not [args for args in delivered if args[0] >= 0], \
+            "the previous run's tile was delivered as this run's"
+        assert any("after its run ended" in line for line in logs), logs
+    finally:
+        engine.shutdown()
+
+
+def test_a_tile_from_the_current_run_is_delivered(qapp):
+    """The control for the test above: the filter must not eat live results."""
+    from talos.ui.detect_engine import DetectionEngine
+
+    engine = DetectionEngine(interval_ms=1000)
+    delivered: list = []
+    engine.sig_result.connect(lambda *args: delivered.append(args))
+    try:
+        engine.begin_run()
+        engine.submit_tile(3, _frame(), CALIB, None, _config(),
+                           preprocess=_preprocess(), colour=SUBSTRATE)
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline and not delivered:
+            qapp.processEvents()
+            time.sleep(0.02)
+        assert [args[0] for args in delivered] == [3]
+    finally:
         engine.shutdown()

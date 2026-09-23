@@ -378,6 +378,10 @@ class SampleFindingWorkspace(QWidget):
             widget.setEnabled(not busy)
         if busy:
             self.live_view.set_pick_mode(False)
+            # The run's tiles get an identity of their own, so the previous
+            # run's stragglers cannot be filed as this run's samples (see
+            # DetectionEngine.begin_run).
+            self._engine.begin_run()
 
     def _note_pick(self, colour: str, spread: float) -> None:
         """Say what the dropper sampled, and whether it trusted itself.
@@ -536,7 +540,8 @@ class SampleFindingWorkspace(QWidget):
             preprocess=self.preprocess_config(), colour=self.colour_rgb(),
             frame_scale=self.frame_scale_for(frame))
 
-    def _on_detected(self, index: int, result, preprocessed, overlay) -> None:
+    def _on_detected(self, index: int, result, preprocessed, overlay,
+                     token: int = 0) -> None:
         if index < 0:
             # LIVE jobs only. A tile's frame is the same size and shape as
             # a live one but it is a different part of the sample: letting

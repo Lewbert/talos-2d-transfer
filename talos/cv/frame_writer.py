@@ -30,7 +30,9 @@ Three properties the callers depend on:
   mosaic from the manifest).
 - **Bounded memory.** ``max_queue`` frames are held at most, and a full
   queue blocks the *writer's* caller — the scan thread — which is the
-  intended backpressure: a slow disk costs speed, never RAM.
+  intended backpressure: a slow disk costs speed, never RAM. The wait is
+  bounded too (see ``_ENQUEUE_TIMEOUT_S``): a disk that stops draining
+  entirely must fail the run, not wedge the thread that owns the abort flag.
 
 The writer is a plain thread, not a QThread: it has no event loop and no
 slots, and the signals it emits belong to the scanner (emitting a signal
@@ -44,15 +46,36 @@ import csv
 import logging
 import queue
 import threading
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
 import cv2
 
+from talos.hal.base import DeviceError
+
 logger = logging.getLogger(__name__)
 
 MANIFEST_HEADER = ["frame", "x_um", "y_um", "r_deg", "t_unix",
                    "objective_id", "focus_pos"]
+
+#: How long the scan thread will wait for room in the writer's queue before
+#: declaring the disk stalled. Long enough for a genuinely busy disk (a 4K
+#: PNG is tens of milliseconds), short enough that a wedged one fails the run
+#: while the operator is still watching it.
+_ENQUEUE_TIMEOUT_S = 20.0
+#: How often the wait re-checks that deadline (a blocking ``put`` gives the
+#: abort no chance to be noticed between attempts).
+_ENQUEUE_POLL_S = 0.2
+
+
+class WriterStalledError(DeviceError):
+    """The writer's queue did not drain — the run cannot be recorded.
+
+    A ``DeviceError`` so the scanner's own handler reports it as a stopped
+    run with a reason (its `except DeviceError` is where three outcomes are
+    told apart), rather than letting it escape as an unhandled exception.
+    """
 
 #: A sentinel that stops the drain loop. A module-level unique object so no
 #: real item can be mistaken for it.
@@ -118,7 +141,34 @@ class FrameWriter:
         self._enqueue(_Item(int(index), pos, None, float(t_unix)))
 
     def _enqueue(self, item: _Item) -> None:
-        self._queue.put(item)
+        """Queue one item, and never block the SCAN thread for ever.
+
+        The queue is the backpressure that keeps a slow disk from eating
+        RAM, so a full queue is normal and waiting is the point. Waiting
+        without a limit is not: the scan folder is operator-chosen, and one
+        on a network share or a spun-down disk blocks inside ``imwrite`` for
+        minutes. The scan thread would then be stuck in ``put`` — where the
+        abort flag is never read, ``close()`` is never reached and the run
+        can never unwind: no ``sig_done``, the job stays "scan", the axes
+        stay locked and there is no way out of the UI.
+
+        So the wait is bounded, and giving up is an ERROR of the writer
+        rather than a hang: the scan stops with a reason, which is what
+        ``close()`` already does for a wedged writer.
+        """
+        deadline = time.monotonic() + _ENQUEUE_TIMEOUT_S
+        while True:
+            try:
+                self._queue.put(item, timeout=_ENQUEUE_POLL_S)
+                return
+            except queue.Full:
+                if time.monotonic() >= deadline:
+                    self._note(
+                        f"the frame writer has not drained for "
+                        f"{_ENQUEUE_TIMEOUT_S:.0f} s (a stalled disk?) — "
+                        f"giving up on this tile")
+                    raise WriterStalledError(self._error or "the frame writer "
+                                                             "is stalled")
 
     def close(self, timeout_s: float = 60.0) -> str | None:
         """Finish what is queued and close the manifest.

@@ -40,8 +40,9 @@ from PySide6.QtWidgets import QWidget
 from talos.cv.orientation import axis_signs, mosaic_offset
 from talos.ui import theme
 
-#: Cap on the QImage conversions kept alive for painting. A 200-tile scan
-#: holds 200 small thumbnails; the oldest are dropped, not the newest.
+#: Cap on the tiles kept, pixels and all: the image AND the thumbnail behind
+#: it (see :meth:`ScanMapWidget.add_tile`). A 200-tile scan holds 200 small
+#: thumbnails; the oldest are dropped, not the newest.
 _MAX_TILES = 600
 
 
@@ -211,12 +212,21 @@ class ScanMapWidget(QWidget):
         self.update()
 
     def add_tile(self, tile: ScanMapTile) -> None:
+        """Keep the newest ``_MAX_TILES`` tiles, pixels and all.
+
+        The cap used to prune the QImages only, which bounded the wrong
+        thing: the numpy thumbnail behind each one stayed alive in
+        ``_tiles`` (62 kB at the panel's 192 px), so a 5000-tile run held
+        ~300 MB of arrays the cap was meant to bound — and drew the evicted
+        ones as empty outlines on top of it.
+        """
         self._tiles[tile.index] = tile
         if tile.thumb is not None:
             self._images[tile.index] = self._qimage(tile.thumb)
-        if len(self._tiles) > _MAX_TILES:
-            for key in sorted(self._images)[:len(self._images) - _MAX_TILES]:
-                self._images.pop(key, None)
+        while len(self._tiles) > _MAX_TILES:
+            oldest = min(self._tiles)
+            self._tiles.pop(oldest, None)
+            self._images.pop(oldest, None)
         self.update()
 
     def set_active_tile(self, x_um: float | None,

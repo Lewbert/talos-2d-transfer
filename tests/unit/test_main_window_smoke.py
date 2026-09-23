@@ -1547,6 +1547,124 @@ def test_a_pick_is_refused_while_the_stage_moves(window):
     assert finding.colour_group.hex_color() == before
 
 
+# --- the samples table: what it costs and what it keeps -------------------
+
+def test_a_selected_row_survives_the_next_result(window):
+    """The table is rebuilt on every result — and the live feed sends one at
+    the preview's cadence (~7 Hz), so a row the operator picked to inspect
+    (or to *go to*) used to vanish under the cursor with the button left
+    enabled over it."""
+    scan = window._sample_finding.scan_panel
+    scan.on_tile_result(3, [_candidate(area_um2=42.0)])
+    scan._table.selectRow(0)
+    assert scan._selected == 0 and scan._go_to_btn.isEnabled()
+
+    scan.on_tile_result(4, [_candidate(area_um2=9.0)])
+    assert scan._selected == 0, "the rebuild cleared the selection"
+    assert scan._go_to_btn.isEnabled()
+
+
+def test_go_to_is_not_offered_without_a_selection(window):
+    scan = window._sample_finding.scan_panel
+    scan.on_tile_result(3, [_candidate()])
+    assert scan._selected == -1
+    assert not scan._go_to_btn.isEnabled(), "a button that only answers 'select one'"
+
+
+def test_the_run_paces_itself_to_the_detector(window, monkeypatch, tmp_path):
+    """Tiles are never dropped, so a scan that outruns the identification
+    queue holds whole frames in memory (25 MB each at 4K) until the process
+    dies. The scanner has a valve for that; the APP has to wire it — its
+    default is no pacing, which is right for the CLI benches and wrong here.
+    """
+    from talos.cv.scan import MAX_PENDING_TILES
+    from talos.models import StagePosition
+    from talos.ui.widgets import scan_panel as sp
+
+    captured: dict = {}
+
+    class Inert:
+        """Signals (``.connect``) and ``run()``, all inert."""
+
+        def connect(self, *_args, **_kwargs):
+            pass
+
+        def __call__(self, *_args, **_kwargs):
+            return None
+
+    class FakeScanner:
+        def __init__(self, *_args, **kwargs):
+            captured.update(kwargs)
+
+        def __getattr__(self, _name):
+            return Inert()
+
+    monkeypatch.setattr(sp, "GridScanner", FakeScanner)
+    scan = window._sample_finding.scan_panel
+    scan.pending_tiles_fn = lambda: 7
+    scan._run_scan(scan.params_for(StagePosition()), (100.0, 100.0),
+                   tmp_path / "scan_pacing", (20, 30, 3))
+
+    assert captured.get("pending_tiles_fn") is not None, \
+        "the scan runs with no pacing valve"
+    assert captured.get("max_pending_tiles") == MAX_PENDING_TILES
+
+
+def test_a_tile_result_appends_instead_of_rebuilding(window):
+    """A full rebuild per tile is O(rows) on the GUI thread, Σ over a run is
+    quadratic — and it threw away every QTableWidgetItem each time."""
+    scan = window._sample_finding.scan_panel
+    scan.on_tile_result(0, [_candidate()])
+    first = scan._table.item(0, 0)
+    scan.on_tile_result(1, [_candidate()])
+    assert scan._table.rowCount() == 2
+    assert scan._table.item(0, 0) is first, "the first row was rebuilt"
+    assert [scan._table.item(row, 0).text() for row in range(2)] == ["1", "2"]
+    assert scan._row_tiles == [0, 1]
+
+
+def test_live_results_that_say_the_same_thing_do_not_rebuild(window):
+    scan = window._sample_finding.scan_panel
+    scan.show_live_candidates([_candidate()])
+    item = scan._table.item(0, 0)
+    scan.show_live_candidates([_candidate()])      # the same sample again
+    assert scan._table.item(0, 0) is item, "rebuilt for nothing"
+    scan.show_live_candidates([_candidate(area_um2=99.0)])
+    assert scan._table.item(0, 3).text() == "99.0"      # the area column
+
+
+def test_the_export_carries_its_own_copy_of_the_results(window):
+    """The extras read every frame from disk and take seconds; the operator
+    can start the next run in that window, which clears the live
+    dictionaries. Reading them at export time then wrote an EMPTY
+    candidates.csv over a run that had found samples."""
+    from pathlib import Path
+
+    from talos.cv.scan import ScanResult
+
+    scan = window._sample_finding.scan_panel
+    # the detector is still draining: this is the window the bug was in
+    saved_pending, scan.pending_tiles_fn = scan.pending_tiles_fn, lambda: 1
+    scan._scan_hits.clear()
+    scan.on_tile_result(3, [_candidate(area_um2=42.0)])
+    scan._scan_tiles[3] = (10.0, 20.0)
+    result = ScanResult(manifest_path=Path("C:/tmp/x.csv"), planned=4,
+                        visited=4)
+    scan._pending_export = None
+    scan._on_scan_done({"result": result, "out_dir": Path("C:/tmp"),
+                        "fov": (100.0, 100.0)})
+
+    assert scan._pending_export is not None
+    assert scan._pending_export.get("hits"), "the results were not copied"
+    # the next run clears the live dictionaries...
+    scan._scan_hits.clear()
+    scan._scan_tiles.clear()
+    # ...and the export still has them
+    assert scan._pending_export["hits"][3][0].area_um2 == pytest.approx(42.0)
+    assert scan._pending_export["tiles"][3] == (10.0, 20.0)
+    scan.pending_tiles_fn = saved_pending
+
+
 # --- a run owns the hardware (the scan lock) ------------------------------
 
 def test_a_run_disables_the_cv_and_camera_controls(window):
