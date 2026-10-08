@@ -436,6 +436,8 @@ The frozen build excludes the unwired camera backends. Drop an icon at
 
 ## License and citation
 
+Copyright © 2026 TALOS contributors.
+
 TALOS is free software under the **GNU General Public License, version 3
 (only)** — see [LICENSE](LICENSE). You may use, study, share and modify it,
 including at work, as long as anything you distribute stays under the GPL.
