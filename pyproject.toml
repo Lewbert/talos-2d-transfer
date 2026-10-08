@@ -14,8 +14,6 @@ dependencies = [
     "numpy>=1.26",
     "opencv-python>=4.8",
     "pyserial>=3.5",
-    "inputs>=0.5",
-    "scipy>=1.11",
 ]
 classifiers = [
     "Development Status :: 4 - Beta",

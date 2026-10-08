@@ -12,8 +12,6 @@ dependencies:
       - numpy>=1.26
       - opencv-python>=4.8
       - pyserial>=3.5
-      - inputs>=0.5
-      - scipy>=1.11
       - pytest>=7.0
       - pyinstaller>=6.3
       # the alternative camera backends (harvesters / pymmcore-plus) are

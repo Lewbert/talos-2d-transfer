@@ -4,8 +4,6 @@ PySide6>=6.6
 numpy>=1.26
 opencv-python>=4.8
 pyserial>=3.5
-inputs>=0.5
-scipy>=1.11
 
 # Development
 pytest>=7.0

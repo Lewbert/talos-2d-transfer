@@ -30,7 +30,6 @@ if os.path.isdir(icons_dir):
     datas.append((icons_dir, "resources/icons"))
 
 hiddenimports = [
-    "inputs",
     "serial",
 ]
 

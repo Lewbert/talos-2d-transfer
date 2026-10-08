@@ -158,11 +158,16 @@ rotates the image and never touches an axis.
 - **Sample Finding** — three columns: the camera and the computer vision on the
   left, the live view in the middle, and the scan on the right.
 
-  **Left.** The sample colour is pinned at the top — the one control touched
-  constantly, because it is both the mask's target and the centre of the
+  **Left.** The sample colour is pinned at the top, with the dropper that takes
+  it and the patch size a pick averages — the one control touched constantly,
+  because the colour is both the mask's target and the centre of the
   local-contrast curve. Below it, foldable groups for the camera's manual
   profile (identification needs a stable image, not an auto-adjusted one), the
-  **pre-processing** chain and the **identification** chain.
+  **pre-processing** chain, and the **identification** card, which IS the
+  chain in the order it runs: the colour match first — one of three matching
+  methods, each a tab with its own settings — then clean-up, size, frame edge,
+  sharpness and merge ([docs/IDENTIFICATION.md](docs/IDENTIFICATION.md) has
+  the guidance and the numbers).
 
   **Centre.** The live view, with a floating **Original / Pre-processed /
   Samples** switch. *Pre-processed* is what the filters make of the frame — and
@@ -170,12 +175,14 @@ rotates the image and never touches an axis.
   result: everything the chain did not match darkened, every match outlined —
   brightly for what survived the chain, dimly for what a gate threw away. Both
   are display choices only: the stream, the autofocus and a running scan never
-  wait on them.
+  wait on them, and the chain computes nothing for a view that is not on
+  screen.
 
   **Right.** The scan map, the run card, the settings worth changing at the
   microscope (the only part that scrolls), and — pinned below them, always
   visible — the table of samples that were found, with *go to* to bring one
-  under the crosshair.
+  under the crosshair and a *View* column that opens the frame a sample was
+  found in, ringed.
 
   The **run card** is where a run starts, and it starts one of two ways: from
   where the stage is standing, or from the **origin**. The origin is the same
@@ -218,8 +225,9 @@ the objective's calibration**, with no manual override: the tile count follows
 the objective, and there is one number for the panel to state — `measured in
 TALOS` or `imported from Labscope`, or a plain warning when it can only
 estimate. *Scan from here* starts at the current position and returns there
-when it finishes. Overlap, settle, scan speed, backlash and which extra files a
-run writes live in **Preferences → Scan**.
+when it finishes. Overlap, settle, scan speed, backlash, the capture resolution
+(1080p or 4K) and which extra files a run writes live in
+**Preferences → Scan**.
 
 Identification runs on each captured frame on its own, at full resolution; the
 mosaic is an overview for the eye, and nothing measures from it. Every scan
@@ -228,7 +236,8 @@ mosaic with the found samples ringed and numbered, and the candidate list.
 
 A scan owns the axes while it runs: manual jogging is refused (the mode badge in
 the status bar says so), and **STOP ALL** — Esc or LB+RB — stops the stage and
-aborts the run.
+aborts the run. A fault the link can recover from — a timeout or a busy
+reply — is retried before the run gives up on a tile.
 
 Menus: **File**, **Edit → Preferences** (`Ctrl+,`), **Display** (overlays, scale
 bar), **Windows** (AF Detail, Stage Control, Log), **Help**. Display
@@ -369,7 +378,7 @@ python -m pytest                  # everything — the real-time simulations dom
 python -m pytest -m "not slow"    # the fast subset (order of a minute)
 ```
 
-About 890 tests (800 fast + 89 `slow`): unit tests for the drivers/CV/settings/UI
+About 1,675 tests (1,572 fast + 103 `slow`): unit tests for the drivers/CV/settings/UI
 wiring, integration tests for the job/stop/reconnect machinery, and closed-loop
 **simulations** that run the autofocus strategies and the grid scan against
 simulated hardware — the scan suite captures frames through the same frame slot
@@ -383,6 +392,9 @@ The bench tools that matter most day to day:
   new or reconfigured bench. Read-only unless you pass `--motion`.
 - `tools/dev_console.py` — a read-only device console (no motion), for looking at
   what an instrument actually reports.
+- `tools/scan_manager_bench.py --yes` — the grid scan driven through the real
+  manager, printing the per-tile stop/travel/command split (and a mid-flight
+  abort drill).
 - `tools/ui_shot.py`, `tools/ui_scale_check.py` — the UI screenshot rig and the
   scale-bar pixel check.
 - The rest — autofocus benches, camera and serial forensics, the hardware scan
