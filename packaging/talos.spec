@@ -28,6 +28,16 @@ icons_dir = os.path.join(ROOT, "resources", "icons")
 icon_path = os.path.join(icons_dir, "talos.ico")
 if os.path.isdir(icons_dir):
     datas.append((icons_dir, "resources/icons"))
+# The licences: TALOS's own GPL text, the third-party notices, and the
+# components' texts under packaging/licenses/ — the LGPL-3.0 text among them
+# is required to travel with the Qt DLLs this build ships.
+for _lic in ("LICENSE", "THIRD_PARTY_NOTICES.md"):
+    _lic_path = os.path.join(ROOT, _lic)
+    if os.path.isfile(_lic_path):
+        datas.append((_lic_path, "licenses"))
+_licenses_dir = os.path.join(ROOT, "packaging", "licenses")
+if os.path.isdir(_licenses_dir):
+    datas.append((_licenses_dir, "licenses"))
 
 hiddenimports = [
     "serial",

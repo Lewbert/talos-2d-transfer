@@ -111,10 +111,12 @@ pwsh -File packaging/build.ps1     # -> dist/TALOS/talos.exe (one-dir, portable)
 ```
 
 [packaging/talos.spec](../packaging/talos.spec) is a one-dir PyInstaller build: it bundles
-`resources/defaults`, `resources/qss` and `resources/icons`, and excludes the unwired camera
-backends plus Qt WebEngine/QML/Charts. Freeze early if you add a dependency that imports its
-extensions lazily — the two bugs the frozen build surfaced (gamepad initialisation and proxy
-shutdown) were invisible from source.
+`resources/defaults`, `resources/qss`, `resources/icons` and the licence set ([LICENSE](../LICENSE),
+[THIRD_PARTY_NOTICES.md](../THIRD_PARTY_NOTICES.md) and the component texts under
+[packaging/licenses/](../packaging/licenses/)), and excludes the unwired camera backends plus Qt
+WebEngine/QML/Charts. Freeze early if you add a dependency that imports its extensions lazily — the
+two bugs the frozen build surfaced (gamepad initialisation and proxy shutdown) were invisible from
+source.
 
 Drop an icon at `resources/icons/talos.ico` and it is embedded automatically; see
 [resources/icons/README.md](../resources/icons/README.md).

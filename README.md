@@ -436,5 +436,14 @@ The frozen build excludes the unwired camera backends. Drop an icon at
 
 ## License and citation
 
-TALOS is free software under the GNU General Public License, version 3 (only) — see [LICENSE](LICENSE); for commercial licensing, contact the author. If you use TALOS in academic work, cite the
-repository; [CITATION.cff](CITATION.cff) has the metadata to do so.
+TALOS is free software under the **GNU General Public License, version 3
+(only)** — see [LICENSE](LICENSE). You may use, study, share and modify it,
+including at work, as long as anything you distribute stays under the GPL.
+**If the GPL does not fit your use** — for example, embedding TALOS, in whole
+or in part, in a closed-source product — a separate commercial licence is
+available: contact the author ([@Lewbert](https://github.com/Lewbert)).
+
+If you use TALOS in academic work, cite the repository;
+[CITATION.cff](CITATION.cff) has the metadata to do so. Third-party
+components and their licences are listed in
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
